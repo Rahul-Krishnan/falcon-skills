@@ -1,0 +1,393 @@
+{
+  "project": "hindsight",
+  "skill_name": "hindsight",
+  "test_cases": [
+    {
+      "id": "TC-001",
+      "name": "Standard invocation with default args",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/hindsight",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json does NOT exist (first run)\n- ~/.claude/skills/hindsight/references/taxonomy.json does NOT exist (use hardcoded categories)\n- ~/.claude/skills/session-history/scripts/cclog.py exists (robust mode)\n- ~/.claude/hindsight/fingerprints/ has 3 fingerprint files within window\n- Simulate 5 sessions found across 2 projects\n\nWhen you would read files, simulate the output. When you would launch subagents, describe what each would do. Show the full Phase 0 setup, Phase 0.5 check, Phase 1 plan, Phase 2 synthesis approach, and Phase 3 report format.",
+      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
+      "target_skills": ["hindsight"],
+      "checks": [
+        {
+          "description": "Does the response parse arguments correctly (all defaults: window=null, tone=null, focus=null, viz=false, auto=false)?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No argument parsing shown",
+            "2": "Some args parsed but defaults wrong",
+            "3": "Args parsed with mostly correct defaults",
+            "4": "All args parsed correctly, minor omission",
+            "5": "All 5 args parsed with correct defaults, shown explicitly"
+          }
+        },
+        {
+          "description": "Does Phase 0 setup attempt to read last-retro.json, taxonomy, and check for cclog.py in parallel (multiple Read calls in one message)?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No Phase 0 setup shown",
+            "2": "Setup files read sequentially one at a time",
+            "3": "Some files read in parallel, some sequential",
+            "4": "All independent reads issued in parallel",
+            "5": "All independent reads in parallel, setup complete summary line shown"
+          }
+        },
+        {
+          "description": "Does the response explicitly label phases (Phase 0, Phase 0.5, Phase 1, etc.)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No phase labels",
+            "2": "Only 1-2 phases labeled",
+            "3": "Most phases labeled but some missing",
+            "4": "All major phases labeled",
+            "5": "All phases labeled with clear transitions and setup summary line"
+          }
+        },
+        {
+          "description": "Does Phase 0.5 check session count before launching subagents?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No pre-flight check",
+            "2": "Mentions checking but doesn't do it before subagents",
+            "3": "Checks session count but after launching subagents",
+            "4": "Checks session count before subagents",
+            "5": "Checks both live transcripts AND fingerprints before subagents, shows count"
+          }
+        },
+        {
+          "description": "Does Phase 1 describe launching 3 parallel subagents (transcript scanner, memory auditor, workspace scanner)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No subagent plan described",
+            "2": "Only 1 subagent mentioned",
+            "3": "2-3 subagents mentioned but not parallel",
+            "4": "3 subagents described as parallel",
+            "5": "3 subagents with sonnet model, max_turns=20, launched in single message"
+          }
+        }
+      ],
+      "required_present": [
+        "hindsight",
+        "##"
+      ],
+      "required_absent": [
+        "I cannot",
+        "I don't have access"
+      ]
+    },
+    {
+      "id": "TC-002",
+      "name": "Auto mode full flow",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/hindsight --auto",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's --auto mode. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json exists with a previous run from 7 days ago\n- cclog.py exists (robust mode)\n- 8 sessions found, 2 fingerprints\n- Simulate subagent outputs with 6 findings: 1 CRITICAL, 2 HIGH, 2 MEDIUM, 1 LOW\n- The CRITICAL finding is 'unauthorized_actions' with 4 incidents\n\nShow the full --auto flow: auto-apply LOW/MED, log HIGH/CRIT to overnight-flags.md, write report, skip AskUserQuestion entirely.",
+      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
+      "target_skills": ["hindsight"],
+      "checks": [
+        {
+          "description": "Does the response correctly parse --auto flag and skip AskUserQuestion (Phase 3c)?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Doesn't recognize --auto, proceeds interactively",
+            "2": "Recognizes --auto but still uses AskUserQuestion",
+            "3": "Skips AskUserQuestion but doesn't auto-apply",
+            "4": "Skips AskUserQuestion and auto-applies some findings",
+            "5": "Skips AskUserQuestion, auto-applies LOW/MED, logs HIGH/CRIT to overnight-flags.md"
+          }
+        },
+        {
+          "description": "Does the response log HIGH/CRITICAL findings to ~/.claude/state/overnight-flags.md under a ## Hindsight section?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No overnight flags file mentioned",
+            "2": "Mentions flags but wrong path or format",
+            "3": "Correct path but wrong format (missing checkboxes or severity)",
+            "4": "Correct path and format, appends to file",
+            "5": "Correct path, format with checkboxes, appends without overwriting, includes both HIGH and CRIT findings"
+          }
+        },
+        {
+          "description": "Does the response write the full report to ~/.claude/hindsight/reports/ automatically without waiting for user input?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No report written",
+            "2": "Report mentioned but not written",
+            "3": "Report written but to wrong path",
+            "4": "Report written to correct path",
+            "5": "Report written to correct path with proper date format, proceeds directly to wrap-up"
+          }
+        }
+      ],
+      "required_present": [
+        "auto",
+        "overnight"
+      ],
+      "required_absent": []
+    },
+    {
+      "id": "TC-003",
+      "name": "Zero sessions early exit",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/hindsight",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's zero-session exit flow. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json does NOT exist\n- cclog.py exists but reports 0 sessions\n- ~/.claude/hindsight/fingerprints/ directory does NOT exist (0 fingerprints)\n- ls ~/.claude/projects/*/*.jsonl returns nothing\n\nThe skill should detect 0 sessions AND 0 fingerprints at Phase 0.5 and exit early. It should NOT proceed to Phase 1, 2, or 3. It should NOT write last-retro.json.",
+      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
+      "target_skills": ["hindsight"],
+      "checks": [
+        {
+          "description": "Does the response detect 0 sessions and 0 fingerprints at Phase 0.5 and exit early?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Proceeds to Phase 1 despite no data",
+            "2": "Mentions no data but continues anyway",
+            "3": "Exits but after launching subagents",
+            "4": "Exits at Phase 0.5 before launching subagents",
+            "5": "Exits at Phase 0.5, shows helpful message with window-widening suggestion, does NOT write last-retro.json"
+          }
+        },
+        {
+          "description": "Does the response suggest installing the hindsight plugin when no fingerprints directory exists?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No plugin suggestion",
+            "2": "Vague suggestion to install something",
+            "3": "Suggests session-history instead of hindsight plugin",
+            "4": "Suggests hindsight plugin",
+            "5": "Suggests hindsight plugin with exact install command and explains cross-machine persistence"
+          }
+        },
+        {
+          "description": "Does the response avoid proceeding to Phase 1, 2, or 3?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Proceeds through all phases",
+            "2": "Proceeds to Phase 1 before stopping",
+            "3": "Mentions Phase 1 but doesn't execute it",
+            "4": "Stops cleanly at Phase 0.5",
+            "5": "Stops cleanly at Phase 0.5, explicitly states pipeline ends here, no Phase 1/2/3 content"
+          }
+        }
+      ],
+      "required_present": [
+        "hindsight"
+      ],
+      "required_absent": [
+        "Phase 1:",
+        "Phase 2:",
+        "Synthesis"
+      ]
+    },
+    {
+      "id": "TC-004",
+      "name": "Roast mode with human focus",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/hindsight --roast --human",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's --roast --human mode. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists from 10 days ago\n- 6 sessions found, 0 fingerprints\n- Simulate 4 findings: 1 HIGH scope_creep (human), 1 MED output_neglect (human), 1 MED constraint_amnesia (AI), 1 LOW search_cascades (AI)\n\nShow Phase 3 output with --roast tone and --human focus. Human findings should sort first. Tone should be brutal/confrontational. Collection phases should remain analytical.",
+      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
+      "target_skills": ["hindsight"],
+      "checks": [
+        {
+          "description": "Does the Phase 3 header show the active mode as '--roast --human'?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No mode shown in header",
+            "2": "Only one mode shown",
+            "3": "Both modes shown but wrong format",
+            "4": "Both modes shown in header",
+            "5": "Both modes shown in header matching the exact format: 'Mode: --roast --human'"
+          }
+        },
+        {
+          "description": "Are human-side findings (scope_creep, output_neglect) sorted before AI-side findings (constraint_amnesia, search_cascades)?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No sorting applied",
+            "2": "AI findings appear first",
+            "3": "Mixed ordering",
+            "4": "Human findings first but AI findings still present",
+            "5": "Human findings sorted first, AI findings after, both groups still present"
+          }
+        },
+        {
+          "description": "Does the --roast tone use direct, confrontational language in finding descriptions (not neutral analytical)?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Completely neutral tone",
+            "2": "Slightly more direct than default",
+            "3": "Some confrontational language mixed with neutral",
+            "4": "Consistently confrontational in findings",
+            "5": "Brutally direct in findings while collection phases remain analytical"
+          }
+        }
+      ],
+      "required_present": [
+        "roast"
+      ],
+      "required_absent": []
+    },
+    {
+      "id": "TC-005",
+      "name": "Workflow state persistence",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/hindsight window=3sessions",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's workflow state management. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists from 5 days ago\n- 3 sessions found (matching window=3sessions)\n- Simulate 2 findings: 1 MED redundancy, 1 LOW zombie_file\n\nShow workflow state file being written at start with all steps pending, updated as each step progresses.",
+      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
+      "target_skills": ["hindsight"],
+      "checks": [
+        {
+          "description": "Does the response write the workflow state file at the start with all steps pending?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No state file written",
+            "2": "State file mentioned but not written",
+            "3": "State file written but wrong format",
+            "4": "State file written with correct format and session ID",
+            "5": "State file written with correct format, session ID, all 3 steps pending, and updated as each step progresses"
+          }
+        },
+        {
+          "description": "Does the response correctly parse window=3sessions as a session-count window rather than a time-based window?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Treats 3sessions as a time window",
+            "2": "Doesn't parse the window argument",
+            "3": "Parses but misinterprets the value",
+            "4": "Correctly parses as session count",
+            "5": "Correctly parses as session count and limits analysis to exactly 3 most recent sessions"
+          }
+        }
+      ],
+      "required_present": [
+        "workflow",
+        "state"
+      ],
+      "required_absent": []
+    },
+    {
+      "id": "TC-006",
+      "name": "Carry-forward and severity bumping",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/hindsight",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's carry-forward mechanism. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists with unresolved_findings containing:\n  [{\"category\": \"constraint_amnesia\", \"pattern\": \"AI forgets rules after context compaction\", \"original_severity\": \"MEDIUM\", \"current_severity\": \"MEDIUM\", \"first_seen\": \"2026-04-01T00:00:00-07:00\", \"times_carried\": 1}]\n- 4 sessions found, including instances of the carried pattern\n- Simulate finding the carried pattern again in current window\n\nThe carried finding should have its severity bumped (MED→HIGH) and be marked with an upward arrow in the findings summary.",
+      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
+      "target_skills": ["hindsight"],
+      "checks": [
+        {
+          "description": "Does the response load unresolved_findings from last-retro.json and check for the carried pattern in the current window?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No carry-forward mechanism shown",
+            "2": "Mentions last-retro.json but doesn't load unresolved_findings",
+            "3": "Loads unresolved_findings but doesn't check current window",
+            "4": "Loads and checks current window for carried pattern",
+            "5": "Loads, checks, finds the pattern recurring, and bumps severity from MED to HIGH"
+          }
+        },
+        {
+          "description": "Is the carried finding displayed with severity bump indicator (upward arrow) and carry-forward note?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No visual indicator of carry-forward",
+            "2": "Mentioned as recurring but no special formatting",
+            "3": "Arrow present but no carry-forward explanation",
+            "4": "Arrow and carry-forward note present",
+            "5": "Shows [HIGH↑] tag with line: '↑ Carried from last retro (was MED, bumped after 2 runs)'"
+          }
+        }
+      ],
+      "required_present": [
+        "carry",
+        "bump"
+      ],
+      "required_absent": []
+    },
+    {
+      "id": "TC-007",
+      "name": "Compaction resilience",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/hindsight",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are resuming the hindsight skill after context compaction. You have NO memory of prior conversation turns. A workflow state file exists at /tmp/workflow-test-session.json with step1 marked done and step2 marked in_progress. The skill's instructions and reference files are available on disk but not in your conversation history.\n\nSimulated state file content:\n{\"workflow\": \"hindsight\", \"steps\": {\"step1\": \"done\", \"step2\": \"in_progress\", \"step3\": \"pending\"}, \"open_questions\": []}\n\nPhase 1 collection has completed. You should resume from Phase 2 (synthesis). Simulated Phase 1 outputs exist at /tmp/hindsight_*.json.\n\nDo you re-read the skill file? Do you check the workflow state? Do you skip completed phases?",
+      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
+      "target_skills": ["hindsight"],
+      "checks": [
+        {
+          "description": "Does the response re-read the hindsight SKILL.md file after compaction?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Does not re-read the skill file",
+            "2": "Mentions needing to re-read but doesn't",
+            "3": "Re-reads a different file",
+            "4": "Re-reads the SKILL.md file",
+            "5": "Re-reads SKILL.md and the workflow state file before doing anything else"
+          }
+        },
+        {
+          "description": "Does the response check the workflow state file and resume from the correct step (Phase 2, not Phase 0)?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Restarts from Phase 0/scratch",
+            "2": "Checks state but restarts anyway",
+            "3": "Resumes from wrong step",
+            "4": "Resumes from correct step (Phase 2)",
+            "5": "Resumes from Phase 2, announces what it's resuming from, skips completed Phase 1"
+          }
+        }
+      ],
+      "required_present": [
+        "resume",
+        "state"
+      ],
+      "required_absent": []
+    },
+    {
+      "id": "TC-008",
+      "name": "Failure mode: subagent returns invalid JSON",
+      "category": "error_handling",
+      "test_profile": "execution",
+      "prompt": "/hindsight",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\nFAILURE INJECTION: One of three subagents returns invalid JSON output.\n\nYou are executing the hindsight skill. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSetup: Phase 0 and Phase 0.5 have completed successfully. 5 sessions found.\n\nPhase 1 is in progress. Three subagents were launched:\n- Subagent 1 (Transcript Scanner): returned valid JSON with 3 findings\n- Subagent 2 (Memory Auditor): returned INVALID OUTPUT: 'Error: memory_recall tool not available. Traceback...'\n- Subagent 3 (Workspace Scanner): returned valid JSON with 2 findings\n\nThe failure condition above has just occurred. Follow what the skill instructs you to do when this condition is encountered.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute git push, gh pr create, or any destructive commands for real.\nDo NOT invoke sub-skills (/forge, /present, /ship, /quench) for real.",
+      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
+      "target_skills": ["hindsight"],
+      "checks": [
+        {
+          "description": "Does the response detect the invalid subagent output and proceed with remaining valid outputs?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Crashes or stops entirely",
+            "2": "Detects error but stops the whole pipeline",
+            "3": "Proceeds but doesn't note which source was unavailable",
+            "4": "Proceeds with 2 valid outputs and notes Memory Auditor was unavailable",
+            "5": "Proceeds with 2 valid outputs, notes Memory Auditor unavailable in output, logs it, and continues to synthesis"
+          }
+        },
+        {
+          "description": "Does the Phase 3 Sources line correctly show Memory as unavailable?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No sources line shown",
+            "2": "Sources line shows all available",
+            "3": "Sources line shown but Memory not marked",
+            "4": "Sources line shows Memory with failure indicator",
+            "5": "Sources line shows: Transcripts ✓ Fingerprints ✓ Memory ✗ Workspace ✓"
+          }
+        }
+      ],
+      "required_present": [],
+      "required_absent": []
+    }
+  ],
+  "dimensions": {
+    "task_completion": 0.30,
+    "invocation": 0.20,
+    "efficiency": 0.20,
+    "best_practices": 0.15,
+    "business_impact": 0.15
+  }
+}

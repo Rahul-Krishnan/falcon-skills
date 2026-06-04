@@ -1,0 +1,15 @@
+{
+  "name": "hindsight",
+  "description": "Cross-session retrospective analysis for Claude Code. Reviews your recent sessions, surfaces recurring friction and mistakes, and proposes concrete improvements to your rules, memory, and workflow.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Rahul Krishnan"
+  },
+  "keywords": [
+    "retrospective",
+    "analysis",
+    "sessions",
+    "self-improvement",
+    "workflow"
+  ]
+}

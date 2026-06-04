@@ -1,0 +1,17 @@
+{
+  "name": "falcon-skills",
+  "owner": {
+    "name": "Rahul Krishnan"
+  },
+  "metadata": {
+    "description": "A small marketplace of practical Claude Code skills.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "hindsight",
+      "source": "./plugins/hindsight",
+      "description": "Cross-session retrospective analysis. Finds recurring friction, mistakes, and improvement opportunities across multiple Claude Code sessions."
+    }
+  ]
+}
