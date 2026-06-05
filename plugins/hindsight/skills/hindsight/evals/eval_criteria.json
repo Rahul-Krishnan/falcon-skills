@@ -8,9 +8,19 @@
       "category": "execution",
       "test_profile": "execution",
       "prompt": "/hindsight",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json does NOT exist (first run)\n- ~/.claude/skills/hindsight/references/taxonomy.json does NOT exist (use hardcoded categories)\n- ~/.claude/skills/session-history/scripts/cclog.py exists (robust mode)\n- ~/.claude/hindsight/fingerprints/ has 3 fingerprint files within window\n- Simulate 5 sessions found across 2 projects\n\nWhen you would read files, simulate the output. When you would launch subagents, describe what each would do. Show the full Phase 0 setup, Phase 0.5 check, Phase 1 plan, Phase 2 synthesis approach, and Phase 3 report format.",
-      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
-      "target_skills": ["hindsight"],
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json does NOT exist (first run)\n- ~/.claude/skills/hindsight/references/taxonomy.json does NOT exist (use hardcoded categories)\n- ~/.claude/skills/session-history/scripts/cclog.py exists (robust mode)\n- ~/.claude/hindsight/fingerprints/ has 3 fingerprint files within window\n- Simulate 5 sessions found across 2 projects\n\nWhen you would read files, simulate the output. When you would launch subagents, describe what each would do. Show the full Phase 0 setup, Phase 0.5 check, Phase 1 plan, Phase 2 synthesis approach, and Phase 3 report format.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "hindsight"
+      ],
       "checks": [
         {
           "description": "Does the response parse arguments correctly (all defaults: window=null, tone=null, focus=null, viz=false, auto=false)?",
@@ -83,9 +93,19 @@
       "category": "execution",
       "test_profile": "execution",
       "prompt": "/hindsight --auto",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's --auto mode. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json exists with a previous run from 7 days ago\n- cclog.py exists (robust mode)\n- 8 sessions found, 2 fingerprints\n- Simulate subagent outputs with 6 findings: 1 CRITICAL, 2 HIGH, 2 MEDIUM, 1 LOW\n- The CRITICAL finding is 'unauthorized_actions' with 4 incidents\n\nShow the full --auto flow: auto-apply LOW/MED, log HIGH/CRIT to overnight-flags.md, write report, skip AskUserQuestion entirely.",
-      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
-      "target_skills": ["hindsight"],
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's --auto mode. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json exists with a previous run from 7 days ago\n- cclog.py exists (robust mode)\n- 8 sessions found, 2 fingerprints\n- Simulate subagent outputs with 6 findings: 1 CRITICAL, 2 HIGH, 2 MEDIUM, 1 LOW\n- The CRITICAL finding is 'unauthorized_actions' with 4 incidents\n\nShow the full --auto flow: auto-apply LOW/MED, log HIGH/CRIT to overnight-flags.md, write report, skip AskUserQuestion entirely.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "hindsight"
+      ],
       "checks": [
         {
           "description": "Does the response correctly parse --auto flag and skip AskUserQuestion (Phase 3c)?",
@@ -133,9 +153,19 @@
       "category": "execution",
       "test_profile": "execution",
       "prompt": "/hindsight",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's zero-session exit flow. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json does NOT exist\n- cclog.py exists but reports 0 sessions\n- ~/.claude/hindsight/fingerprints/ directory does NOT exist (0 fingerprints)\n- ls ~/.claude/projects/*/*.jsonl returns nothing\n\nThe skill should detect 0 sessions AND 0 fingerprints at Phase 0.5 and exit early. It should NOT proceed to Phase 1, 2, or 3. It should NOT write last-retro.json.",
-      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
-      "target_skills": ["hindsight"],
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's zero-session exit flow. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- ~/.claude/hindsight/last-retro.json does NOT exist\n- cclog.py exists but reports 0 sessions\n- ~/.claude/hindsight/fingerprints/ directory does NOT exist (0 fingerprints)\n- ls ~/.claude/projects/*/*.jsonl returns nothing\n\nThe skill should detect 0 sessions AND 0 fingerprints at Phase 0.5 and exit early. It should NOT proceed to Phase 1, 2, or 3. It should NOT write last-retro.json.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "hindsight"
+      ],
       "checks": [
         {
           "description": "Does the response detect 0 sessions and 0 fingerprints at Phase 0.5 and exit early?",
@@ -186,9 +216,19 @@
       "category": "execution",
       "test_profile": "execution",
       "prompt": "/hindsight --roast --human",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's --roast --human mode. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists from 10 days ago\n- 6 sessions found, 0 fingerprints\n- Simulate 4 findings: 1 HIGH scope_creep (human), 1 MED output_neglect (human), 1 MED constraint_amnesia (AI), 1 LOW search_cascades (AI)\n\nShow Phase 3 output with --roast tone and --human focus. Human findings should sort first. Tone should be brutal/confrontational. Collection phases should remain analytical.",
-      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
-      "target_skills": ["hindsight"],
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's --roast --human mode. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists from 10 days ago\n- 6 sessions found, 0 fingerprints\n- Simulate 4 findings: 1 HIGH scope_creep (human), 1 MED output_neglect (human), 1 MED constraint_amnesia (AI), 1 LOW search_cascades (AI)\n\nShow Phase 3 output with --roast tone and --human focus. Human findings should sort first. Tone should be brutal/confrontational. Collection phases should remain analytical.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "hindsight"
+      ],
       "checks": [
         {
           "description": "Does the Phase 3 header show the active mode as '--roast --human'?",
@@ -225,7 +265,11 @@
         }
       ],
       "required_present": [
-        "roast"
+        "roast",
+        "scope_creep",
+        "output_neglect",
+        "constraint_amnesia",
+        "search_cascades"
       ],
       "required_absent": []
     },
@@ -235,9 +279,19 @@
       "category": "execution",
       "test_profile": "execution",
       "prompt": "/hindsight window=3sessions",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's workflow state management. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists from 5 days ago\n- 3 sessions found (matching window=3sessions)\n- Simulate 2 findings: 1 MED redundancy, 1 LOW zombie_file\n\nShow workflow state file being written at start with all steps pending, updated as each step progresses.",
-      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
-      "target_skills": ["hindsight"],
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's workflow state management. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists from 5 days ago\n- 3 sessions found (matching window=3sessions)\n- Simulate 2 findings: 1 MED redundancy, 1 LOW zombie_file\n\nShow workflow state file being written at start with all steps pending, updated as each step progresses.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "hindsight"
+      ],
       "checks": [
         {
           "description": "Does the response write the workflow state file at the start with all steps pending?",
@@ -274,9 +328,19 @@
       "category": "execution",
       "test_profile": "execution",
       "prompt": "/hindsight",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's carry-forward mechanism. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists with unresolved_findings containing:\n  [{\"category\": \"constraint_amnesia\", \"pattern\": \"AI forgets rules after context compaction\", \"original_severity\": \"MEDIUM\", \"current_severity\": \"MEDIUM\", \"first_seen\": \"2026-04-01T00:00:00-07:00\", \"times_carried\": 1}]\n- 4 sessions found, including instances of the carried pattern\n- Simulate finding the carried pattern again in current window\n\nThe carried finding should have its severity bumped (MED→HIGH) and be marked with an upward arrow in the findings summary.",
-      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
-      "target_skills": ["hindsight"],
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are testing the hindsight skill's carry-forward mechanism. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nDo NOT execute any real file writes, git commands, or external actions.\nSimulate all tool call outputs.\n\nSimulated environment:\n- last-retro.json exists with unresolved_findings containing:\n  [{\"category\": \"constraint_amnesia\", \"pattern\": \"AI forgets rules after context compaction\", \"original_severity\": \"MEDIUM\", \"current_severity\": \"MEDIUM\", \"first_seen\": \"2026-04-01T00:00:00-07:00\", \"times_carried\": 1}]\n- 4 sessions found, including instances of the carried pattern\n- Simulate finding the carried pattern again in current window\n\nThe carried finding should have its severity bumped (MED\u2192HIGH) and be marked with an upward arrow in the findings summary.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "hindsight"
+      ],
       "checks": [
         {
           "description": "Does the response load unresolved_findings from last-retro.json and check for the carried pattern in the current window?",
@@ -297,13 +361,14 @@
             "2": "Mentioned as recurring but no special formatting",
             "3": "Arrow present but no carry-forward explanation",
             "4": "Arrow and carry-forward note present",
-            "5": "Shows [HIGH↑] tag with line: '↑ Carried from last retro (was MED, bumped after 2 runs)'"
+            "5": "Shows [HIGH\u2191] tag with line: '\u2191 Carried from last retro (was MED, bumped after 2 runs)'"
           }
         }
       ],
       "required_present": [
         "carry",
-        "bump"
+        "bump",
+        "unresolved_findings"
       ],
       "required_absent": []
     },
@@ -314,8 +379,18 @@
       "test_profile": "execution",
       "prompt": "/hindsight",
       "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are resuming the hindsight skill after context compaction. You have NO memory of prior conversation turns. A workflow state file exists at /tmp/workflow-test-session.json with step1 marked done and step2 marked in_progress. The skill's instructions and reference files are available on disk but not in your conversation history.\n\nSimulated state file content:\n{\"workflow\": \"hindsight\", \"steps\": {\"step1\": \"done\", \"step2\": \"in_progress\", \"step3\": \"pending\"}, \"open_questions\": []}\n\nPhase 1 collection has completed. You should resume from Phase 2 (synthesis). Simulated Phase 1 outputs exist at /tmp/hindsight_*.json.\n\nDo you re-read the skill file? Do you check the workflow state? Do you skip completed phases?",
-      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
-      "target_skills": ["hindsight"],
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "hindsight"
+      ],
       "checks": [
         {
           "description": "Does the response re-read the hindsight SKILL.md file after compaction?",
@@ -352,9 +427,19 @@
       "category": "error_handling",
       "test_profile": "execution",
       "prompt": "/hindsight",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\nFAILURE INJECTION: One of three subagents returns invalid JSON output.\n\nYou are executing the hindsight skill. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSetup: Phase 0 and Phase 0.5 have completed successfully. 5 sessions found.\n\nPhase 1 is in progress. Three subagents were launched:\n- Subagent 1 (Transcript Scanner): returned valid JSON with 3 findings\n- Subagent 2 (Memory Auditor): returned INVALID OUTPUT: 'Error: memory_recall tool not available. Traceback...'\n- Subagent 3 (Workspace Scanner): returned valid JSON with 2 findings\n\nThe failure condition above has just occurred. Follow what the skill instructs you to do when this condition is encountered.\n\nSAFETY SANDBOX — side-effect simulation mode\nDo NOT execute git push, gh pr create, or any destructive commands for real.\nDo NOT invoke sub-skills (/forge, /present, /ship, /quench) for real.",
-      "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write", "AskUserQuestion"],
-      "target_skills": ["hindsight"],
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\nFAILURE INJECTION: One of three subagents returns invalid JSON output.\n\nYou are executing the hindsight skill. Read ~/.claude/skills/hindsight/SKILL.md.\n\nSetup: Phase 0 and Phase 0.5 have completed successfully. 5 sessions found.\n\nPhase 1 is in progress. Three subagents were launched:\n- Subagent 1 (Transcript Scanner): returned valid JSON with 3 findings\n- Subagent 2 (Memory Auditor): returned INVALID OUTPUT: 'Error: memory_recall tool not available. Traceback...'\n- Subagent 3 (Workspace Scanner): returned valid JSON with 2 findings\n\nThe failure condition above has just occurred. Follow what the skill instructs you to do when this condition is encountered.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nDo NOT execute git push, gh pr create, or any destructive commands for real.\nDo NOT invoke sub-skills (/forge, /present, /ship, /quench) for real.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "hindsight"
+      ],
       "checks": [
         {
           "description": "Does the response detect the invalid subagent output and proceed with remaining valid outputs?",
@@ -375,7 +460,7 @@
             "2": "Sources line shows all available",
             "3": "Sources line shown but Memory not marked",
             "4": "Sources line shows Memory with failure indicator",
-            "5": "Sources line shows: Transcripts ✓ Fingerprints ✓ Memory ✗ Workspace ✓"
+            "5": "Sources line shows: Transcripts \u2713 Fingerprints \u2713 Memory \u2717 Workspace \u2713"
           }
         }
       ],
@@ -384,9 +469,9 @@
     }
   ],
   "dimensions": {
-    "task_completion": 0.30,
-    "invocation": 0.20,
-    "efficiency": 0.20,
+    "task_completion": 0.3,
+    "invocation": 0.2,
+    "efficiency": 0.2,
     "best_practices": 0.15,
     "business_impact": 0.15
   }

@@ -472,7 +472,7 @@ Write `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.md` containing:
 ## Context Compaction Protection
 
 This workflow runs 15+ minutes with subagents. After context compaction:
-1. Re-read this file (`~/.claude/skills/hindsight/SKILL.md`)
+1. Re-invoke the hindsight skill to reload this file (works for both plugin and local installs; the SKILL.md location is resolved by the skill loader, not a hardcoded path)
 2. Re-read the workflow state file (`/tmp/workflow-${CLAUDE_CODE_CURRENT_SESSION_ID}.json`) to determine current step
 3. Re-read persisted intermediate results from `/tmp/hindsight_*.json` (fingerprints, sessions, memory, workspace manifest)
 4. Re-read `~/.claude/hindsight/last-retro.json` if it was loaded in Phase 0
