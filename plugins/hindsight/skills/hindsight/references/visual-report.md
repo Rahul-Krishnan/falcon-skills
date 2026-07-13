@@ -4,7 +4,7 @@ After Phase 3e wrap-up completes (including writing `last-retro.json`), generate
 
 ## Steps
 
-1. **Use these inline styles** as the `<style>` block (a warm dark palette with severity-coded accents):
+1. **Read the CSS reference file:** Try `~/.claude/hindsight/references/organic-earth.css`. This contains the complete Organic Earth identity (palette, typography, components). Use it verbatim as the `<style>` block. Do NOT modify it. **If the CSS file is missing,** generate minimal inline styles using this palette and proceed without error:
    ```css
    :root { --foreground:#faf8f5; --background:#1c1917; --card:#292524;
      --border:#3d3835; --muted-foreground:#a8a29e; --primary:#84cc16;
@@ -20,6 +20,7 @@ After Phase 3e wrap-up completes (including writing `last-retro.json`), generate
    .severity-badge.medium { color:var(--sev-medium); }
    .severity-badge.low { color:var(--sev-low); }
    ```
+   Print a note: "organic-earth.css not found, using minimal fallback styles."
 
 2. **Read the data:** `~/.claude/hindsight/last-retro.json` (just written in Phase 3e). This contains `all_findings`, `friction_scores`, severity counts, trend delta, mode, and window.
 
@@ -43,7 +44,7 @@ After Phase 3e wrap-up completes (including writing `last-retro.json`), generate
 
    d. **Friction sparkline:** `<div class="card sparkline-row">` containing:
       - `<span class="sparkline-label">Friction</span>`
-      - `<div class="sparkline-bars">` with one `<div class="bar">` per session. Height = `(score / max_score) * 100` percent. Add class `high` to bars where score >= 5.
+      - `<div class="sparkline-bars">` with one `<div class="bar">` per session. Height = `(score / 10) * 100` percent — the denominator is always 10, the same fixed scale as the terminal sparkline (Phase 2 step 7). Do NOT scale by the maximum score observed in this window, or a low-friction run will render its worst session as a full-height bar. Add class `high` to bars where score >= 5.
       - `<span class="sparkline-avg">avg X.X/10</span>`
       - If `friction_scores` is empty, render `<div class="empty-state">No session data</div>` instead.
 
@@ -67,7 +68,7 @@ After Phase 3e wrap-up completes (including writing `last-retro.json`), generate
 
 4. **Write** to `/tmp/hindsight-report-YYYYMMDD-HHMMSS.html` (use current timestamp, distinct from `hindsight_*` cleanup glob pattern).
 
-5. **Post-write validation:** Run `tail -c 20 /tmp/hindsight-report-*.html` and verify the output contains `</html>`. If truncated, print a warning and regenerate before saving.
+5. **Post-write validation:** Run `tail -c 20 /tmp/hindsight-report-*.html` and verify the output contains `</html>`. If truncated, print a warning and copy the file to `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.html` instead (skip upload).
 
 6. **Save locally:**
    - Copy the report to `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.html` (use the exact filename, not a glob).
