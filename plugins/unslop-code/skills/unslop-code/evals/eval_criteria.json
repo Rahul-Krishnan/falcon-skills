@@ -328,7 +328,7 @@
       "category": "error_handling",
       "test_profile": "side_effect_guarded",
       "prompt": "/unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M src/parse.py\n\nWhen you read src/parse.py, it contains a defensive try/except that unslop-code would flag as 'over-engineered error handling' and propose removing. The user picks option 1 (Fix all).\n\nThe project is a Python project with pytest available; the narrowest check for the touched file is 'pytest -q tests/test_parse.py'.\n\nWhen you run that test command AFTER applying the fix, treat the result as FAILING (the removed try/except was actually load-bearing: 2 tests fail).",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M src/parse.py\n\nWhen you read src/parse.py, it contains a defensive try/except that unslop-code would flag as 'over-engineered error handling' and propose removing. The user picks option 1 (Fix all).\n\nThe project is a Python project with pytest available; the narrowest check for the touched file is 'pytest -q tests/test_parse.py'.\n\nWhen you run that test command BEFORE applying any fix (the baseline), treat the result as PASSING (green tree).\n\nWhen you run the same command AFTER applying the fix, treat the result as FAILING (the removed try/except was actually load-bearing: 2 tests fail). The failures are new relative to the baseline.",
       "allowed_tools": [
         "Read",
         "Skill",
@@ -359,6 +359,17 @@
             "4": "Reverts but reporting is unclear.",
             "5": "Reverts the fix, restores original content, and reports which finding was backed out with the failing output."
           }
+        },
+        {
+          "description": "Does it run the check once as a baseline BEFORE applying the fix, so the post-fix failure can be attributed to the cleanup?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No baseline run; the first check execution happens after the fix, so the revert is unjustified guesswork.",
+            "2": "Mentions a baseline but never runs it.",
+            "3": "Runs a baseline but never compares the post-fix result against it.",
+            "4": "Runs and records the baseline, comparison is implicit.",
+            "5": "Runs 'pytest -q tests/test_parse.py' pre-fix, records it as green, and cites the green-to-red transition as the reason for reverting."
+          }
         }
       ],
       "required_present": [
@@ -371,7 +382,7 @@
       "category": "execution",
       "test_profile": "execution",
       "prompt": "/unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nTarget file src/util.py has only narrator comments (pattern 1) plus one genuinely dead helper. User picks option 1 (Fix all). A typecheck 'tsc --noEmit'-equivalent is available and PASSES after the fix.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M src/util.py\n\nsrc/util.py contains narrator comments (pattern 1, gate-exempt) plus one helper function that nothing in the repo references (pattern 13, dead code, gated). When you grep the repo for that helper's name, treat the result as zero references outside its own definition. The user picks option 1 (Fix all).\n\nThis is a Python project with no test suite. The narrowest available check for the touched file is 'mypy src/util.py'. Treat it as PASSING both as the pre-fix baseline and after the fix. There is no TypeScript in this repo.",
       "allowed_tools": [
         "Read",
         "Skill",
@@ -393,16 +404,30 @@
           }
         },
         {
-          "description": "Does it correctly treat pure comment deletions as behavior-safe (no gate required for those) while still gating the dead-helper removal?",
-          "importance": "MEDIUM",
+          "description": "Does it pick a check that actually covers the touched language (a Python check for a Python file), rather than a TypeScript typecheck?",
+          "importance": "CRITICAL",
           "rubric": {
-            "1": "Gates nothing or gates everything indiscriminately.",
-            "2": "Confuses which changes need the gate.",
-            "3": "Partially distinguishes.",
-            "4": "Mostly correct distinction.",
-            "5": "Comment deletions reported without a gate; the code removal is gated by the passing check."
+            "1": "Gates the Python file on 'tsc --noEmit' or another TypeScript check, which verifies nothing about it.",
+            "2": "Names a check without regard to the file's language.",
+            "3": "Picks a Python check but also runs an irrelevant TS check and treats both as evidence.",
+            "4": "Picks the Python check with loose justification.",
+            "5": "Selects 'mypy src/util.py' (or an equivalent Python check) because Python is the only ecosystem in the touched files."
+          }
+        },
+        {
+          "description": "Does it verify the helper is actually dead (grep the repo for references) before removing it, and gate the removal while leaving comment deletions ungated?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Removes the helper with no reference check, or gates nothing, or gates everything indiscriminately.",
+            "2": "Removes the helper on the strength of the file alone, and confuses which changes need the gate.",
+            "3": "Checks references OR splits exempt/gated correctly, but not both.",
+            "4": "Does both with minor sloppiness in the reporting.",
+            "5": "Greps the repo to establish zero references, removes the helper as a gated edit covered by the passing check, and reports the comment deletions as gate-exempt."
           }
         }
+      ],
+      "required_absent": [
+        "tsc --noEmit"
       ]
     },
     {
@@ -411,7 +436,7 @@
       "category": "tool_usage",
       "test_profile": "execution",
       "prompt": "/unslop-code --review",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nA cleanup was already drafted on the current branch. When you inspect the diff, it removed a helper that is still referenced in one other file (an over-removal). --review is set.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nA slop cleanup was already drafted AND COMMITTED on the current branch 'cleanup/strip-slop'. The working tree is clean: when you run 'git status --porcelain', treat the output as EMPTY. The default branch is 'main'.\n\nWhen you run a diff of the branch against its merge-base with main (e.g. 'git diff $(git merge-base HEAD main)...HEAD'), treat the output as a diff that deletes the helper 'format_currency' from src/render.py, along with several narrator comments.\n\nWhen you grep the repo for 'format_currency', treat the result as one surviving reference: src/invoice.py line 88 calls it. So the deletion is an over-removal, not a dead-code removal.\n\n--review is set. Do NOT run any real git commands or read real files.",
       "allowed_tools": [
         "Read",
         "Skill",
@@ -421,6 +446,17 @@
         "unslop-code"
       ],
       "checks": [
+        {
+          "description": "With an empty 'git status --porcelain', does it resolve the committed cleanup as a diff against the merge-base instead of exiting with 'no uncommitted changes'?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Runs 'git status --porcelain', finds nothing, and exits with no verdict — the review never happens.",
+            "2": "Exits or asks the user which files to scan rather than resolving the branch diff itself.",
+            "3": "Reviews something, but sourced from the post-fix file contents rather than a diff, so deletions are invisible to it.",
+            "4": "Resolves the branch diff but by an ad-hoc route (e.g. 'git show HEAD') that would miss a multi-commit cleanup.",
+            "5": "Falls through the empty working tree to a merge-base diff against the default branch and reviews that."
+          }
+        },
         {
           "description": "In --review mode does it make NO file edits and only inspect the drafted cleanup?",
           "importance": "CRITICAL",
@@ -433,19 +469,23 @@
           }
         },
         {
-          "description": "Does it catch the over-removal (deleted code still referenced elsewhere) and return a verdict with follow-ups?",
+          "description": "Does it catch the over-removal (deleted helper still referenced in src/invoice.py) and return a verdict with follow-ups?",
           "importance": "HIGH",
           "rubric": {
             "1": "Misses the over-removal and approves blindly.",
             "2": "Notes a vague concern without specifics.",
             "3": "Flags an issue but no verdict.",
             "4": "Flags the over-removal, verdict loose.",
-            "5": "Identifies the still-referenced deletion and returns CHANGES NEEDED with the specific follow-up."
+            "5": "Identifies the still-referenced deletion, cites src/invoice.py, and returns CHANGES NEEDED with the specific follow-up."
           }
         }
       ],
       "required_present": [
         "CHANGES NEEDED"
+      ],
+      "required_absent": [
+        "No uncommitted changes found",
+        "Files modified"
       ]
     },
     {
@@ -507,9 +547,24 @@
             "4": "Lists fixes with mostly correct categorization.",
             "5": "Reports exactly which edits were applied, which were gate-exempt, and which passed the gate, with the check command as evidence."
           }
+        },
+        {
+          "description": "Does it apply the gate-exempt comment deletions FIRST, snapshot api/notify.py, and only then apply the gated runtime-string rewrite — so a failed gate would back out the string rewrite without resurrecting the deleted comments?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Snapshots the file before any edit, so the recorded revert target would undo the exempt comment deletions too.",
+            "2": "Applies all edits in one pass with no snapshot boundary between exempt and gated.",
+            "3": "Mentions the exempt/gated split but records a single pre-everything snapshot anyway.",
+            "4": "Orders the waves correctly but is vague about when the snapshot is taken.",
+            "5": "Wave 1 (comment deletions) applied, then pre_fix_content snapshotted, then wave 2 (the logger.error string) applied and gated — and says so."
+          }
         }
       ],
-      "required_present": []
+      "required_present": [],
+      "required_absent": [
+        "How would you like to proceed?",
+        "Fix by severity"
+      ]
     },
     {
       "id": "tc11_red_baseline_attribution",
@@ -594,6 +649,103 @@
         }
       ],
       "required_present": []
+    },
+    {
+      "id": "tc13_auto_is_report_only",
+      "name": "--auto reports without editing, prompting, or gating",
+      "category": "tool_usage",
+      "test_profile": "side_effect_guarded",
+      "prompt": "/unslop-code --auto",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M src/cart.py\n\nWhen you read src/cart.py, return:\n\n```python\n# Add the item to the cart\ndef add_item(cart, item, user_id, region):\n    # Append the item\n    cart.items.append(item)\n    # Return the cart\n    return cart\n```\n\n--auto is set (report only), NOT --auto-fix. Do NOT run any real git commands or read real files.",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does --auto produce the report and stop, applying NO fixes and asking NO questions?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Applied fixes under --auto, which is report-only — it edited files the user never authorized it to touch.",
+            "2": "Called AskUserQuestion or presented the fix menu despite --auto being non-interactive.",
+            "3": "Made no edits but was ambiguous about whether fixes were applied.",
+            "4": "Report-only with a stray offer to apply fixes.",
+            "5": "Full report, zero edits, zero questions, no menu, and it says explicitly that nothing was changed."
+          }
+        },
+        {
+          "description": "Does it skip the behavior gate entirely (no fixes applied means nothing to verify) rather than running checks for no reason?",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Runs a baseline and a gate despite having changed nothing.",
+            "2": "Runs a check and reports it as gate evidence for fixes that were never applied.",
+            "3": "Mentions the gate confusingly.",
+            "4": "Skips the gate without noting why.",
+            "5": "No gate run, because no fix was applied — the report stands alone."
+          }
+        },
+        {
+          "description": "Does it still find the slop (narrator comments, and the phantom parameters user_id/region that add_item never uses)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No findings on obviously sloppy code.",
+            "2": "Found the comments but missed the unused parameters entirely.",
+            "3": "Found both categories but cited neither specifically.",
+            "4": "Found both with specific citations, one severity misassigned.",
+            "5": "Flags the narrator comments as COMMENT SLOP and user_id/region as PHANTOM PARAMETERS, each with the snippet and a fix."
+          }
+        }
+      ],
+      "required_absent": [
+        "How would you like to proceed?"
+      ]
+    },
+    {
+      "id": "tc14_no_check_available",
+      "name": "No behavior check exists: --auto-fix reverts gated edits rather than shipping them unverified",
+      "category": "error_handling",
+      "test_profile": "side_effect_guarded",
+      "prompt": "/unslop-code --auto-fix",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M tools/report.py\n\ntools/report.py contains two narrator comments (pattern 1, gate-exempt) and one helper function with no references anywhere in the repo (pattern 13, dead code, a gated edit).\n\nThis repo has NO test suite, NO test runner, and no typecheck or lint configured: there is no package.json, no pyproject.toml, no setup.cfg, and mypy/ruff/pytest are not installed. Every check command you try is unavailable. --auto-fix is set, so there is no user to ask.\n\nDo NOT run any real git commands or read real files.",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "When no check can be found, does it state plainly that behavior was NOT verified instead of reporting the fixes as verified or silently skipping the gate?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Reports the fixes as verified, or as complete, with no mention that nothing was checked.",
+            "2": "Silently skips the gate — the output reads exactly like a passing run.",
+            "3": "Mentions verification was limited but buries it.",
+            "4": "States behavior was unverified but does not list which files changed.",
+            "5": "States plainly that behavior was not verified, lists exactly which files changed, and recommends the user run their own tests."
+          }
+        },
+        {
+          "description": "In --auto-fix with no check available, does it revert the gated dead-code removal while keeping the gate-exempt comment deletions?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Keeps the unverified dead-code removal in an unattended run with nothing to catch a mistake.",
+            "2": "Reverts everything, including the exempt comment deletions that never needed a gate.",
+            "3": "Ambiguous about what survived the run.",
+            "4": "Reverts the gated edit and keeps the exempt ones, but the accounting is unclear.",
+            "5": "Backs out the dead-code removal (unverifiable, unattended), keeps the comment deletions, and reports the split."
+          }
+        }
+      ],
+      "required_present": [
+        "not verified"
+      ]
     }
   ],
   "dimensions": {
