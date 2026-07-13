@@ -1,6 +1,6 @@
 # falcon-skills
 
-A small marketplace of practical Claude Code skills. Ships two plugins: **hindsight** and **unslop-code**.
+A small marketplace of practical Claude Code skills. Ships three plugins: **hindsight**, **unslop-code**, and **context-contradiction-checker**.
 
 ## Quick Start
 
@@ -10,6 +10,7 @@ Add the marketplace, then install the plugin you want:
 /plugin marketplace add Rahul-Krishnan/falcon-skills
 /plugin install hindsight@falcon-skills
 /plugin install unslop-code@falcon-skills
+/plugin install context-contradiction-checker@falcon-skills
 ```
 
 Then run them:
@@ -17,6 +18,7 @@ Then run them:
 ```
 /hindsight
 /unslop-code
+/context-contradiction-checker
 ```
 
 ## hindsight
@@ -102,6 +104,46 @@ It only finds surface-level code-quality issues. It is not a security audit, a p
 - Fix mode edits your files. Commit (or stash) before you let it write, so `git` is your undo — the default scan target is exactly the work you have not committed yet. Use `--auto` for a read-only pass.
 - The behavior gate is only as good as your project's tests. In a repo with no test command and no typecheck, it cannot verify that a fix preserved behavior, and it says so rather than pretending otherwise.
 - Slop detection is heuristic and has taste baked in. Some findings are judgment calls. Read before accepting.
+
+## context-contradiction-checker
+
+Your Claude Code context accretes. You add a rule to CLAUDE.md, another to a skill, a third to a hook, and six months later they quietly contradict each other. Claude picks one and you never find out why it ignored the other. This skill finds those collisions.
+
+### What it does
+
+- Scans every active context source at both layers, user and project: `CLAUDE.md`, `.llms/rules/*.md`, other `~/.claude/*.md` files, skills (`~/.claude/skills/` and `./.claude/skills/`), hooks, and `settings.json` / `settings.local.json` (hook triggers, tool permissions, behavioral flags). Cross-layer collisions — a project rule quietly overriding a user rule — are the ones it most wants to catch.
+- Extracts the directives and groups them by topic.
+- Classifies each collision:
+  - **CONFLICT** — two directives directly oppose each other ("always use tabs" vs "always use spaces").
+  - **TENSION** — not contradictory, but confusing together ("be concise" vs "always explain your reasoning in detail").
+  - **OVERLAP** — the same rule stated twice, wasting context window.
+- Scores each finding 0-100 for confidence and reports only those above 70, so you get real collisions instead of a wall of maybes.
+- Offers an interactive fix menu.
+
+### Usage
+
+```
+/context-contradiction-checker                          # full scan of all context sources
+/context-contradiction-checker ~/.claude/CLAUDE.md      # single file, internal contradictions only
+/context-contradiction-checker ./CLAUDE.md ~/.claude/CLAUDE.md   # compare two files
+/context-contradiction-checker --auto                   # full scan, report only, no fix menu
+```
+
+`--auto` is non-interactive and cannot be combined with file path arguments.
+
+### When to use it
+
+- Claude keeps ignoring a rule you're sure you wrote down.
+- Your CLAUDE.md has grown by accretion and you've never audited it.
+- You've just merged rules from several sources and want to know what fights.
+
+It reads instruction files, not code. It is not a linter or a code reviewer.
+
+### Limitations
+
+- Judgment calls are heuristic. A TENSION is a suggestion to look, not a verdict.
+- It reports on the context sources it can find on disk. Rules that live only in a system prompt or an MCP server's instructions are invisible to it.
+- Survives context compaction via a state file in `/tmp`, keyed on the session ID, but a very large context set still takes a while to walk.
 
 ## License
 

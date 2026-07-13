@@ -17,6 +17,11 @@
       "name": "unslop-code",
       "source": "./plugins/unslop-code",
       "description": "Detect and roast AI code slop. Finds tutorial comments, vacuous tests, abstraction inflation, and chatbot bleed, then fixes what you approve and verifies behavior held."
+    },
+    {
+      "name": "context-contradiction-checker",
+      "source": "./plugins/context-contradiction-checker",
+      "description": "Audit your Claude Code context for instructions that fight each other. Reports conflicts, tensions, and duplication across CLAUDE.md files, rules, skills, hooks, and settings."
     }
   ]
 }
