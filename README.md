@@ -72,7 +72,7 @@ Detect and roast AI code slop: the redundant, unreadable, over-complicated patte
 
 ### What it does
 
-- Scans your uncommitted changes by default (`git diff --name-only HEAD`), or any files you point it at.
+- Scans your uncommitted changes by default (`git status --porcelain`, which includes brand-new untracked files), or any files you point it at.
 - Flags slop across a 12-pattern taxonomy: comments that narrate obvious code, vacuous tests (`assertTrue(True)`), abstraction inflation, phantom parameters, defensive over-engineering, corporate jargon, and chatbot bleed (assistant chatter that leaked into source).
 - Rates each finding CRITICAL / HIGH / MEDIUM / LOW, with the snippet and a proposed fix.
 - Lets you choose what to fix: all, by severity, one at a time, or report only.
@@ -84,6 +84,8 @@ Detect and roast AI code slop: the redundant, unreadable, over-complicated patte
 /unslop-code                     # scan uncommitted changes
 /unslop-code src/parser.py       # scan specific files or directories
 /unslop-code --auto              # non-interactive: report only, no fixes, no prompts
+/unslop-code --auto-fix          # non-interactive: apply all fixes, each gated by the behavior check
+/unslop-code --review            # read-only audit of an already-drafted cleanup (no edits)
 ```
 
 ### When to use it

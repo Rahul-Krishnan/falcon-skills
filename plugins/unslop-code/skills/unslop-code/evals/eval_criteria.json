@@ -1,13 +1,14 @@
 {
+  "project": "unslop-code",
   "skill_name": "unslop-code",
   "test_cases": [
     {
       "id": "tc1_standard_invocation",
-      "name": "Standard invocation — code with comment slop and vacuous tests",
+      "name": "Standard invocation \u2014 code with comment slop and vacuous tests",
       "category": "execution",
       "test_profile": "execution",
       "prompt": "Run /unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nThe user has recently edited two files. When you attempt to run 'git diff --name-only HEAD', treat the following as the output:\n\nsrc/user_service.py\ntests/test_user_service.py\n\nWhen you attempt to read src/user_service.py, return:\n\n```python\n# Import the os module for operating system operations\nimport os\n# Import the json module to handle JSON data\nimport json\n\n# UserService class that manages users\nclass UserService:\n    # Initialize the UserService with a repository\n    def __init__(self, repository):\n        # Set the repository attribute\n        self.repository = repository\n\n    # Get all users from the repository\n    def get_users(self):\n        # Retrieve all users from the repository\n        all_users = self.repository.get_all_users()\n        # Return all the users\n        return all_users\n\n    # Calculate total price\n    def calculate_total(self, price, quantity):\n        # Calculate the total price by multiplying price by quantity\n        total = price * quantity\n        # Return the calculated total\n        return total\n```\n\nWhen you attempt to read tests/test_user_service.py, return:\n\n```python\nimport unittest\n\nclass TestUserService(unittest.TestCase):\n    # Test that true is true\n    def test_always_passes(self):\n        # This test always passes\n        self.assertTrue(True)\n\n    # Test the get_users method exists\n    def test_get_users_exists(self):\n        # Check that the method exists\n        service = UserService(None)\n        # Verify the method is callable\n        self.assertTrue(callable(service.get_users))\n```\n\nDo NOT run any real git commands or read real files.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nThe user has recently edited two files. When you attempt to run 'git status --porcelain', treat the following as the output:\n\n M src/user_service.py\n M tests/test_user_service.py\n\nWhen you attempt to read src/user_service.py, return:\n\n```python\n# Import the os module for operating system operations\nimport os\n# Import the json module to handle JSON data\nimport json\n\n# UserService class that manages users\nclass UserService:\n    # Initialize the UserService with a repository\n    def __init__(self, repository):\n        # Set the repository attribute\n        self.repository = repository\n\n    # Get all users from the repository\n    def get_users(self):\n        # Retrieve all users from the repository\n        all_users = self.repository.get_all_users()\n        # Return all the users\n        return all_users\n\n    # Calculate total price\n    def calculate_total(self, price, quantity):\n        # Calculate the total price by multiplying price by quantity\n        total = price * quantity\n        # Return the calculated total\n        return total\n```\n\nWhen you attempt to read tests/test_user_service.py, return:\n\n```python\nimport unittest\n\nclass TestUserService(unittest.TestCase):\n    # Test that true is true\n    def test_always_passes(self):\n        # This test always passes\n        self.assertTrue(True)\n\n    # Test the get_users method exists\n    def test_get_users_exists(self):\n        # Check that the method exists\n        service = UserService(None)\n        # Verify the method is callable\n        self.assertTrue(callable(service.get_users))\n```\n\nDo NOT run any real git commands or read real files.",
       "allowed_tools": [
         "Read",
         "Skill"
@@ -80,11 +81,11 @@
     },
     {
       "id": "tc2_default_git_diff",
-      "name": "Default git diff fallback — no explicit target",
+      "name": "Default git-status fallback \u2014 no explicit target",
       "category": "invocation",
       "test_profile": "execution",
       "prompt": "Run /unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return:\nutils/helpers.py\n\nWhen you attempt to read utils/helpers.py, return:\n\n```python\n# This is the helpers module\n# It contains helper functions\n\n# Function to add two numbers together\ndef add_numbers(a, b):\n    # Add a and b together\n    result = a + b\n    # Return the result\n    return result\n\n# Function to check if number is positive\ndef is_positive(n):\n    # Check if n is greater than zero\n    if n > 0:\n        # Return True because n is positive\n        return True\n    return False\n```\n\nDo NOT run any real git commands or read real files.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git status --porcelain', return:\n M utils/helpers.py\n\nWhen you attempt to read utils/helpers.py, return:\n\n```python\n# This is the helpers module\n# It contains helper functions\n\n# Function to add two numbers together\ndef add_numbers(a, b):\n    # Add a and b together\n    result = a + b\n    # Return the result\n    return result\n\n# Function to check if number is positive\ndef is_positive(n):\n    # Check if n is greater than zero\n    if n > 0:\n        # Return True because n is positive\n        return True\n    return False\n```\n\nDo NOT run any real git commands or read real files.",
       "allowed_tools": [
         "Read",
         "Skill"
@@ -94,14 +95,14 @@
       ],
       "checks": [
         {
-          "description": "Does the skill default to scanning git diff without prompting for a target, since git diff returned results?",
+          "description": "Does the skill default to scanning the default git command without prompting for a target, since the default git command returned results?",
           "importance": "HIGH",
           "rubric": {
-            "1": "Agent asked the user to specify files even though git diff returned a file.",
-            "2": "Agent used git diff but also unnecessarily prompted for confirmation of the target.",
-            "3": "Agent used git diff but took a roundabout path (e.g. searched for project config files first when not needed).",
-            "4": "Agent correctly defaulted to git diff but with minor unnecessary steps.",
-            "5": "Agent immediately ran 'git diff --name-only HEAD', got utils/helpers.py, and read it without any user interaction."
+            "1": "Agent asked the user to specify files even though the git command returned a file.",
+            "2": "Agent used the git command but also unnecessarily prompted for confirmation of the target.",
+            "3": "Agent used the git command but took a roundabout path (e.g. searched for project config files first when not needed).",
+            "4": "Agent correctly defaulted to the git command but with minor unnecessary steps.",
+            "5": "Agent immediately ran 'git status --porcelain', got utils/helpers.py, and read it without any user interaction."
           }
         },
         {
@@ -130,11 +131,11 @@
     },
     {
       "id": "tc3_no_changes",
-      "name": "Edge case — no uncommitted changes found",
+      "name": "Edge case \u2014 no uncommitted changes found",
       "category": "edge_case",
       "test_profile": "error_handling",
       "prompt": "Run /unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return empty output (nothing, no files listed).\n\nDo NOT run any real git commands.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git status --porcelain', return empty output (nothing, no files listed).\n\nDo NOT run any real git commands.",
       "allowed_tools": [
         "Read",
         "AskUserQuestion",
@@ -145,7 +146,7 @@
       ],
       "checks": [
         {
-          "description": "When git diff returns empty, does the skill ask the user which files to scan rather than silently failing?",
+          "description": "When the default git command returns empty, does the skill ask the user which files to scan rather than silently failing?",
           "importance": "CRITICAL",
           "rubric": {
             "1": "Agent proceeded silently with no files and produced an empty or nonsensical report.",
@@ -170,11 +171,11 @@
     },
     {
       "id": "tc4_clean_code",
-      "name": "Edge case — code with zero slop patterns",
+      "name": "Edge case \u2014 code with zero slop patterns",
       "category": "edge_case",
       "test_profile": "execution",
       "prompt": "Run /unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return:\nauth/token_validator.py\n\nWhen you attempt to read auth/token_validator.py, return:\n\n```python\nfrom datetime import datetime, timezone\nimport hmac\n\nTOKEN_EXPIRY_SECONDS = 3600\n_CLOCK_SKEW_TOLERANCE = 30  # Tolerate 30s of NTP drift between services\n\ndef validate_token(token: str, secret: bytes, issued_at: int) -> bool:\n    now = int(datetime.now(timezone.utc).timestamp())\n    age = now - issued_at\n    if age < -_CLOCK_SKEW_TOLERANCE or age > TOKEN_EXPIRY_SECONDS + _CLOCK_SKEW_TOLERANCE:\n        return False\n    expected = _sign(token.split('.')[0], secret)\n    return hmac.compare_digest(expected, token.split('.')[1])\n\ndef _sign(payload: str, secret: bytes) -> str:\n    return hmac.new(secret, payload.encode(), 'sha256').hexdigest()\n```\n\nDo NOT run any real git commands or read real files.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git status --porcelain', return:\n M auth/token_validator.py\n\nWhen you attempt to read auth/token_validator.py, return:\n\n```python\nfrom datetime import datetime, timezone\nimport hmac\n\nTOKEN_EXPIRY_SECONDS = 3600\n_CLOCK_SKEW_TOLERANCE = 30  # Tolerate 30s of NTP drift between services\n\ndef validate_token(token: str, secret: bytes, issued_at: int) -> bool:\n    now = int(datetime.now(timezone.utc).timestamp())\n    age = now - issued_at\n    if age < -_CLOCK_SKEW_TOLERANCE or age > TOKEN_EXPIRY_SECONDS + _CLOCK_SKEW_TOLERANCE:\n        return False\n    expected = _sign(token.split('.')[0], secret)\n    return hmac.compare_digest(expected, token.split('.')[1])\n\ndef _sign(payload: str, secret: bytes) -> str:\n    return hmac.new(secret, payload.encode(), 'sha256').hexdigest()\n```\n\nDo NOT run any real git commands or read real files.",
       "allowed_tools": [
         "Read",
         "Skill"
@@ -188,7 +189,7 @@
           "importance": "HIGH",
           "rubric": {
             "1": "Agent produced false positive findings on clean code.",
-            "2": "Agent produced no findings but did not use the CLEAN format — just said 'no issues found'.",
+            "2": "Agent produced no findings but did not use the CLEAN format \u2014 just said 'no issues found'.",
             "3": "Agent produced a clean verdict but the format was missing key fields (Signal, Verdict).",
             "4": "Agent output the CLEAN format with Signal: CLEAN but minor deviations from the documented format.",
             "5": "Agent output the documented zero-slop format: Total slop found: 0 patterns, Signal: CLEAN, and a clean verdict."
@@ -212,11 +213,11 @@
     },
     {
       "id": "tc5_chatbot_spec_bleed",
-      "name": "Task completion — chatbot bleed and spec bleed detection",
+      "name": "Task completion \u2014 chatbot bleed and spec bleed detection",
       "category": "task_completion",
       "test_profile": "execution",
       "prompt": "Run /unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return:\napi/endpoints.py\n\nWhen you attempt to read api/endpoints.py, return:\n\n```python\n# I hope this helps you understand the API endpoints!\n# Certainly, here are the endpoint handlers as requested:\n\ndef implement_business_requirement_3_2_create_user_endpoint_as_requested(request):\n    \"\"\"This function implements Business Requirement 3.2 to create a user endpoint as specified in the spec.\"\"\"\n    # Let me know if you need anything else!\n    user_data = request.json()\n    return create_user(user_data)\n\ndef leverage_caching_mechanism_to_enhance_performance(key, value):\n    \"\"\"Leverages our caching mechanism to facilitate enhanced performance.\"\"\"\n    cache.set(key, value)\n```\n\nDo NOT run any real git commands or read real files.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git status --porcelain', return:\n M api/endpoints.py\n\nWhen you attempt to read api/endpoints.py, return:\n\n```python\n# I hope this helps you understand the API endpoints!\n# Certainly, here are the endpoint handlers as requested:\n\ndef implement_business_requirement_3_2_create_user_endpoint_as_requested(request):\n    \"\"\"This function implements Business Requirement 3.2 to create a user endpoint as specified in the spec.\"\"\"\n    # Let me know if you need anything else!\n    user_data = request.json()\n    return create_user(user_data)\n\ndef leverage_caching_mechanism_to_enhance_performance(key, value):\n    \"\"\"Leverages our caching mechanism to facilitate enhanced performance.\"\"\"\n    cache.set(key, value)\n```\n\nDo NOT run any real git commands or read real files.",
       "allowed_tools": [
         "Read",
         "Skill"
@@ -259,7 +260,7 @@
           }
         },
         {
-          "description": "Is the roast tone specific and dry — referencing actual code snippets rather than giving generic commentary?",
+          "description": "Is the roast tone specific and dry \u2014 referencing actual code snippets rather than giving generic commentary?",
           "importance": "MEDIUM",
           "rubric": {
             "1": "Roast was entirely generic ('this code has quality issues') with no specific citations.",
@@ -273,11 +274,11 @@
     },
     {
       "id": "tc6_business_impact",
-      "name": "Business impact — roast should be actionable with specific fixes",
+      "name": "Business impact \u2014 roast should be actionable with specific fixes",
       "category": "business_impact",
       "test_profile": "execution",
       "prompt": "Run /unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return:\nutils/db_utils.py\n\nWhen you attempt to read utils/db_utils.py, return:\n\n```python\n# Database utility functions\n# This module provides utility functions for database operations\n\n# Step 1: Initialize\n# Step 2: Connect\n# Step 3: Execute\n\ndef connect_to_database(host, port, dbname):\n    # Connect to the database using host and port\n    conn = psycopg2.connect(host=host, port=port, dbname=dbname)\n    # Return the connection object\n    return conn\n\ndef execute_query(conn, query):\n    # Execute the SQL query using the connection\n    cursor = conn.cursor()\n    # Execute the query\n    cursor.execute(query)\n    # Return the cursor\n    return cursor\n```\n\nDo NOT run any real git commands or read real files.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git status --porcelain', return:\n M utils/db_utils.py\n\nWhen you attempt to read utils/db_utils.py, return:\n\n```python\n# Database utility functions\n# This module provides utility functions for database operations\n\n# Step 1: Initialize\n# Step 2: Connect\n# Step 3: Execute\n\ndef connect_to_database(host, port, dbname):\n    # Connect to the database using host and port\n    conn = psycopg2.connect(host=host, port=port, dbname=dbname)\n    # Return the connection object\n    return conn\n\ndef execute_query(conn, query):\n    # Execute the SQL query using the connection\n    cursor = conn.cursor()\n    # Execute the query\n    cursor.execute(query)\n    # Return the cursor\n    return cursor\n```\n\nDo NOT run any real git commands or read real files.",
       "allowed_tools": [
         "Read",
         "Skill"
@@ -327,7 +328,7 @@
       "category": "error_handling",
       "test_profile": "side_effect_guarded",
       "prompt": "/unslop-code",
-      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git diff --name-only HEAD', treat the output as:\n\nsrc/parse.py\n\nWhen you read src/parse.py, it contains a defensive try/except that unslop-code would flag as 'over-engineered error handling' and propose removing. The user picks option 1 (Fix all).\n\nThe project is a Python project with pytest available; the narrowest check for the touched file is 'pytest -q tests/test_parse.py'.\n\nWhen you run that test command AFTER applying the fix, treat the result as FAILING (the removed try/except was actually load-bearing: 2 tests fail).",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M src/parse.py\n\nWhen you read src/parse.py, it contains a defensive try/except that unslop-code would flag as 'over-engineered error handling' and propose removing. The user picks option 1 (Fix all).\n\nThe project is a Python project with pytest available; the narrowest check for the touched file is 'pytest -q tests/test_parse.py'.\n\nWhen you run that test command AFTER applying the fix, treat the result as FAILING (the removed try/except was actually load-bearing: 2 tests fail).",
       "allowed_tools": [
         "Read",
         "Skill",
@@ -446,6 +447,160 @@
       "required_present": [
         "CHANGES NEEDED"
       ]
+    },
+    {
+      "id": "tc10_auto_fix_exempt_gated_split",
+      "name": "--auto-fix applies exempt comment deletions directly and gates runtime-string and code edits",
+      "category": "tool_usage",
+      "test_profile": "side_effect_guarded",
+      "prompt": "/unslop-code --auto-fix",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M api/notify.py\n\nWhen you read api/notify.py, return:\n\n```python\nimport logging\nlogger = logging.getLogger(__name__)\n\n# Send the notification to the user\ndef send_notification(user, message):\n    # Log that we are sending\n    payload = build_payload(user, message)  # type: ignore[arg-type]\n    try:\n        transport.send(payload)\n    except TransportError:\n        logger.error(\"Unfortunately, we were unable to process your request at this time. Please try again later!\")\n        raise\n```\n\nThe project is a Python project with pytest available; the scoped check is 'pytest -q tests/test_notify.py'. When you run it as a baseline BEFORE fixes, treat it as PASSING. When you run it AFTER fixes, treat it as PASSING.",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does --auto-fix run fully non-interactively (no fix menu, no AskUserQuestion) and apply fixes as option 1?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Presented the interactive menu or asked the user a question despite --auto-fix.",
+            "2": "Skipped the menu but stopped to ask for confirmation before applying.",
+            "3": "Applied fixes non-interactively but with ambiguity about which mode it was in.",
+            "4": "Applied fixes non-interactively with minor deviations from the documented flow.",
+            "5": "No menu, no questions: applied all fixes directly, then proceeded to the behavior gate."
+          }
+        },
+        {
+          "description": "Does it treat the runtime-string rewrite (the 'Unfortunately...' logger.error message, pattern-5 chatbot bleed in a runtime string) as a GATED edit rather than a gate-exempt one?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Rewrote the log message and reported it as behavior-safe/gate-exempt with no check run.",
+            "2": "Rewrote the log message with no gate but ran a check for unrelated reasons.",
+            "3": "Ambiguous about whether the string rewrite was gated.",
+            "4": "Gated the string rewrite but described it as exempt in the report.",
+            "5": "Explicitly classified the runtime-string rewrite as behavior-visible and ran the behavior gate covering it."
+          }
+        },
+        {
+          "description": "Does it leave the '# type: ignore[arg-type]' directive comment alone (directives are never deleted as slop)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Deleted the type: ignore directive as comment slop.",
+            "2": "Proposed deleting the directive and applied it under --auto-fix.",
+            "3": "Flagged the directive as slop but did not delete it, without explaining why.",
+            "4": "Left the directive alone without comment.",
+            "5": "Left the directive alone and, if mentioned at all, noted directives are excluded from comment-slop deletion."
+          }
+        },
+        {
+          "description": "Does the final output report fixes_applied truthfully, distinguishing exempt comment deletions from gated edits?",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "No accounting of what was applied.",
+            "2": "Claims fixes applied without saying which.",
+            "3": "Lists fixes but conflates exempt and gated categories.",
+            "4": "Lists fixes with mostly correct categorization.",
+            "5": "Reports exactly which edits were applied, which were gate-exempt, and which passed the gate, with the check command as evidence."
+          }
+        }
+      ],
+      "required_present": []
+    },
+    {
+      "id": "tc11_red_baseline_attribution",
+      "name": "Already-red repo: baseline run prevents wrongful revert",
+      "category": "error_handling",
+      "test_profile": "side_effect_guarded",
+      "prompt": "/unslop-code --auto-fix",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M src/order.py\n\nWhen you read src/order.py, it contains narrator comments plus one genuinely dead helper function that unslop-code would remove (a gated code edit).\n\nThe project is a Python project; the scoped check is 'pytest -q tests/test_order.py'. When you run the check BEFORE applying any fixes (baseline), treat it as FAILING with 2 pre-existing failures (test_tax_rounding, test_currency_precision). When you run the same check AFTER applying the fixes, treat it as FAILING with the SAME 2 failures, unchanged.",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does it run the check once as a baseline BEFORE applying fixes and record the result?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No baseline run; first check execution happens after fixes.",
+            "2": "Mentions a baseline but never runs it.",
+            "3": "Runs a baseline but does not record or use the result.",
+            "4": "Runs and records the baseline with minor deviations.",
+            "5": "Runs the scoped check pre-fix, records baseline_status, and compares against it post-fix."
+          }
+        },
+        {
+          "description": "When post-fix failures match the already-red baseline, does it KEEP the fixes and report 'unverified: baseline was already failing' instead of reverting?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Reverts the fixes, blaming the cleanup for pre-existing failures.",
+            "2": "Keeps the fixes but reports the gate as passed.",
+            "3": "Keeps the fixes with a vague note about test failures.",
+            "4": "Keeps the fixes and attributes failures to the baseline, wording loose.",
+            "5": "Keeps the fixes, states the baseline was already failing with the same failures, marks the result unverified, and shows both outputs."
+          }
+        }
+      ],
+      "required_present": [
+        "baseline"
+      ]
+    },
+    {
+      "id": "tc12_polyglot_gate_per_ecosystem",
+      "name": "Polyglot diff gates every touched ecosystem, not just one",
+      "category": "execution",
+      "test_profile": "side_effect_guarded",
+      "prompt": "/unslop-code --auto-fix",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git status --porcelain', treat the output as:\n\n M web/app.ts\n M svc/worker.py\n\nBoth files contain a dead helper function (gated code edits). The repo has both an npm test script ('npm test') and pytest ('pytest -q'). Baselines for both PASS. After fixes, both PASS.",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does the behavior gate run one check per ecosystem present (both npm test for the TS file AND pytest for the Python file), rather than a single runner?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Runs no check, or runs one runner and reports everything verified.",
+            "2": "Runs one runner and acknowledges the other ecosystem is unverified but still reports overall success.",
+            "3": "Runs one runner and flags the other ecosystem as unverified.",
+            "4": "Runs both checks but conflates their results.",
+            "5": "Runs both npm test and pytest (baseline and post-fix), attributing each to its ecosystem."
+          }
+        },
+        {
+          "description": "Does the completion report cite both check commands and results as evidence?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No evidence cited.",
+            "2": "Cites one check only.",
+            "3": "Mentions both checks without results.",
+            "4": "Cites both checks with results, loosely attributed.",
+            "5": "Cites both commands with pass results, one per ecosystem."
+          }
+        }
+      ],
+      "required_present": []
     }
-  ]
+  ],
+  "dimensions": {
+    "task_completion": 0.3,
+    "invocation": 0.2,
+    "efficiency": 0.2,
+    "best_practices": 0.15,
+    "business_impact": 0.15
+  }
 }
