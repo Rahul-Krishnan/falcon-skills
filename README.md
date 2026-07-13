@@ -145,6 +145,65 @@ It reads instruction files, not code. It's not a linter or a code reviewer.
 - It reports on the context sources it can find on disk. Rules that live only in a system prompt or an MCP server's instructions are invisible to it.
 - Survives context compaction via a state file in `/tmp`, keyed on the session ID, but a very large context set still takes a while to walk.
 
+## Plugin layout
+
+Every plugin in this marketplace follows the same shape:
+
+```
+plugins/<name>/
+  .claude-plugin/plugin.json         required
+  skills/<name>/                     required, dir name matches the plugin name
+    SKILL.md                         required
+    evals/eval_criteria.json         required
+    references/                      optional
+```
+
+**`plugin.json`** needs `name`, `description`, `version`, `author.name`, and `keywords`.
+Its `name` must match the plugin directory.
+
+**`SKILL.md` frontmatter** needs `name` (matching the plugin), a `description`, and
+`metadata.user-invocable` plus `metadata.allowed-tools`. `metadata.argument-hint` is
+optional and only belongs on skills that take arguments.
+
+Write the `description` as a quoted string, never a folded block (`>`). It is the string
+the model matches on to decide whether to invoke the skill, and a block scalar quietly
+inserts newlines into it.
+
+Declare `allowed-tools` explicitly. A skill without it inherits the full default toolset,
+which is more than any of these need.
+
+**`eval_criteria.json`** needs `project`, a `skill_name` matching the plugin, and a
+non-empty `test_cases` list where each case has `id`, `name`, `prompt`, and `checks`.
+`required_present` and `required_absent` are per-case assertions, so add them where a case
+has something to assert and leave them off where it does not.
+
+It also needs a `dimensions` block with exactly these five keys, weighted to sum to 1.0:
+`task_completion`, `invocation`, `efficiency`, `best_practices`, `business_impact`. The
+key set is fixed, so a block that sums to 1.0 under different names is still rejected.
+
+**`marketplace.json`** at the repo root must list every plugin, and every plugin it lists
+must exist. Each entry needs a `name`, a `description`, and a `source` path that resolves
+to a real directory. Adding a plugin directory without adding it here fails the check, and
+so does the reverse.
+
+**`references/`** is optional. Use it when a skill has content worth splitting out of
+SKILL.md, as hindsight does. Do not create an empty one just to make the trees match.
+
+Descriptions in `marketplace.json`, `plugin.json`, and `SKILL.md` are intentionally
+different: one is for a human browsing plugins, one is for the loader, and one is the
+trigger string the model reads. They describe the same plugin to three different readers.
+The `name` is what has to agree across all three.
+
+### Checking it
+
+```
+python3 scripts/validate_structure.py
+```
+
+Exits non-zero and names each violation. It runs on every PR via
+[.github/workflows/validate.yml](.github/workflows/validate.yml). Stdlib only, so there is
+nothing to install.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

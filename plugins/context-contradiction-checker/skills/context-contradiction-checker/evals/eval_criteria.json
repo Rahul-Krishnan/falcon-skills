@@ -514,5 +514,12 @@
         "does-not-exist.md contains"
       ]
     }
-  ]
+  ],
+  "dimensions": {
+    "task_completion": 0.3,
+    "invocation": 0.2,
+    "efficiency": 0.2,
+    "best_practices": 0.15,
+    "business_impact": 0.15
+  }
 }

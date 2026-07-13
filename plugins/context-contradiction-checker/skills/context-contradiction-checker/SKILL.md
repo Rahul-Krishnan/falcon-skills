@@ -1,13 +1,9 @@
 ---
 name: context-contradiction-checker
-description: >
-  Detect contradictory, inconsistent, or duplicated instructions across all active
-  Claude Code context sources (CLAUDE.md files, .llms/rules, skills, hooks). Use
-  when asked to check for contradictions in context, find inconsistencies across
-  rules, or audit Claude setup for contradictory instructions. Do not use to
-  analyze code files or non-instruction documentation. Not a linter or code reviewer.
+description: "Detect contradictory, inconsistent, or duplicated instructions across all active Claude Code context sources (CLAUDE.md files, .llms/rules, skills, hooks). Use when asked to check for contradictions in context, find inconsistencies across rules, or audit Claude setup for contradictory instructions. Do not use to analyze code files or non-instruction documentation. Not a linter or code reviewer."
 metadata:
   user-invocable: true
+  allowed-tools: "Read, Glob, Grep, Bash(echo:*, cat:*, ls:*), Edit, Write"
 ---
 
 # Context Contradiction Checker
