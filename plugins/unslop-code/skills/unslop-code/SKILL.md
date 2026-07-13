@@ -28,7 +28,7 @@ When `--review` is set:
 2. **Resolve the cleanup to audit as a diff**, in this order:
    - The target the user named (a diff, a branch, or explicit files).
    - Otherwise, uncommitted changes if `git status --porcelain` is non-empty: `git diff HEAD` (plus untracked files, read whole).
-   - Otherwise — the normal case, a cleanup already committed on a branch — `git diff $(git merge-base HEAD <default-branch>)...HEAD`, resolving the default branch with `git symbolic-ref refs/remotes/origin/HEAD` and falling back to `main`, then `master`.
+   - Otherwise — the normal case, a cleanup already committed on a branch — `git diff <default-branch>...HEAD`. The three-dot form already means "diff against the merge base", so no explicit `git merge-base` call is needed. Resolve the default branch with `git symbolic-ref refs/remotes/origin/HEAD`, falling back to `main`, then `master`.
    - Only if all of those come back empty: report "No cleanup found to review" and exit. Never fall through to the Step 1 "no uncommitted changes" prompt — review mode needs the pre-state (its first check is over-removal, and deleted lines exist only in the diff).
 3. Inspect what the cleanup removed or rewrote and check specifically for:
    - **Over-removal:** deleted code that was actually used, not dead (verify before trusting a "dead code" deletion).
@@ -47,17 +47,31 @@ At start, write `/tmp/unslop-${CLAUDE_CODE_CURRENT_SESSION_ID}.json`. The path m
 ```json
 {"status": "scanning", "source": "", "findings": [], "files_scanned": []}
 ```
-Update `findings` after Step 2, update `status` to `"roasting"` before Step 3, `"awaiting_fix_choice"` before Step 4, and `"verifying"` before Step 5 (behavior gate). Record `modified_files`, `pre_fix_content`, and `post_fix_content` in state once fixes are applied, so a failed gate can revert and the Step 5 tamper check has something to compare against.
 
-**On re-entry after a compaction:** re-read this file first. If `status` is `"verifying"` with `modified_files` set, the fixes are applied but ungated — resume at Step 5, do not re-scan and do not re-apply.
+**Status values, in order.** Every status the run can be interrupted in has a re-entry rule, because a compaction between two of them is the case this file exists for:
 
-Delete the state file once the run completes (final report delivered, or report-only exit) — it contains source code and should not linger in a shared temp dir.
+| `status` | Set when | Re-entry rule |
+|---|---|---|
+| `scanning` | Step 1 starts | Nothing is applied. Start over. |
+| `roasting` | before Step 3 | Nothing is applied. Start over. |
+| `choosing` | before Step 4's menu (skipped under `--auto`/`--auto-fix`, where nobody is being asked) | Nothing is applied. Re-present the menu. |
+| `fixing` | wave 2 of Step 4 starts | **Gated edits are partially applied.** Restore every path in `modified_files` from `pre_fix_content`, which discards the half-finished wave 2 and keeps wave 1. Do not try to finish the wave: there is no per-edit ledger of what landed before the interruption, so resuming is guesswork. Report the run as interrupted and reverted to the last known-safe state. Never re-scan. |
+| `verifying` | before Step 5 | Fixes are applied but ungated. Resume at Step 5. Do not re-scan and do not re-apply. |
+
+Three content maps are recorded, and they are not interchangeable:
+
+- `original_content`: map of {path → content as first read in **Step 1**, before any edit}. This is the only record of the file as the user actually had it. Capture it at read time, not at fix time: the default scan target includes untracked files, and for those git holds no copy, so this map is the sole undo.
+- `pre_fix_content`: map of {path → content after wave 1, before wave 2}. The revert target for a failed gate.
+- `post_fix_content`: map of {path → content written at the end of wave 2}. What Step 5 compares against to detect a file that changed underneath it. It does not exist until wave 2 finishes, which is why the `fixing` rule above reverts rather than compares.
+
+Delete the state file once the run completes (final report delivered, or report-only exit) — it holds three copies of the scanned source and should not linger in a shared temp dir.
 
 ## Step Interfaces
 
 **Step 1 → Step 2 produces** (required):
 - `source`: string — description of where code came from
 - `files`: array of {path, content} — all files to scan
+- `original_content`: map of {path → content as first read}, recorded here and never overwritten. Untracked files are in scope and git has no copy of them, so this is the user's only undo.
 
 **Step 2 → Step 3 produces** (required):
 - `findings`: array of {id, pattern, location, severity, why_slop, snippet, fix}
@@ -132,7 +146,7 @@ How would you like to proceed?
 
 1. **Wave 1 — exempt edits** (plain-comment deletions and condensations; see the exemption rules in Step 5). Apply these first.
 2. **Snapshot.** Re-read each file you are about to touch again and record it as `pre_fix_content`. This content — exempt edits already in, gated edits not yet — is what a failed gate restores.
-3. **Wave 2 — gated edits** (everything else). Apply, then record the result as `post_fix_content`.
+3. **Wave 2 — gated edits** (everything else). Set `status` to `"fixing"` **before** the first gated edit, so an interruption here is recoverable, then apply. When the wave completes, record the result as `post_fix_content` and set `status` to `"verifying"`.
 
 Reverting therefore backs out exactly the gated wave and keeps the exempt wave, which is what the report has to claim. If a file has only one kind of edit, the waves collapse and the rule costs nothing.
 
@@ -145,7 +159,12 @@ Removing dead code, collapsing abstractions, or rewriting tests can change behav
 1. **Find the narrowest check per ecosystem.** For each language present in the touched files, pick one check in this order: an obvious project runner (`npm test`/`pnpm test`/`pytest`/`go test`/`cargo test`), then a typecheck/lint (`tsc --noEmit`, `ruff`, `mypy`). A diff touching both TS and Python gates on both — never report "verified" while one ecosystem shipped unchecked. Prefer a scoped run over the touched paths over a full suite.
 2. **Run every selected check** (the same ones you baselined in Step 4). Compare each result with its baseline.
    - **Pass:** report completion with the command and its result as evidence.
-   - **Fail, baseline was green (or the failure is new):** the cleanup likely changed behavior. Restore each modified file from `pre_fix_content`, which backs out the gated wave and leaves the exempt wave intact, then report which findings were backed out and the failing output. Before restoring, re-read the file and compare it against `post_fix_content`: if it no longer matches, something else edited it while the check ran — stop and warn instead of overwriting. Never leave a failing tree and never "fix forward" past a red gate inside this skill.
+   - **Fail, baseline was green (or the failure is new):** the cleanup changed behavior. Before restoring anything, re-read each file and compare it against `post_fix_content`: if it no longer matches, something else edited it while the check ran, so stop and warn instead of overwriting. Then revert in tiers, and **verify the revert instead of assuming it worked**:
+     1. Restore each modified file from `pre_fix_content`. That backs out the gated wave and leaves the exempt wave in place.
+     2. **Re-run the failing check.** Green: wave 2 was the culprit, which is the expected case. Report which findings were backed out, with the failing output.
+     3. **Still red:** wave 1 is implicated, which means an edit classified as an exempt plain comment was not one — a mis-classified docstring or directive is the likely cause. Restore from `original_content`, putting every file back exactly as the run found it, and report that the exemption call was wrong, naming the wave-1 edits so the misclassification can be found. This is the only branch that touches `original_content`, and it terminates: there is no fourth tier and no re-fix.
+
+     Never leave a failing tree and never "fix forward" past a red gate inside this skill. The two-wave scheme assumes wave 1 is behavior-safe, and step 3 above is what happens when that assumption is wrong — the gate exists precisely because that judgment is not to be trusted on its own.
    - **Fail, baseline was already red with the same failures:** the cleanup is not to blame. Keep the fixes, but report "unverified: baseline was already failing" with both outputs so the user can judge.
 3. **If no check can be found:** do not silently skip. State plainly that behavior was not verified, list exactly which files changed, and recommend the user run their own tests. In `--auto` mode, prefer reverting non-exempt fixes over leaving them unverified; gate-exempt comment deletions are safe to keep.
 

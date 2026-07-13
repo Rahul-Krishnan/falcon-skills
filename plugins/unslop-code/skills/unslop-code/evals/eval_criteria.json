@@ -746,6 +746,64 @@
       "required_present": [
         "not verified"
       ]
+    },
+    {
+      "id": "tc15_review_auto_composes",
+      "name": "--review --auto returns a verdict non-interactively on a committed cleanup",
+      "category": "tool_usage",
+      "test_profile": "side_effect_guarded",
+      "prompt": "/unslop-code --review --auto",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nBoth --review and --auto are set, so there is no user to ask and no file may be written.\n\nA slop cleanup was already committed on the branch 'cleanup/tidy-exports'. The working tree is CLEAN: when you run 'git status --porcelain', treat the output as EMPTY. The default branch is 'main'.\n\nWhen you diff the branch against the default branch (three-dot form), treat the output as a diff over src/exports.py that: (a) deletes six narrator comments, (b) deletes a '# noqa: E501' directive comment, and (c) rewrites the exception text in 'raise ValueError(...)' from a hedged chatbot sentence to a terse one.\n\nDo NOT run any real git commands or read real files.",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Do the two flags compose: does it produce a verdict non-interactively instead of exiting on the empty working tree or asking the user anything?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Exits with 'No uncommitted changes found' or an equivalent empty-state message, producing no verdict at all.",
+            "2": "Calls AskUserQuestion or otherwise waits for input despite --auto.",
+            "3": "Reviews something but never states a verdict.",
+            "4": "Produces a verdict non-interactively, but sourced its diff by an ad-hoc route that would miss a multi-commit cleanup.",
+            "5": "Falls through the clean working tree to the merge-base diff against main, reviews it with no user interaction, and states APPROVE or CHANGES NEEDED."
+          }
+        },
+        {
+          "description": "Does it stay strictly read-only (no Edit, no Write) even though --auto is set, which in the writer path would apply fixes?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Applies fixes: --auto was treated as the writer path despite --review.",
+            "2": "Proposes edits and begins applying them.",
+            "3": "Ambiguous about whether it wrote anything.",
+            "4": "Writes nothing but does not make the read-only contract explicit.",
+            "5": "Writes nothing at all, and says the mode is read-only."
+          }
+        },
+        {
+          "description": "Does the review catch the deleted '# noqa: E501' directive as an over-removal (directives are never slop) rather than approving the cleanup?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Returns APPROVE, missing that the cleanup deleted a directive comment.",
+            "2": "Notes the directive deletion but still approves.",
+            "3": "Flags a vague concern about the comment deletions without identifying the directive.",
+            "4": "Identifies the deleted directive but the verdict is loose.",
+            "5": "Returns CHANGES NEEDED, names the deleted '# noqa: E501' as a directive that is never a slop deletion, and lists restoring it as the follow-up."
+          }
+        }
+      ],
+      "required_present": [
+        "CHANGES NEEDED"
+      ],
+      "required_absent": [
+        "No uncommitted changes found",
+        "How would you like to proceed?"
+      ]
     }
   ],
   "dimensions": {
