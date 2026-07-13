@@ -1,0 +1,451 @@
+{
+  "skill_name": "unslop-code",
+  "test_cases": [
+    {
+      "id": "tc1_standard_invocation",
+      "name": "Standard invocation — code with comment slop and vacuous tests",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "Run /unslop-code",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nThe user has recently edited two files. When you attempt to run 'git diff --name-only HEAD', treat the following as the output:\n\nsrc/user_service.py\ntests/test_user_service.py\n\nWhen you attempt to read src/user_service.py, return:\n\n```python\n# Import the os module for operating system operations\nimport os\n# Import the json module to handle JSON data\nimport json\n\n# UserService class that manages users\nclass UserService:\n    # Initialize the UserService with a repository\n    def __init__(self, repository):\n        # Set the repository attribute\n        self.repository = repository\n\n    # Get all users from the repository\n    def get_users(self):\n        # Retrieve all users from the repository\n        all_users = self.repository.get_all_users()\n        # Return all the users\n        return all_users\n\n    # Calculate total price\n    def calculate_total(self, price, quantity):\n        # Calculate the total price by multiplying price by quantity\n        total = price * quantity\n        # Return the calculated total\n        return total\n```\n\nWhen you attempt to read tests/test_user_service.py, return:\n\n```python\nimport unittest\n\nclass TestUserService(unittest.TestCase):\n    # Test that true is true\n    def test_always_passes(self):\n        # This test always passes\n        self.assertTrue(True)\n\n    # Test the get_users method exists\n    def test_get_users_exists(self):\n        # Check that the method exists\n        service = UserService(None)\n        # Verify the method is callable\n        self.assertTrue(callable(service.get_users))\n```\n\nDo NOT run any real git commands or read real files.",
+      "allowed_tools": [
+        "Read",
+        "Skill"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does the output include a slop detection report header (AI SLOP DETECTION REPORT or equivalent)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No report header present. The agent produced generic commentary without following the output format.",
+            "2": "Report header exists but is missing key sections like Source, Total slop found, or Signal.",
+            "3": "Report header present with most sections but missing one (e.g. Signal or Verdict).",
+            "4": "Report header present with all documented sections but formatting slightly differs from spec.",
+            "5": "Full report header matching the documented format: Source, Total slop found, Signal, Slop Breakdown, Verdict."
+          }
+        },
+        {
+          "description": "Does the skill identify comment slop (narrator/paraphraser comments like '# Set the repository attribute' above self.repository = repository)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No comment slop findings. The agent missed obvious narrator comments.",
+            "2": "Agent mentioned comments were excessive but did not cite specific instances or patterns.",
+            "3": "Agent identified some comment slop but missed multiple obvious narrators (e.g. only flagged 1-2 out of 10+).",
+            "4": "Agent identified most comment slop with specific snippets but missed 1-2 obvious cases.",
+            "5": "Agent identified comment slop as a pattern with specific code snippets referenced, correctly classified as COMMENT SLOP or equivalent."
+          }
+        },
+        {
+          "description": "Does the skill identify vacuous tests (assertTrue(True) and callable check with no logic)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No vacuous test findings. The agent missed tautological assertions entirely.",
+            "2": "Agent noted the tests were weak but did not cite the specific tautological patterns.",
+            "3": "Agent flagged test issues but classified them incorrectly or without citing the specific line.",
+            "4": "Agent flagged assertTrue(True) as a vacuous test but missed the callable-with-no-logic case.",
+            "5": "Agent flagged both assertTrue(True) as a tautological assertion and the callable test as a vacuous existence check, with specific line references."
+          }
+        },
+        {
+          "description": "Does the skill present a numbered fix menu (Fix all, Fix by severity, Interactive, Report only) before applying any changes?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No fix menu presented. Agent either applied fixes without asking or stopped without offering options.",
+            "2": "Agent mentioned options informally in prose but did not present the numbered list as documented.",
+            "3": "Agent presented 2-3 of the 4 options but not all of them.",
+            "4": "Agent presented all 4 options as a numbered list but with slightly different labels.",
+            "5": "Agent presented all 4 options exactly: 1. Fix all, 2. Fix by severity, 3. Interactive, 4. Report only, and waited for user input."
+          }
+        },
+        {
+          "description": "Does the skill wait for user input after presenting the menu (not auto-proceed to applying fixes)?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Agent auto-applied fixes without waiting for user selection.",
+            "2": "Agent presented the menu but then immediately started applying fixes without waiting.",
+            "3": "Agent presented the menu and paused, but made an implicit assumption about which option to apply.",
+            "4": "Agent presented the menu and explicitly waited, but the waiting mechanism was unclear.",
+            "5": "Agent presented the menu and clearly stopped, awaiting user input with no automatic progression."
+          }
+        }
+      ],
+      "required_present": [
+        "Fix all",
+        "Fix by severity",
+        "Report only"
+      ]
+    },
+    {
+      "id": "tc2_default_git_diff",
+      "name": "Default git diff fallback — no explicit target",
+      "category": "invocation",
+      "test_profile": "execution",
+      "prompt": "Run /unslop-code",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return:\nutils/helpers.py\n\nWhen you attempt to read utils/helpers.py, return:\n\n```python\n# This is the helpers module\n# It contains helper functions\n\n# Function to add two numbers together\ndef add_numbers(a, b):\n    # Add a and b together\n    result = a + b\n    # Return the result\n    return result\n\n# Function to check if number is positive\ndef is_positive(n):\n    # Check if n is greater than zero\n    if n > 0:\n        # Return True because n is positive\n        return True\n    return False\n```\n\nDo NOT run any real git commands or read real files.",
+      "allowed_tools": [
+        "Read",
+        "Skill"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does the skill default to scanning git diff without prompting for a target, since git diff returned results?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Agent asked the user to specify files even though git diff returned a file.",
+            "2": "Agent used git diff but also unnecessarily prompted for confirmation of the target.",
+            "3": "Agent used git diff but took a roundabout path (e.g. searched for project config files first when not needed).",
+            "4": "Agent correctly defaulted to git diff but with minor unnecessary steps.",
+            "5": "Agent immediately ran 'git diff --name-only HEAD', got utils/helpers.py, and read it without any user interaction."
+          }
+        },
+        {
+          "description": "Does the skill detect comment slop in helpers.py (the narrator comments explaining obvious code)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Agent produced a clean report or no findings for helpers.py.",
+            "2": "Agent noted code quality issues but did not classify them as comment slop.",
+            "3": "Agent detected some comment slop but missed multiple obvious cases.",
+            "4": "Agent detected most comment slop findings with snippets but with minor gaps.",
+            "5": "Agent detected the narrator comments as COMMENT SLOP with specific citations from the code."
+          }
+        },
+        {
+          "description": "Does the skill present the fix options menu after the report?",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "No fix menu. Agent ended after the report without offering options.",
+            "2": "Agent mentioned options informally but did not number them.",
+            "3": "Agent presented a partial menu (2-3 options).",
+            "4": "Agent presented all 4 options but slightly paraphrased.",
+            "5": "Agent presented the full 4-option numbered menu as documented."
+          }
+        }
+      ]
+    },
+    {
+      "id": "tc3_no_changes",
+      "name": "Edge case — no uncommitted changes found",
+      "category": "edge_case",
+      "test_profile": "error_handling",
+      "prompt": "Run /unslop-code",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return empty output (nothing, no files listed).\n\nDo NOT run any real git commands.",
+      "allowed_tools": [
+        "Read",
+        "AskUserQuestion",
+        "Skill"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "When git diff returns empty, does the skill ask the user which files to scan rather than silently failing?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Agent proceeded silently with no files and produced an empty or nonsensical report.",
+            "2": "Agent reported an error but did not ask which files to scan.",
+            "3": "Agent reported that no changes were found and suggested running again with a target, but did not explicitly ask.",
+            "4": "Agent asked for files to scan but the question was vague (did not explain why).",
+            "5": "Agent output the message 'No uncommitted changes found. Which files should I scan?' or equivalent, clearly asking for a target."
+          }
+        },
+        {
+          "description": "Is the empty-state response helpful and informative (not just a cryptic error)?",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Agent crashed or produced an error stacktrace.",
+            "2": "Agent said 'no files' with no further guidance.",
+            "3": "Agent explained the situation but the guidance was unclear.",
+            "4": "Agent explained clearly and asked for input, but the message was overly verbose.",
+            "5": "Agent produced a clear, concise message explaining the empty state and asking for a scan target."
+          }
+        }
+      ]
+    },
+    {
+      "id": "tc4_clean_code",
+      "name": "Edge case — code with zero slop patterns",
+      "category": "edge_case",
+      "test_profile": "execution",
+      "prompt": "Run /unslop-code",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return:\nauth/token_validator.py\n\nWhen you attempt to read auth/token_validator.py, return:\n\n```python\nfrom datetime import datetime, timezone\nimport hmac\n\nTOKEN_EXPIRY_SECONDS = 3600\n_CLOCK_SKEW_TOLERANCE = 30  # Tolerate 30s of NTP drift between services\n\ndef validate_token(token: str, secret: bytes, issued_at: int) -> bool:\n    now = int(datetime.now(timezone.utc).timestamp())\n    age = now - issued_at\n    if age < -_CLOCK_SKEW_TOLERANCE or age > TOKEN_EXPIRY_SECONDS + _CLOCK_SKEW_TOLERANCE:\n        return False\n    expected = _sign(token.split('.')[0], secret)\n    return hmac.compare_digest(expected, token.split('.')[1])\n\ndef _sign(payload: str, secret: bytes) -> str:\n    return hmac.new(secret, payload.encode(), 'sha256').hexdigest()\n```\n\nDo NOT run any real git commands or read real files.",
+      "allowed_tools": [
+        "Read",
+        "Skill"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does the skill output a 'zero slop found' or 'CLEAN' result when no slop patterns are detected?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Agent produced false positive findings on clean code.",
+            "2": "Agent produced no findings but did not use the CLEAN format — just said 'no issues found'.",
+            "3": "Agent produced a clean verdict but the format was missing key fields (Signal, Verdict).",
+            "4": "Agent output the CLEAN format with Signal: CLEAN but minor deviations from the documented format.",
+            "5": "Agent output the documented zero-slop format: Total slop found: 0 patterns, Signal: CLEAN, and a clean verdict."
+          }
+        },
+        {
+          "description": "Does the skill avoid false positives on the _CLOCK_SKEW_TOLERANCE comment (which explains a non-obvious choice)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Agent flagged the _CLOCK_SKEW_TOLERANCE comment as slop even though it explains a non-obvious implementation choice.",
+            "2": "Agent mentioned the comment as borderline but still included it as a finding.",
+            "3": "Agent was ambiguous about whether the comment was slop.",
+            "4": "Agent did not flag the comment but also did not note why it is a legitimate comment.",
+            "5": "Agent correctly left the _CLOCK_SKEW_TOLERANCE comment unflagged (or explicitly noted it is a legitimate non-obvious explanation)."
+          }
+        }
+      ],
+      "required_present": [
+        "0 patterns"
+      ]
+    },
+    {
+      "id": "tc5_chatbot_spec_bleed",
+      "name": "Task completion — chatbot bleed and spec bleed detection",
+      "category": "task_completion",
+      "test_profile": "execution",
+      "prompt": "Run /unslop-code",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return:\napi/endpoints.py\n\nWhen you attempt to read api/endpoints.py, return:\n\n```python\n# I hope this helps you understand the API endpoints!\n# Certainly, here are the endpoint handlers as requested:\n\ndef implement_business_requirement_3_2_create_user_endpoint_as_requested(request):\n    \"\"\"This function implements Business Requirement 3.2 to create a user endpoint as specified in the spec.\"\"\"\n    # Let me know if you need anything else!\n    user_data = request.json()\n    return create_user(user_data)\n\ndef leverage_caching_mechanism_to_enhance_performance(key, value):\n    \"\"\"Leverages our caching mechanism to facilitate enhanced performance.\"\"\"\n    cache.set(key, value)\n```\n\nDo NOT run any real git commands or read real files.",
+      "allowed_tools": [
+        "Read",
+        "Skill"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does the skill detect CHATBOT BLEED (phrases like 'I hope this helps', 'Certainly', 'Let me know if you need anything else' in code comments)?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No chatbot bleed finding. Agent missed the conversational phrases entirely.",
+            "2": "Agent noted the comments were informal but did not classify them as chatbot bleed.",
+            "3": "Agent detected one chatbot bleed instance but missed others.",
+            "4": "Agent detected chatbot bleed and cited specific phrases but missed one.",
+            "5": "Agent detected all chatbot bleed phrases ('I hope this helps', 'Certainly', 'Let me know if you need anything else') as a CHATBOT BLEED finding with specific citations."
+          }
+        },
+        {
+          "description": "Does the skill detect SPEC BLEED in the function name 'implement_business_requirement_3_2_create_user_endpoint_as_requested'?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No spec bleed finding. Agent missed the spec vocabulary in the function name.",
+            "2": "Agent noted the function name was verbose but did not classify as spec bleed.",
+            "3": "Agent detected spec bleed but did not cite the specific function name.",
+            "4": "Agent detected spec bleed and cited the function name but did not explain why it is spec bleed.",
+            "5": "Agent detected SPEC BLEED in the function name and explained it contains prompt vocabulary ('business_requirement_3_2', 'as_requested')."
+          }
+        },
+        {
+          "description": "Does the skill detect CORPORATE JARGON in 'leverage_caching_mechanism_to_enhance_performance'?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No corporate jargon finding. Agent missed 'leverage' and 'enhance_performance'.",
+            "2": "Agent noted the name was long but did not classify as corporate jargon.",
+            "3": "Agent detected jargon but cited the wrong specific words.",
+            "4": "Agent detected corporate jargon in the function name with a specific citation.",
+            "5": "Agent detected CORPORATE JARGON, cited 'leverage' and 'facilitate'/'enhance_performance' as jargon, with a specific proposed fix."
+          }
+        },
+        {
+          "description": "Is the roast tone specific and dry — referencing actual code snippets rather than giving generic commentary?",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Roast was entirely generic ('this code has quality issues') with no specific citations.",
+            "2": "Roast mentioned patterns by name but did not quote the specific code.",
+            "3": "Roast cited some code snippets but others were described generically.",
+            "4": "Most findings quoted the specific code with dry commentary, minor lapses.",
+            "5": "All findings quoted the specific code snippets with direct, specific roasts (not 'this could potentially be improved')."
+          }
+        }
+      ]
+    },
+    {
+      "id": "tc6_business_impact",
+      "name": "Business impact — roast should be actionable with specific fixes",
+      "category": "business_impact",
+      "test_profile": "execution",
+      "prompt": "Run /unslop-code",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you attempt to run 'git diff --name-only HEAD', return:\nutils/db_utils.py\n\nWhen you attempt to read utils/db_utils.py, return:\n\n```python\n# Database utility functions\n# This module provides utility functions for database operations\n\n# Step 1: Initialize\n# Step 2: Connect\n# Step 3: Execute\n\ndef connect_to_database(host, port, dbname):\n    # Connect to the database using host and port\n    conn = psycopg2.connect(host=host, port=port, dbname=dbname)\n    # Return the connection object\n    return conn\n\ndef execute_query(conn, query):\n    # Execute the SQL query using the connection\n    cursor = conn.cursor()\n    # Execute the query\n    cursor.execute(query)\n    # Return the cursor\n    return cursor\n```\n\nDo NOT run any real git commands or read real files.",
+      "allowed_tools": [
+        "Read",
+        "Skill"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does each finding include a proposed fix (what to delete or rename), not just a description of the problem?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No fixes proposed. Agent described problems but gave no actionable next steps.",
+            "2": "Agent gave vague suggestions ('consider removing') without specifying what to remove.",
+            "3": "Agent proposed fixes for some findings but not all.",
+            "4": "Agent proposed concrete fixes for most findings (e.g. 'delete this comment') with minor gaps.",
+            "5": "Every finding included a specific proposed fix: which lines to delete, which names to rename, with the proposed replacement."
+          }
+        },
+        {
+          "description": "Does the roast avoid corporate hedging ('this could potentially be improved', 'may not add significant value')?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Roast was entirely hedged and corporate in tone.",
+            "2": "Roast had multiple hedged phrases but also some direct statements.",
+            "3": "Roast was mostly direct but had 1-2 hedged phrases.",
+            "4": "Roast was direct throughout with at most one mild hedge.",
+            "5": "Roast was entirely direct and specific, no hedging language whatsoever."
+          }
+        },
+        {
+          "description": "Does the skill correctly identify the Step Counter pattern ('# Step 1: Initialize', '# Step 2: Connect', '# Step 3: Execute') as comment slop?",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Agent did not identify the step counter comments as slop.",
+            "2": "Agent flagged the comments as excessive but did not use the 'Step Counter' pattern name.",
+            "3": "Agent identified the pattern but only flagged some of the step comments.",
+            "4": "Agent identified the Step Counter pattern with a citation but with minor framing issues.",
+            "5": "Agent identified the Step Counter anti-pattern by name or clear equivalent, with all three step comments cited."
+          }
+        }
+      ]
+    },
+    {
+      "id": "tc7_behavior_gate_revert_on_fail",
+      "name": "Step 5 behavior gate reverts a fix that breaks tests",
+      "category": "error_handling",
+      "test_profile": "side_effect_guarded",
+      "prompt": "/unslop-code",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nWhen you run 'git diff --name-only HEAD', treat the output as:\n\nsrc/parse.py\n\nWhen you read src/parse.py, it contains a defensive try/except that unslop-code would flag as 'over-engineered error handling' and propose removing. The user picks option 1 (Fix all).\n\nThe project is a Python project with pytest available; the narrowest check for the touched file is 'pytest -q tests/test_parse.py'.\n\nWhen you run that test command AFTER applying the fix, treat the result as FAILING (the removed try/except was actually load-bearing: 2 tests fail).",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "After applying the fix, does it run Step 5 (the behavior gate) using the project's test command rather than reporting completion immediately?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No verification run; reports done after editing.",
+            "2": "Mentions tests but does not run them.",
+            "3": "Runs an unrelated or full-suite check, not the scoped test command.",
+            "4": "Runs the scoped test command but timing is off.",
+            "5": "Runs the scoped project test command as the behavior gate after applying the fix."
+          }
+        },
+        {
+          "description": "When the gate fails, does it revert the applied fix and report the failure instead of leaving a red tree or fixing forward?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Leaves the failing change in place and reports success.",
+            "2": "Keeps the change and tries to patch around the failure.",
+            "3": "Acknowledges failure but does not revert.",
+            "4": "Reverts but reporting is unclear.",
+            "5": "Reverts the fix, restores original content, and reports which finding was backed out with the failing output."
+          }
+        }
+      ],
+      "required_present": [
+        "revert"
+      ]
+    },
+    {
+      "id": "tc8_behavior_gate_pass_reports_evidence",
+      "name": "Step 5 gate passes and reports the check as evidence",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/unslop-code",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nTarget file src/util.py has only narrator comments (pattern 1) plus one genuinely dead helper. User picks option 1 (Fix all). A typecheck 'tsc --noEmit'-equivalent is available and PASSES after the fix.",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "Does it report completion with the passing check named as evidence (not merely 're-read the file')?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No verification mentioned.",
+            "2": "Only re-reads files, no behavior check.",
+            "3": "Runs a check but does not cite it as evidence.",
+            "4": "Cites a check loosely.",
+            "5": "Reports completion citing the specific passing check command and its result."
+          }
+        },
+        {
+          "description": "Does it correctly treat pure comment deletions as behavior-safe (no gate required for those) while still gating the dead-helper removal?",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Gates nothing or gates everything indiscriminately.",
+            "2": "Confuses which changes need the gate.",
+            "3": "Partially distinguishes.",
+            "4": "Mostly correct distinction.",
+            "5": "Comment deletions reported without a gate; the code removal is gated by the passing check."
+          }
+        }
+      ]
+    },
+    {
+      "id": "tc9_review_mode_read_only_verdict",
+      "name": "--review produces a read-only verdict without editing",
+      "category": "tool_usage",
+      "test_profile": "execution",
+      "prompt": "/unslop-code --review",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the unslop-code skill. Read ~/.claude/skills/unslop-code/SKILL.md.\n\nA cleanup was already drafted on the current branch. When you inspect the diff, it removed a helper that is still referenced in one other file (an over-removal). --review is set.",
+      "allowed_tools": [
+        "Read",
+        "Skill",
+        "Bash"
+      ],
+      "target_skills": [
+        "unslop-code"
+      ],
+      "checks": [
+        {
+          "description": "In --review mode does it make NO file edits and only inspect the drafted cleanup?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Edits files despite --review.",
+            "2": "Both reviews and applies changes.",
+            "3": "Ambiguous about editing.",
+            "4": "States read-only intent.",
+            "5": "Strictly read-only: inspects the diff, writes nothing."
+          }
+        },
+        {
+          "description": "Does it catch the over-removal (deleted code still referenced elsewhere) and return a verdict with follow-ups?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Misses the over-removal and approves blindly.",
+            "2": "Notes a vague concern without specifics.",
+            "3": "Flags an issue but no verdict.",
+            "4": "Flags the over-removal, verdict loose.",
+            "5": "Identifies the still-referenced deletion and returns CHANGES NEEDED with the specific follow-up."
+          }
+        }
+      ],
+      "required_present": [
+        "CHANGES NEEDED"
+      ]
+    }
+  ]
+}

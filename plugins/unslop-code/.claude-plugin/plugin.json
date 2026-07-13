@@ -1,0 +1,15 @@
+{
+  "name": "unslop-code",
+  "description": "Detect and roast AI code slop. Finds tutorial comments, vacuous tests, abstraction inflation, and chatbot bleed in your code, then fixes what you approve and verifies behavior held.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Rahul Krishnan"
+  },
+  "keywords": [
+    "code-quality",
+    "review",
+    "ai-slop",
+    "refactoring",
+    "tests"
+  ]
+}

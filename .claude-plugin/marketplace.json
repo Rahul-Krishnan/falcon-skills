@@ -12,6 +12,11 @@
       "name": "hindsight",
       "source": "./plugins/hindsight",
       "description": "Cross-session retrospective analysis. Finds recurring friction, mistakes, and improvement opportunities across multiple Claude Code sessions."
+    },
+    {
+      "name": "unslop-code",
+      "source": "./plugins/unslop-code",
+      "description": "Detect and roast AI code slop. Finds tutorial comments, vacuous tests, abstraction inflation, and chatbot bleed, then fixes what you approve and verifies behavior held."
     }
   ]
 }
