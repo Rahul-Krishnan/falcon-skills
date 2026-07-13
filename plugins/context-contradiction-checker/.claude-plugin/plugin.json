@@ -1,0 +1,15 @@
+{
+  "name": "context-contradiction-checker",
+  "description": "Audit your Claude Code context for instructions that fight each other. Scans CLAUDE.md files, rules, skills, hooks, and settings, then reports conflicts, tensions, and duplication with confidence scores.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Rahul Krishnan"
+  },
+  "keywords": [
+    "context",
+    "claude-md",
+    "rules",
+    "audit",
+    "consistency"
+  ]
+}

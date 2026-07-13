@@ -1,0 +1,518 @@
+{
+  "project": "context-contradiction-checker",
+  "skill_name": "context-contradiction-checker",
+  "test_cases": [
+    {
+      "id": "TC-001",
+      "name": "Full scan — standard invocation",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/context-contradiction-checker",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the context-contradiction-checker skill. Read ~/.claude/skills/context-contradiction-checker/SKILL.md and follow it.\n\nEnvironment: The following context files exist and are readable:\n- ~/.claude/CLAUDE.md (contains project setup rules and behavioral overrides)\n- ~/.claude/rules.md (contains universal behavioral rules)\n- ./CLAUDE.md (contains workflow routing rules)\n- ~/.llms/rules/style.md (contains identity and principles)\n\nDo not make real file edits. Demonstrate the full 3-step workflow: discover, analyze, report. You may simulate reading file contents with representative excerpts if needed.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "Skill"
+      ],
+      "target_skills": [
+        "~/.claude/skills/context-contradiction-checker/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Did the skill write a workflow state file to /tmp/contradiction-check-<session-id>.json at invocation start?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No workflow state file written at all",
+            "2": "Mentioned state file but did not actually write it",
+            "3": "Wrote state file but missing required fields (mode, auto, step, files_found, directives, issues_found, gates)",
+            "4": "Wrote state file with most required fields, minor omission",
+            "5": "Wrote complete state file, keyed on the session ID, with all required fields before any other work"
+          }
+        },
+        {
+          "description": "Did Step 1 scan all documented source types: CLAUDE.md hierarchy, workspace .md files, skills, hooks, settings.json?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Only checked 1-2 source types or skipped discovery entirely",
+            "2": "Checked 3-4 source types, missed significant categories",
+            "3": "Checked most source types but missed one category (eg hooks or settings.json)",
+            "4": "Checked all major source types with minor gaps",
+            "5": "Scanned all documented source types in parallel, presented discovery summary table"
+          }
+        },
+        {
+          "description": "Did the skill present the discovery summary in the documented format (scanned N files, extracted X directives, table by layer)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No discovery summary presented",
+            "2": "Listed files but not in documented table format",
+            "3": "Presented table but missing some layer rows",
+            "4": "Presented table correctly with minor formatting differences",
+            "5": "Presented exact documented format with Scanned N files / Layer / Files / Candidates table"
+          }
+        },
+        {
+          "description": "Did Step 2 group directives by topic and classify issues as CONFLICT, TENSION, or OVERLAP with confidence scores?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Did not classify issues or assign confidence scores",
+            "2": "Identified some issues but did not classify or score them",
+            "3": "Classified issues but missing confidence scores or topics",
+            "4": "Classified and scored issues correctly with minor gaps",
+            "5": "Classified each issue as CONFLICT/TENSION/OVERLAP with confidence 0-100%, grouped by topic"
+          }
+        },
+        {
+          "description": "Did Step 3 filter to confidence >= 70% and present findings in the documented numbered format (#N [TYPE] (X%) topic)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No findings report or used a completely different format",
+            "2": "Presented findings but did not filter by confidence threshold",
+            "3": "Filtered by threshold but format does not match documented pattern",
+            "4": "Correct format and filtering, minor presentation differences",
+            "5": "Exact documented format with #N [CONFLICT/TENSION/OVERLAP] (X%) topic, resolution arrows"
+          }
+        }
+      ],
+      "required_present": [
+        "CONFLICT",
+        "TENSION",
+        "OVERLAP",
+        "confidence",
+        "Resolution"
+      ],
+      "required_absent": [
+        "I cannot scan",
+        "I don't have access to"
+      ]
+    },
+    {
+      "id": "TC-002",
+      "name": "Targeted comparison — 2 file paths",
+      "category": "invocation",
+      "test_profile": "execution",
+      "prompt": "/context-contradiction-checker ~/.claude/CLAUDE.md ~/.claude/rules.md",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the context-contradiction-checker skill with 2 file path arguments. Read ~/.claude/skills/context-contradiction-checker/SKILL.md and follow it.\n\nMode should be detected as 'targeted comparison' — compare only the specified files, do NOT scan additional files beyond those specified.\n\nThe two files exist. ~/.claude/CLAUDE.md contains: 'Use trash instead of rm for deletions. Never use rm -rf.' ~/.claude/rules.md contains: 'DESTRUCTIVE FILE OPERATIONS: Always use trash <path> instead of rm/rm -rf.' These two contain an OVERLAP (same rule stated in both files).\n\nDo not make real file edits.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "Skill"
+      ],
+      "target_skills": [
+        "~/.claude/skills/context-contradiction-checker/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Did the skill correctly detect 'targeted comparison' mode from the 2 file path arguments?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Ignored the arguments and ran a full scan instead",
+            "2": "Acknowledged the paths but still scanned additional files",
+            "3": "Detected targeted mode but scanned 1-2 extra files",
+            "4": "Correctly limited to the 2 specified files with minor unnecessary reads",
+            "5": "Precisely limited scan to the 2 specified paths, no additional files"
+          }
+        },
+        {
+          "description": "Did the skill correctly identify the OVERLAP between CLAUDE.md and rules.md (same trash/rm rule in both)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Found no issues or reported a false conflict",
+            "2": "Identified some relationship between the rules but misclassified (eg as CONFLICT)",
+            "3": "Classified correctly as OVERLAP but confidence score below 50% or missing",
+            "4": "Classified as OVERLAP with confidence >= 70% but missing resolution suggestion",
+            "5": "OVERLAP detected at >= 70% confidence with a clear resolution (keep more specific, remove duplicate)"
+          }
+        },
+        {
+          "description": "Did the skill present an interactive fix menu (options 1-4) after the findings report?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No fix menu presented at all",
+            "2": "Mentioned fixes but did not present the documented 4-option menu",
+            "3": "Presented the menu but with wrong options or ordering",
+            "4": "Presented correct 4-option menu with minor wording differences",
+            "5": "Presented exact documented menu (Fix all overlaps / Review one by one / Report only / Done) and waited for reply"
+          }
+        }
+      ],
+      "required_present": [
+        "OVERLAP",
+        "targeted",
+        "CLAUDE.md",
+        "rules.md"
+      ],
+      "required_absent": [
+        "full scan",
+        "I cannot read"
+      ]
+    },
+    {
+      "id": "TC-003",
+      "name": "Edge case — zero findings",
+      "category": "edge_case",
+      "test_profile": "execution",
+      "prompt": "/context-contradiction-checker ~/.claude/CLAUDE.md ./CLAUDE.md",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls. Treat all described files as existing with the specified content — do not check the real filesystem for file existence.\n\nYou are executing the context-contradiction-checker skill with 2 file path arguments. Read ~/.claude/skills/context-contradiction-checker/SKILL.md and follow it.\n\nThe two files exist and contain completely different topics with no contradictions:\n- ~/.claude/CLAUDE.md: Only contains file deletion rules (use trash not rm)\n- ./CLAUDE.md: Only contains model selection guidance (haiku vs sonnet)\n\nThese two files have zero contradictions, zero tensions, and zero overlaps. All directives are on completely different topics.\n\nDo not make real file edits. Follow the skill's documented zero-findings behavior.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "Skill"
+      ],
+      "target_skills": [
+        "~/.claude/skills/context-contradiction-checker/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Did the skill correctly output the zero-findings message format: 'No issues found. Scanned [N] files, extracted [X] directives — all consistent.'?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Fabricated findings that don't exist or produced an error",
+            "2": "Stated no issues but format differs significantly from documented",
+            "3": "Output close to documented format but missing directive count",
+            "4": "Correct format with minor wording differences",
+            "5": "Exact documented format with file count and directive count"
+          }
+        },
+        {
+          "description": "Did the skill skip the fix menu (Step 4) when findings were empty?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Presented the fix menu despite no findings",
+            "2": "Presented a partial menu or ambiguous prompt",
+            "3": "Skipped menu but added unnecessary content after zero-findings message",
+            "4": "Cleanly stopped after zero-findings message with minor trailing text",
+            "5": "Zero-findings message presented, then cleanly terminated — no fix menu, no prompts"
+          }
+        }
+      ],
+      "required_present": [
+        "No issues found",
+        "consistent"
+      ],
+      "required_absent": [
+        "How would you like to proceed",
+        "Fix all overlaps"
+      ]
+    },
+    {
+      "id": "TC-004",
+      "name": "Task completion — actionable conflict resolution",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "Check my context files for contradictions",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the context-contradiction-checker skill from a natural language trigger. Read ~/.claude/skills/context-contradiction-checker/SKILL.md and follow it.\n\nEnvironment has 3 context files:\n- ~/.claude/CLAUDE.md: Contains 'Always run the full test suite before committing. Never commit without tests passing.'\n- ~/.claude/rules.md: Contains 'Use --quick to skip the full test suite for clearly trivial changes.'\n- ./CLAUDE.md: Contains 'Use Grep for searching. Never use grep bash command.'\n\nThere is a TENSION between CLAUDE.md ('always run the test suite before committing') and rules.md ('skip the test suite for trivial changes'). They do not directly conflict but could cause confusion.\n\nThere is no contradiction in project CLAUDE.md — it is internally consistent.\n\nDo not make real file edits. Complete the full 3-step workflow.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write"
+      ],
+      "target_skills": [
+        "~/.claude/skills/context-contradiction-checker/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Did the skill identify the TENSION between 'always run the test suite' and the '--quick skip' exception and include a resolution?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Missed the tension entirely or reported false conflicts",
+            "2": "Noted the relationship but misclassified (eg OVERLAP or CONFLICT)",
+            "3": "Classified as TENSION correctly but no resolution suggested",
+            "4": "TENSION classified correctly with resolution suggestion, missing confidence score",
+            "5": "TENSION at >= 70% confidence with actionable resolution (eg 'add exception clause to CLAUDE.md')"
+          }
+        },
+        {
+          "description": "Is the final output actionable — does it tell the user exactly what change to make to resolve the tension?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Output is vague or purely descriptive with no actionable guidance",
+            "2": "Suggests a direction but not specific enough to act on",
+            "3": "Gives a specific suggestion but incomplete (which file to change, not what to write)",
+            "4": "Actionable suggestion with file and change type, could be more specific",
+            "5": "Resolution points to the specific file and explains the exact change (eg 'add exception clause to X in Y.md')"
+          }
+        },
+        {
+          "description": "Did the skill correctly NOT report the project CLAUDE.md directive as an issue (no false positives)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Reported project CLAUDE.md grep rule as a conflict or overlap with another file",
+            "2": "Flagged project CLAUDE.md with low confidence and hedged",
+            "3": "Did not flag project CLAUDE.md but was unclear about why",
+            "4": "Correctly excluded project CLAUDE.md from findings without explanation",
+            "5": "Correctly excluded project CLAUDE.md and the findings count is accurate"
+          }
+        }
+      ],
+      "required_present": [
+        "TENSION",
+        "the test suite",
+        "resolution"
+      ],
+      "required_absent": [
+        "I cannot",
+        "I don't have"
+      ]
+    },
+    {
+      "id": "TC-005",
+      "name": "Compaction resilience — mid-execution resume",
+      "category": "execution",
+      "test_profile": "execution",
+      "prompt": "/context-contradiction-checker",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are resuming the context-contradiction-checker skill after context compaction. You have NO memory of prior conversation turns. A workflow state file exists at /tmp/contradiction-check-<session-id>.json with the following content:\n\n{\"mode\": \"full\", \"auto\": false, \"step\": 2, \"files_found\": [\"~/.claude/CLAUDE.md\", \"~/.claude/rules.md\", \"./CLAUDE.md\"], \"directives\": [{\"text\": \"Use trash instead of rm for deletions\", \"source_file\": \"~/.claude/CLAUDE.md\", \"topic\": \"safety\"}, {\"text\": \"Always use trash <path> instead of rm/rm -rf\", \"source_file\": \"~/.claude/rules.md\", \"topic\": \"safety\"}], \"issues_found\": [], \"gates\": []}\n\nStep 1 is already complete (files discovered, directives extracted and persisted). Step 2 (analysis) is in progress.\n\nRead ~/.claude/skills/context-contradiction-checker/SKILL.md to find the workflow instructions. Then re-read the workflow state file to determine where you left off. Resume from Step 2 (Analyze) — do NOT re-execute the discovery work; consume the persisted directives list from state.\n\nSimulate analysis finding 1 OVERLAP issue (85% confidence) between CLAUDE.md and rules.md on the topic of file deletion: both state the same trash-instead-of-rm rule.\n\nDo not make real file edits.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "Skill"
+      ],
+      "target_skills": [
+        "~/.claude/skills/context-contradiction-checker/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Did the skill re-read the workflow state file to determine current progress before taking any action?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Restarted from Step 1 entirely, ignoring the state file",
+            "2": "Mentioned the state file but did not actually read it before proceeding",
+            "3": "Read the state file but still repeated some Step 1 work",
+            "4": "Read the state file and resumed from Step 2 with minor unnecessary setup",
+            "5": "Read the workflow state file first, determined step=2, skipped Step 1 entirely, resumed Step 2"
+          }
+        },
+        {
+          "description": "Did the skill re-read its own SKILL.md instruction file after compaction to recover workflow instructions?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Did not re-read SKILL.md — proceeded on memory alone (no memory after compaction)",
+            "2": "Referenced SKILL.md but did not actually read it",
+            "3": "Read SKILL.md but did so after attempting to proceed without it",
+            "4": "Read SKILL.md early in the response before major decisions",
+            "5": "Read SKILL.md as the very first action, used it to determine resume point"
+          }
+        },
+        {
+          "description": "Did the skill announce what it is resuming from (eg 'Resuming from Step 2: Analyze — Step 1 already complete')?",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "No resume announcement — silently picked up or restarted",
+            "2": "Vague mention of continuing without referencing the state",
+            "3": "Announced resume but without step details",
+            "4": "Announced resume with step reference",
+            "5": "Clear resume announcement naming the step being resumed and what was already completed"
+          }
+        },
+        {
+          "description": "Did the skill avoid re-executing discovery — no re-globbing of context paths, no re-reading of the files already listed in files_found, and it consumed the persisted directives list from state?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Re-globbed the context paths and re-read every file, redoing discovery from scratch",
+            "2": "Re-read most of the files in files_found instead of trusting state",
+            "3": "Re-read one or two files unnecessarily before analyzing",
+            "4": "Consumed the state's directives list but made a stray redundant read",
+            "5": "Analyzed directly from the persisted directives list, zero re-reads of the discovered context files"
+          }
+        }
+      ],
+      "required_present": [
+        "Step 2",
+        "state",
+        "resume",
+        "OVERLAP"
+      ],
+      "required_absent": [
+        "Workflow state lost",
+        "starting fresh"
+      ]
+    },
+    {
+      "id": "TC-006",
+      "name": "Auto mode — non-interactive, no fix menu",
+      "category": "invocation",
+      "test_profile": "execution",
+      "prompt": "/context-contradiction-checker --auto",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls.\n\nYou are executing the context-contradiction-checker skill with the --auto flag. Read ~/.claude/skills/context-contradiction-checker/SKILL.md and follow it.\n\nEnvironment: ~/.claude/CLAUDE.md ('Use tabs for indentation') and ./CLAUDE.md ('Use 2-space indentation') both exist and are readable. This is a CONFLICT at high confidence.\n\n--auto is non-interactive: complete Steps 1-3, present the findings report, and stop. No fix menu. There is no user available to answer a prompt.\n\nDo not make real file edits.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "Skill"
+      ],
+      "target_skills": [
+        "~/.claude/skills/context-contradiction-checker/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Did the skill record the auto flag in the workflow state file (auto: true) rather than holding it only in working memory?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "No state file written, or auto flag not recorded anywhere",
+            "2": "Wrote a state file but omitted the auto field entirely",
+            "3": "Recorded auto somewhere non-standard (eg folded into mode as a fourth value)",
+            "4": "Recorded auto: true in state with minor schema deviation",
+            "5": "Wrote auto: true as a top-level state field alongside mode, so the flag survives compaction"
+          }
+        },
+        {
+          "description": "Did the skill stop after the Step 3 findings report without presenting the Step 4 fix menu?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Presented the interactive fix menu and waited for input",
+            "2": "Presented a partial menu or asked the user how to proceed",
+            "3": "Skipped the menu but asked a different clarifying question",
+            "4": "Stopped after the report with minor trailing prompts",
+            "5": "Presented the findings report and terminated cleanly — no menu, no prompts, no waiting"
+          }
+        },
+        {
+          "description": "Did the skill still produce a complete findings report (CONFLICT classified with confidence and resolution)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "No findings report produced",
+            "2": "Reported that files were scanned but classified nothing",
+            "3": "Identified the tabs/spaces issue but did not classify or score it",
+            "4": "CONFLICT classified with confidence, resolution missing or vague",
+            "5": "CONFLICT at >= 70% confidence in the documented report format with an actionable resolution"
+          }
+        }
+      ],
+      "required_present": [
+        "CONFLICT"
+      ],
+      "required_absent": [
+        "How would you like to proceed",
+        "Fix all overlaps",
+        "Review conflicts one by one"
+      ]
+    },
+    {
+      "id": "TC-007",
+      "name": "Single-file mode — internal contradictions only",
+      "category": "invocation",
+      "test_profile": "execution",
+      "prompt": "/context-contradiction-checker ~/.claude/CLAUDE.md",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls. Treat the described file as existing with the specified content — do not check the real filesystem.\n\nYou are executing the context-contradiction-checker skill with exactly 1 file path argument. Read ~/.claude/skills/context-contradiction-checker/SKILL.md and follow it.\n\nMode should be detected as 'single-file check' — look for contradictions WITHIN that one file only. Do NOT scan or read any other context source.\n\n~/.claude/CLAUDE.md contains two directives that contradict each other internally:\n- 'Always run the full test suite before every commit. No exceptions.'\n- 'For documentation-only changes, commit directly without running tests.'\n\nThat is a CONFLICT within the single file (source_a and source_b are the same file).\n\nDo not make real file edits.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "Skill"
+      ],
+      "target_skills": [
+        "~/.claude/skills/context-contradiction-checker/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Did the skill detect single-file mode from the 1 file path argument and read only that file?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Ran a full scan, ignoring the single-file argument",
+            "2": "Read the specified file but also globbed and read other context sources",
+            "3": "Detected single-file mode but still read 1-2 extra files",
+            "4": "Limited to the specified file with a stray unnecessary read",
+            "5": "Precisely single-file: read only ~/.claude/CLAUDE.md, discovered nothing else"
+          }
+        },
+        {
+          "description": "Did the skill find the internal CONFLICT between the two directives inside that one file?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Found no issues, or claimed a single file cannot contradict itself",
+            "2": "Noted the two directives but did not classify them as an issue",
+            "3": "Classified the pair as an issue but misclassified the type (eg OVERLAP or TENSION)",
+            "4": "CONFLICT identified with confidence, resolution missing",
+            "5": "CONFLICT at >= 70% confidence with both source_a and source_b naming the same file, plus an actionable resolution"
+          }
+        }
+      ],
+      "required_present": [
+        "CONFLICT",
+        "CLAUDE.md"
+      ],
+      "required_absent": [
+        "rules.md"
+      ]
+    },
+    {
+      "id": "TC-008",
+      "name": "Error paths — bad path, flag conflict, malformed settings",
+      "category": "edge_case",
+      "test_profile": "execution",
+      "prompt": "/context-contradiction-checker ~/.claude/CLAUDE.md ~/.claude/does-not-exist.md",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls. Treat the described environment as ground truth — do not check the real filesystem.\n\nYou are executing the context-contradiction-checker skill. Read ~/.claude/skills/context-contradiction-checker/SKILL.md and follow it.\n\nEnvironment:\n- ~/.claude/CLAUDE.md EXISTS and is readable.\n- ~/.claude/does-not-exist.md DOES NOT EXIST.\n\nThe skill's Arguments table documents an error for a nonexistent path. Follow the documented error behavior exactly.\n\nAfter handling that, answer these two questions in plain text, per the skill's documented rules (do not execute them):\n1. What does the skill do if invoked as `/context-contradiction-checker --auto ./CLAUDE.md` (the --auto flag combined with a file path argument)?\n2. What does the skill do during discovery if ~/.claude/settings.json exists but contains malformed JSON?\n\nDo not make real file edits. Do not fabricate findings for files that do not exist.",
+      "allowed_tools": [
+        "Read",
+        "Glob",
+        "Grep",
+        "Bash",
+        "Write",
+        "Skill"
+      ],
+      "target_skills": [
+        "~/.claude/skills/context-contradiction-checker/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Did the skill emit the documented not-found error for the nonexistent path ('File not found: {path}. Check the path and retry.') instead of silently skipping it or fabricating content?",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Fabricated content for the missing file or reported findings about it",
+            "2": "Silently ignored the missing path and analyzed only the valid file with no error",
+            "3": "Noted the path was missing but in a format unlike the documented error",
+            "4": "Documented error with minor wording differences",
+            "5": "Exact documented error naming the offending path"
+          }
+        },
+        {
+          "description": "Did the skill correctly state that --auto cannot be combined with file path arguments?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Said the combination is fine, or invented unrelated behavior",
+            "2": "Was unsure or hedged without consulting the Arguments table",
+            "3": "Said it is disallowed but gave a vague or wrong reason",
+            "4": "Correctly identified the restriction with minor imprecision",
+            "5": "Stated plainly that --auto cannot be combined with file path arguments, per the Arguments table"
+          }
+        },
+        {
+          "description": "Did the skill correctly describe the malformed-settings.json behavior (skip settings extraction, note '[skipped: {path} — invalid JSON]', continue the scan)?",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Said the skill crashes, aborts the run, or invented different behavior",
+            "2": "Said it skips but claimed the whole workflow stops",
+            "3": "Said it skips settings but omitted the documented skip note",
+            "4": "Described skip-and-note behavior with minor wording differences",
+            "5": "Skips that file's settings extraction, emits the documented [skipped: ... invalid JSON] note, and continues scanning the remaining sources"
+          }
+        }
+      ],
+      "required_present": [
+        "File not found",
+        "invalid JSON"
+      ],
+      "required_absent": [
+        "does-not-exist.md contains"
+      ]
+    }
+  ]
+}
