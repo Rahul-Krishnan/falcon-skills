@@ -97,13 +97,13 @@ Detect and roast AI code slop: the redundant, unreadable, over-complicated patte
 - After an agent (or a person) has generated a lot of code quickly and you want the cruft named.
 - Before a PR, to strip the tutorial comments and tautological tests.
 
-It only finds surface-level code-quality issues. It is not a security audit, a performance profile, an architectural review, or a linter.
+It only finds surface-level code-quality issues. It's not a security audit, a performance profile, an architectural review, or a linter.
 
 ### Limitations
 
-- Fix mode edits your files. Commit (or stash) before you let it write, so `git` is your undo — the default scan target is exactly the work you have not committed yet. Use `--auto` for a read-only pass.
-- The behavior gate is only as good as your project's tests. In a repo with no test command and no typecheck, it cannot verify that a fix preserved behavior, and it says so rather than pretending otherwise.
-- Slop detection is heuristic and has taste baked in. Some findings are judgment calls. Read before accepting.
+- Fix mode edits your files. Commit (or stash) before you let it write, so `git` is your undo. The default scan target is exactly the work you haven't committed yet. Use `--auto` for a read-only pass.
+- The behavior gate is only as good as your project's tests. In a repo with no test command and no typecheck, it can't verify that a fix preserved behavior, and it says so rather than pretending otherwise.
+- Slop detection is heuristic and has taste baked in, so some findings are judgment calls. Read them before you accept them.
 
 ## context-contradiction-checker
 
@@ -111,13 +111,13 @@ Your Claude Code context accretes. You add a rule to CLAUDE.md, another to a ski
 
 ### What it does
 
-- Scans every active context source at both layers, user and project: `CLAUDE.md`, `.llms/rules/*.md`, other `~/.claude/*.md` files, skills (`~/.claude/skills/` and `./.claude/skills/`), hooks, and `settings.json` / `settings.local.json` (hook triggers, tool permissions, behavioral flags). Cross-layer collisions — a project rule quietly overriding a user rule — are the ones it most wants to catch.
+- Scans every active context source at both layers, user and project: `CLAUDE.md`, `.llms/rules/*.md`, other `~/.claude/*.md` files, skills (`~/.claude/skills/` and `./.claude/skills/`), hooks, and `settings.json` / `settings.local.json` (hook triggers, tool permissions, behavioral flags). Cross-layer collisions, where a project rule quietly overrides a user rule, are the ones it most wants to catch.
 - Extracts the directives and groups them by topic.
 - Classifies each collision:
-  - **CONFLICT** — two directives directly oppose each other ("always use tabs" vs "always use spaces").
-  - **TENSION** — not contradictory, but confusing together ("be concise" vs "always explain your reasoning in detail").
-  - **OVERLAP** — the same rule stated twice, wasting context window.
-- Scores each finding 0-100 for confidence and reports only those above 70, so you get real collisions instead of a wall of maybes.
+  - **CONFLICT**: two directives directly oppose each other ("always use tabs" vs "always use spaces").
+  - **TENSION**: not contradictory, but confusing together ("be concise" vs "always explain your reasoning in detail").
+  - **OVERLAP**: the same rule stated twice, wasting context window.
+- Scores each finding 0-100 for confidence and reports only those at 70 or above, so you get real collisions instead of a wall of maybes.
 - Offers an interactive fix menu.
 
 ### Usage
@@ -129,7 +129,7 @@ Your Claude Code context accretes. You add a rule to CLAUDE.md, another to a ski
 /context-contradiction-checker --auto                   # full scan, report only, no fix menu
 ```
 
-`--auto` is non-interactive and cannot be combined with file path arguments.
+`--auto` is non-interactive and can't be combined with file path arguments.
 
 ### When to use it
 
@@ -137,7 +137,7 @@ Your Claude Code context accretes. You add a rule to CLAUDE.md, another to a ski
 - Your CLAUDE.md has grown by accretion and you've never audited it.
 - You've just merged rules from several sources and want to know what fights.
 
-It reads instruction files, not code. It is not a linter or a code reviewer.
+It reads instruction files, not code. It's not a linter or a code reviewer.
 
 ### Limitations
 
