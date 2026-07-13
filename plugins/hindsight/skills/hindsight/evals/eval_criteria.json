@@ -205,9 +205,8 @@
         "hindsight"
       ],
       "required_absent": [
-        "Phase 1:",
-        "Phase 2:",
-        "Synthesis"
+        "Launching 3 subagents",
+        "Findings:"
       ]
     },
     {

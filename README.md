@@ -156,7 +156,14 @@ plugins/<name>/
     SKILL.md                         required
     evals/eval_criteria.json         required
     references/                      optional
+    scripts/                         optional
 ```
+
+A skill that shells out to its own script must not hardcode an install path. It runs
+both as an installed plugin and as a local skill in `~/.claude/skills/`, and the script
+lives in a different place in each. `CLAUDE_PLUGIN_ROOT` is set only for plugins, so
+resolve the directory once and reuse it (see context-contradiction-checker's Handoff
+Validation section for the pattern).
 
 **`plugin.json`** needs `name`, `description`, `version`, `author.name`, and `keywords`.
 Its `name` must match the plugin directory.

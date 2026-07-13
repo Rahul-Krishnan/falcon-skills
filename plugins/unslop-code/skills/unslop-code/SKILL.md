@@ -35,7 +35,7 @@ When `--review` is set:
    - **Behavior drift:** a "simplification" that changed what the code does.
    - **Leftover slop:** tells the cleanup missed (run Step 2 scan over the result).
    - **Weak verification:** preserved behavior with no test covering it.
-4. Produce a **verdict** (`APPROVE` / `CHANGES NEEDED`) with the required follow-ups listed.
+4. Produce a **verdict** (`APPROVE` / `CHANGES NEEDED`) with the required follow-ups listed, and emit the `review_verdict` gate event (`pass` — a review that lands on CHANGES NEEDED is a review working — with `reason` carrying the verdict).
 5. Hand needed changes back to a normal writer pass. Do not fix-and-approve in one step.
 
 `--review` and `--auto` compose: `--review --auto` runs the reviewer verdict non-interactively.
@@ -45,8 +45,37 @@ When `--review` is set:
 At start, write `/tmp/unslop-${CLAUDE_CODE_CURRENT_SESSION_ID}.json`. The path must be **derivable, not remembered**: it holds the pre-fix file contents that are the only revert source, and a random or timestamped name cannot be reconstructed after a context compaction. The session ID is unique per run, so concurrent runs do not collide.
 
 ```json
-{"status": "scanning", "source": "", "findings": [], "files_scanned": []}
+{"status": "scanning", "source": "", "findings": [], "files_scanned": [], "gates": []}
 ```
+
+**Gate events.** This skill deletes code and sometimes puts it back. Every decision that guards a destructive edit appends one event to `gates[]` in the state file:
+
+```json
+{"step": "<name>", "judge": "self-check", "result": "pass" | "fail", "reason": "<one line>"}
+```
+
+Echo each event in the report as the JSON object itself, on a `**Gate:**` line — not a prose summary of it:
+
+```
+**Gate:** {"step": "step5_py", "judge": "self-check", "result": "pass", "reason": "pytest -q tests/: 41 passed"}
+```
+
+Printing the record verbatim rather than describing it is the difference between evidence and a claim: a paraphrase can drift from what was actually written to `gates[]`, and the whole point of the array is that the report can be checked against it.
+
+`result` answers one question only: **did this gate run and get honored?** It is not a verdict on what the gate found. A behavior check that goes red and correctly triggers a revert is a gate working — `pass`, with the revert named in `reason`. A `CHANGES NEEDED` review verdict is a review working — `pass`. Putting those under `fail` would mean the skill scores itself worse precisely when it does its job, and would bury the cases that actually need a human in a pile of routine ones.
+
+`result` is only ever `pass` or `fail` — never a status word like `reverted` or `skipped`; that goes in `reason`. Emit one event at each of:
+
+| `step` | Emitted when | `reason` carries |
+|---|---|---|
+| `files_resolved` | end of Step 1 | the file count, or that there was nothing to scan and the run exits here |
+| `baseline_recorded` | Step 4, after the baseline run and before the first gated edit | each check's command and its green/red baseline — including "no check available", which is a fact truthfully recorded, not a failure |
+| `step5_<ecosystem>` | Step 5, once **per ecosystem checked** (`step5_py`, `step5_ts`) | the command and its result, and which wave was reverted if one was |
+| `review_verdict` | Review mode, after the verdict | the one-line verdict, `APPROVE` or `CHANGES NEEDED` |
+
+Reserve `fail` for the states where the skill could not uphold its own guarantee and a human has to look: a revert that did not restore (still red after `original_content` goes back), a file that changed underneath a running check, or a `pre_fix_content` snapshot missing paths it was supposed to cover. Those are the events worth paging someone about; a reverted fix is not.
+
+The point is that a claim is auditable against a record: a run that reports fixes applied but carries no `step5_*` event skipped its own behavior gate, and that is now visible rather than a matter of trust. Emit the event even when it is uneventful — a `--auto` report-only run that applied nothing still emits `step5_none` / `pass` / `"no fixes applied, gate not applicable"`, because a missing event has to mean something went wrong, not merely that nothing happened.
 
 **Status values, in order.** Every status the run can be interrupted in has a re-entry rule, because a compaction between two of them is the case this file exists for:
 
@@ -68,25 +97,29 @@ Delete the state file once the run completes (final report delivered, or report-
 
 ## Step Interfaces
 
-**Step 1 → Step 2 produces** (required):
+Each block below is the handoff interface for one transition: what the step must produce before the next step may run, and the gate that guards it.
+
+**Step 1 → Step 2 handoff interface produces** (required):
 - `source`: string — description of where code came from
 - `files`: array of {path, content} — all files to scan
 - `original_content`: map of {path → content as first read}, recorded here and never overwritten. Untracked files are in scope and git has no copy of them, so this is the user's only undo.
 
-**Step 2 → Step 3 produces** (required):
+**Step 2 → Step 3 handoff interface produces** (required):
 - `findings`: array of {id, pattern, location, severity, why_slop, snippet, fix}
 - `severity` values: `CRITICAL` | `HIGH` | `MEDIUM` | `LOW`
 
-**Step 3 → Step 4 produces**: rendered report (required); gate: wait for user numeric input before proceeding
+**Step 3 → Step 4 handoff interface produces**: rendered report (required); gate: wait for user numeric input before proceeding (skipped under `--auto`/`--auto-fix`, where nobody is being asked)
 
-**Step 4 → Step 5 produces** (when any fix was applied):
+**Step 4 → Step 5 handoff interface produces** (when any fix was applied):
 - `modified_files`: array of paths edited
 - `baseline_status`: map of {check command → `pass` | `fail`, with the failure summary if failing}
 - `pre_fix_content`: map of {path → content **as of after the exempt edits and before the gated ones**} — this is the revert target, and the ordering rule in Step 4 is what makes a whole-file snapshot a correct one
 - `post_fix_content`: map of {path → content written in Step 4}, so Step 5 can detect a file changed underneath it
 - gate: Step 5 must run before reporting completion; a failing behavior check forces a revert of the gated fixes
 
-**Review mode interface** (`--review`): consumes a drafted cleanup **as a diff** (resolved per the Review Mode rules — never as post-fix file contents alone, which cannot show a deletion), produces `{verdict: APPROVE | CHANGES NEEDED, followups: [...]}`; gate: no file writes occur in this mode
+**Validate this handoff before Step 5 runs.** Check that `modified_files` is non-empty, that `baseline_status` holds an entry for every check Step 5 will run, and that `pre_fix_content` and `post_fix_content` each cover every path in `modified_files`. A gap here means the revert source is incomplete, and a revert that cannot restore every file it touched is worse than no revert: it leaves a half-reverted tree. If any field is missing, do not guess and do not proceed — re-take the Step 4 snapshot from disk, or if the gated wave has already landed and no snapshot exists, restore from `original_content` and report the run as aborted before the gate.
+
+**Review mode handoff interface** (`--review`): consumes a drafted cleanup **as a diff** (resolved per the Review Mode rules — never as post-fix file contents alone, which cannot show a deletion), produces `{verdict: APPROVE | CHANGES NEEDED, followups: [...]}`; gate: no file writes occur in this mode
 
 ## Workflow
 
@@ -97,9 +130,11 @@ Default to uncommitted changes. Only deviate if user specifies otherwise.
 - **Default**: Use Bash to run `git status --porcelain` and take every modified or untracked path (untracked files are where fresh slop usually lives; `git diff` alone misses them). Skip deleted paths and anything no longer on disk. Then read each remaining file.
 - **User-specified**: scan the files/directories or pasted code the user provided
 
-If the git command fails or returns an error: in `--auto` mode, output "Git status failed: [error]. No files to scan — exiting." and stop. Otherwise, call `AskUserQuestion` with the question "Could not read git status: [error]. Which files should I scan?"
+If the git command fails or returns an error: In --auto mode: output "Git status failed: [error]. No files to scan — exiting." and stop. Otherwise, call `AskUserQuestion` with the question "Could not read git status: [error]. Which files should I scan?"
 
-If no uncommitted changes are found and no specific target was given: in `--auto` mode, output "No uncommitted changes found. No files to scan — exiting." and stop. Otherwise, call `AskUserQuestion` with the question "No uncommitted changes found. Which files should I scan?"
+If no uncommitted changes are found and no specific target was given: In --auto mode: output "No uncommitted changes found. No files to scan — exiting." and stop. Otherwise, call `AskUserQuestion` with the question "No uncommitted changes found. Which files should I scan?"
+
+Emit the `files_resolved` gate event before leaving this step: `pass`, with `reason` carrying the file count — or, when there is nothing to scan, that the run is exiting here. Exiting because there is no work is the correct outcome, not a failure.
 
 **Step 2: Scan for slop**
 Flag each instance with: Pattern name, Location, Severity (`CRITICAL` / `HIGH` / `MEDIUM` / `LOW`), Why it's slop, Code snippet, Proposed fix.
@@ -131,6 +166,8 @@ How would you like to proceed?
   4. Report only — no changes, just the roast
 ```
 
+In --auto mode: skip this menu and take option 4 (Report only). In --auto-fix mode: skip this menu and take option 1 (Fix all). Everything below in this step — the menu, the severity ask, the per-finding y/n — is unreachable in those modes; nobody is there to answer it.
+
 **For "Fix by severity" (option 2)**: ask "Fix CRITICAL, HIGH, MEDIUM, or LOW? (list all that apply, e.g. 'CRITICAL HIGH')" and wait for reply before applying.
 
 **For "Interactive" mode (option 3)**:
@@ -140,7 +177,7 @@ How would you like to proceed?
   - `n` = skip this finding, do not apply
 - After the last finding, output a summary: "Applied X fixes, skipped Y. Files modified: [list]"
 
-**Before applying any gated fixes (options 1, 2, or 3, and `--auto-fix`)**: find the Step 5 check(s) for the touched files and run them once as a **baseline**. Record each check's command and pass/fail as `baseline_status` in the state file. This is what makes the gate's blame honest — without it, a repo that was already red gets its cleanup wrongly reverted.
+**Before applying any gated fixes (options 1, 2, or 3, and `--auto-fix`)**: find the Step 5 check(s) for the touched files and run them once as a **baseline**. Record each check's command and pass/fail as `baseline_status` in the state file, and emit the `baseline_recorded` gate event. This is what makes the gate's blame honest — without it, a repo that was already red gets its cleanup wrongly reverted.
 
 **Apply fixes in two waves, in this order.** A file can carry both exempt and gated edits, and the revert target is a whole-file snapshot, so the snapshot has to sit on the boundary between them or a failed gate would also undo exempt edits that were never at risk:
 
@@ -157,16 +194,16 @@ Reverting therefore backs out exactly the gated wave and keeps the exempt wave, 
 Removing dead code, collapsing abstractions, or rewriting tests can change behavior, so confirm behavior held instead of trusting that the edit "looks right".
 
 1. **Find the narrowest check per ecosystem.** For each language present in the touched files, pick one check in this order: an obvious project runner (`npm test`/`pnpm test`/`pytest`/`go test`/`cargo test`), then a typecheck/lint (`tsc --noEmit`, `ruff`, `mypy`). A diff touching both TS and Python gates on both — never report "verified" while one ecosystem shipped unchecked. Prefer a scoped run over the touched paths over a full suite.
-2. **Run every selected check** (the same ones you baselined in Step 4). Compare each result with its baseline.
-   - **Pass:** report completion with the command and its result as evidence.
-   - **Fail, baseline was green (or the failure is new):** the cleanup changed behavior. Before restoring anything, re-read each file and compare it against `post_fix_content`: if it no longer matches, something else edited it while the check ran, so stop and warn instead of overwriting. Then revert in tiers, and **verify the revert instead of assuming it worked**:
+2. **Run every selected check** (the same ones you baselined in Step 4). Compare each result with its baseline. **Every branch below emits a `step5_<ecosystem>` gate event** — one per check, so a polyglot diff leaves one event per ecosystem and cannot report "verified" on the strength of a single green language.
+   - **Pass:** report completion with the command and its result as evidence. Gate event: `pass`, reason = the command and its result.
+   - **Fail, baseline was green (or the failure is new):** the cleanup changed behavior. Gate event: `pass` — the gate caught exactly what it exists to catch — with `reason` naming the failing check and the wave reverted. Emit `fail` only if the revert below cannot restore the tree. Before restoring anything, re-read each file and compare it against `post_fix_content`: if it no longer matches, something else edited it while the check ran, so stop and warn instead of overwriting. Then revert in tiers, and **verify the revert instead of assuming it worked**:
      1. Restore each modified file from `pre_fix_content`. That backs out the gated wave and leaves the exempt wave in place.
      2. **Re-run the failing check.** Green: wave 2 was the culprit, which is the expected case. Report which findings were backed out, with the failing output.
      3. **Still red:** wave 1 is implicated, which means an edit classified as an exempt plain comment was not one — a mis-classified docstring or directive is the likely cause. Restore from `original_content`, putting every file back exactly as the run found it, and report that the exemption call was wrong, naming the wave-1 edits so the misclassification can be found. This is the only branch that touches `original_content`, and it terminates: there is no fourth tier and no re-fix.
 
      Never leave a failing tree and never "fix forward" past a red gate inside this skill. The two-wave scheme assumes wave 1 is behavior-safe, and step 3 above is what happens when that assumption is wrong — the gate exists precisely because that judgment is not to be trusted on its own.
-   - **Fail, baseline was already red with the same failures:** the cleanup is not to blame. Keep the fixes, but report "unverified: baseline was already failing" with both outputs so the user can judge.
-3. **If no check can be found:** do not silently skip. State plainly that behavior was not verified, list exactly which files changed, and recommend the user run their own tests. In `--auto` mode, prefer reverting non-exempt fixes over leaving them unverified; gate-exempt comment deletions are safe to keep.
+   - **Fail, baseline was already red with the same failures:** the cleanup is not to blame. Keep the fixes, but report "unverified: baseline was already failing" with both outputs so the user can judge. Gate event: `pass`, reason = "baseline already red, cleanup not implicated" — the gate ran and cleared the cleanup, which is not the same as the gate having been skipped.
+3. **If no check can be found:** do not silently skip. State plainly that behavior was not verified, list exactly which files changed, and recommend the user run their own tests. In --auto mode: nothing was applied, so there is nothing to revert. In --auto-fix mode: revert the gated fixes rather than leave them unverified, since no user is present to accept the risk; gate-exempt comment deletions are safe to keep. Gate event: `pass`, reason = "no check available, gated fixes reverted" — the absence of a check is reported honestly and acted on, which is the gate working.
 
 **Gate-exempt edits** are only deletions or condensations of plain comments (patterns 1 and 5) — comments that are not docstrings and not directives. Everything else is gated:
 - **Docstrings are code**, not comments: they are runtime objects (`__doc__`, doctest, argparse/click help). Deleting or condensing one goes through the gate.

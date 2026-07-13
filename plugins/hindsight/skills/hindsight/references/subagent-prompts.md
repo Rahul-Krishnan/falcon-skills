@@ -35,12 +35,20 @@ json.dump(fps, sys.stdout)
   touch /tmp/hindsight_memory_pending &
 
   # Workspace files — discover and read config files from multiple locations
-  # Supports user-level and project-level CLAUDE.md setups
+  # Supports Falcon personality dir, generic CC, and project-level setups
   python3 -c "
 import os, json
 ws = {}
-# User-level CC config
-for p in [os.path.expanduser('~/.claude/CLAUDE.md'), os.path.expanduser('~/.claude/rules.md')]:
+# Falcon personality workspace
+for n in ['MEMORY.md','ROUTING.md','PROJECTS.md','SOUL.md','IDENTITY.md','PEOPLE.md']:
+    p = os.path.expanduser(f'~/Projects/falcon/personality/{n}')
+    if os.path.isfile(p): ws[n] = p
+    # Also check smithing dir for PROJECTS.md
+    if n == 'PROJECTS.md':
+        p2 = os.path.expanduser('~/Projects/falcon/.smithing/PROJECTS.md')
+        if os.path.isfile(p2) and n not in ws: ws[n] = p2
+# Generic CC config
+for p in [os.path.expanduser('~/.claude/CLAUDE.md'), os.path.expanduser('~/.llms/rules/personal.md')]:
     if os.path.isfile(p): ws[os.path.basename(p)] = p
 # Project-level
 for p in ['CLAUDE.md', '.claude/CLAUDE.md']:
@@ -87,6 +95,9 @@ prompt: |
   ANALYSIS WINDOW: [insert date range or "last N sessions"]
   PARSER MODE: [robust|fallback]
   TAXONOMY: [paste taxonomy.json categories section]
+
+UNRESOLVED FINDINGS FROM LAST RETRO: [paste the unresolved_findings array from setup_context, or "none"]
+Actively check whether each of these patterns recurs in this window. If you find evidence, report it as a normal finding using the SAME taxonomy `category` key, citing only evidence from the current window. This is what lets the main thread bump severity on patterns that keep coming back.
 
   INSTRUCTIONS:
 
@@ -190,7 +201,7 @@ prompt: |
 
   1. CHECK FOR MEMORY DB:
      Try: memory_recall with context="all corrections and preferences" expanded_query="corrections preferences rules behavioral patterns decisions" limit=50
-     Note: the full MCP tool name varies by installation (a memory MCP server may expose it as mcp__<server>__memory_recall). Search available tools for "memory_recall" if the short name fails.
+     Note: the full MCP tool name varies by installation (eg mcp__falcon-memory__memory_recall). Search available tools for "memory_recall" if the short name fails.
      If the tool is not available, output: {"available": false, "reason": "memory_recall not available"}
 
   2. IF AVAILABLE, pull memories in parallel (issue all 3 calls in a single message):
@@ -204,7 +215,7 @@ prompt: |
      c. Staleness: memories referencing things that are likely outdated (old dates, completed projects)
      d. Correction clusters: many corrections about the same topic (indicates a persistent problem)
      e. Gaps: important behavioral rules that should exist but don't
-     f. Promotion candidates (3+ threshold): corrections or preferences about the same topic that appear 3+ times. These have graduated from one-off corrections to recurring patterns and should be promoted from memory DB to the relevant workspace file (user or project CLAUDE.md, or a skill/command file). Tag each candidate with: the topic, the count, the target file for promotion, and a draft rule.
+     f. Promotion candidates (3+ threshold): corrections or preferences about the same topic that appear 3+ times. These have graduated from one-off corrections to recurring patterns and should be promoted from memory DB to the relevant workspace file (MEMORY.md, ROUTING.md, SOUL.md, or a skill/command file). Tag each candidate with: the topic, the count, the target file for promotion, and a draft rule.
 
   4. OUTPUT FORMAT (strict JSON):
      {
@@ -238,10 +249,12 @@ prompt: |
      First, try reading /tmp/hindsight_ws_manifest.json (created during parallel collection).
      If it exists, it maps filename → path for all discovered config files.
      If it doesn't exist, scan these locations manually (read in parallel, skip missing):
+     - ~/Projects/falcon/personality/ (MEMORY.md, ROUTING.md, SOUL.md, IDENTITY.md)
+     - ~/Projects/falcon/.smithing/PROJECTS.md
      - ~/.claude/CLAUDE.md
-     - ~/.claude/rules.md
+     - ~/.llms/rules/personal.md
      - CLAUDE.md or .claude/CLAUDE.md in current directory
-     These cover user-level and project-level CLAUDE.md setups. If none exist, note it and continue.
+     These cover the Falcon personality dir, generic CC, and project-level setups. If none exist, note it and continue.
 
   2. ANALYZE FOR:
      a. Rule contradictions: two rules that conflict with each other

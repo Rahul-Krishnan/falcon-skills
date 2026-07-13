@@ -258,7 +258,7 @@
       ],
       "required_present": [
         "TENSION",
-        "the test suite",
+        "test suite",
         "resolution"
       ],
       "required_absent": [
@@ -333,7 +333,7 @@
       "required_present": [
         "Step 2",
         "state",
-        "resume",
+        "esum",
         "OVERLAP"
       ],
       "required_absent": [

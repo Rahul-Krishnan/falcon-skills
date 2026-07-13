@@ -1,6 +1,6 @@
 ---
 name: hindsight
-description: "Cross-session retrospective analysis. Finds recurring friction, mistakes, and improvement opportunities across multiple Claude Code sessions. Use when the user wants to review patterns across past sessions, asks what keeps going wrong, or invokes /hindsight. Do NOT trigger for single-session questions like 'what did I do last session' or 'what happened in my last session' — those are session-history lookups, not cross-session retrospectives. For single-session questions, use the session-history skill to answer the question directly — do not invoke the hindsight pipeline."
+description: "Cross-session retrospective analysis. Finds recurring friction, mistakes, and improvement opportunities across multiple Claude Code sessions. Use when the user wants to review patterns across past sessions, asks what keeps going wrong, or invokes /hindsight. Do NOT trigger for single-session questions like 'what did I do last session' or 'what happened in my last session' — those are session-history lookups, not cross-session retrospectives. Answer single-session questions directly from that session's transcript (via the session-history skill if it is installed, otherwise by reading the transcript) — do not invoke the hindsight pipeline."
 metadata:
   user-invocable: true
   argument-hint: "[window=7d] [--hype|--roast] [--human|--ai] [--viz] [--auto]"
@@ -83,7 +83,21 @@ When combining tone + focus: tone affects Phase 3 presentation style only; focus
 
 ## Workflow State
 
-Write state to `/tmp/workflow-${CLAUDE_CODE_CURRENT_SESSION_ID}.json` at start:
+**Write this file as your FIRST action — before Phase 0, before reading any other file, before any other tool call.** This is unconditional. It applies no matter which flag was passed and no matter which mechanic (carry-forward, roast mode, a specific window) the invocation is focused on. An executor that jumps straight to Phase 0 because the interesting part of the request lives later in the pipeline has already broken the resume path.
+
+**Run ID (compute once, at start):**
+```bash
+RUN_ID="hindsight-$(date +%Y%m%d-%H%M)"   # eg hindsight-20260713-0022
+```
+The state file is keyed per RUN, not per session, so two hindsight runs in one session (or a hindsight dispatched from `/rem-sleep` alongside other skills) never share a file.
+
+**Recovering RUN_ID after compaction:** the timestamp is not reconstructible from memory. Glob for the most recent run instead:
+```bash
+STATE_FILE=$(ls -t /tmp/workflow-hindsight-*.json 2>/dev/null | head -1)
+```
+If that returns nothing, no run is in progress and you are starting fresh.
+
+Write state to `/tmp/workflow-${RUN_ID}.json` at start:
 ```json
 {"workflow": "hindsight", "steps": {"phase0": "pending", "phase0_5": "pending", "phase1": "pending", "phase1_5": "pending", "phase2": "pending", "phase3": "pending"}, "gates": [], "open_questions": []}
 ```
@@ -108,6 +122,7 @@ Before reading the full pipeline, determine which path applies:
 ```
 /hindsight invoked
   |
+  +--> Write workflow state file (ALWAYS — first action, before anything else)
   +--> Parse arguments (always)
   +--> Phase 0: Setup (always)
   +--> Phase 0.5: Pre-flight session check
@@ -142,6 +157,8 @@ Before reading the full pipeline, determine which path applies:
 **Read all setup files in parallel** (steps 1, 2, and 4 are independent reads — issue them in a single message with multiple Read tool calls):
 
 1. Read `~/.claude/hindsight/last-retro.json` to determine the analysis window and load carry-forward state. If missing, default to last 14 days. If present, use `max(since last hindsight, last 14 days)` as the window — this guarantees a minimum 14-day floor so slow-burn patterns aren't missed by frequent runs. Also extract `unresolved_findings` if present — these are findings from the previous hindsight that were skipped. They will be re-checked against the current window and re-surfaced if the pattern continues (with bumped severity). If the pattern is not found in the new window, age it out silently.
+1a. **Resolve session-count windows.** If `window` matches `N sessions` (eg `window=3sessions`), do NOT convert it to a calendar duration. Instead: enumerate all sessions across all projects (live transcripts plus fingerprints, deduplicated), sort by end timestamp descending, take the N most recent, and set the effective window to `[end timestamp of the Nth session, now]`. Pass this resolved date range — not the raw session count — into `setup_context.window`, so every downstream subagent filters on the same concrete boundary. If fewer than N sessions exist, use all available ones and say so in the Phase 0 summary line. Without this resolution step two runs of the same `window=3sessions` command can select different session sets.
+
 2. Load finding categories from taxonomy. Check in order: (a) `~/.claude/hindsight/taxonomy.json`, (b) `references/taxonomy.json` relative to this skill file's directory. If neither exists, use these hardcoded categories:
    ```
    unauthorized_actions, scope_creep, search_cascades, planning_incompleteness,
@@ -172,7 +189,8 @@ Before launching subagents, do a quick session count check to avoid wasting toke
   2. If no fingerprints directory exists, that's expected — fingerprints are an optional enhancement and the skill works on live transcripts alone.
   3. Do NOT proceed to Phase 1, Phase 2, or Phase 3
   4. Do NOT write `last-retro.json`
-  5. Exit cleanly — the pipeline ends here
+  5. Update the workflow state file before exiting: set `phase0_5` to `"done"`, set every remaining step (`phase1`, `phase1_5`, `phase2`, `phase3`) to `"skipped"`, and append a gate event with `"result": "fail"` and a reason of `"zero sessions"`. The Mechanical Exit Gate forbids exiting with any step left `pending`; skipping this leaves stale `pending` steps on disk that the next run's compaction-resume logic will try to resume from.
+  6. Exit cleanly — the pipeline ends here
 - If 0 live transcripts but fingerprints exist, proceed — the transcript scanner will use fingerprints as its data source.
 
 ### Phase 1: Collection (3 parallel subagents)
@@ -197,6 +215,8 @@ setup_context: {
 Launch 3 subagents in parallel using the Task tool. Each outputs structured JSON findings.
 
 **Important:** Use `subagent_type: "general-purpose"`, `model: "sonnet"`, and `max_turns: 20` for all three. These subagents do pattern recognition, taxonomy classification, and severity assessment on top of I/O work — sonnet provides meaningfully better analytical quality than haiku for these judgment-heavy tasks while remaining fast. The `max_turns` cap prevents runaway subagents from burning tokens on edge cases. Before launching, substitute the Phase 0 values (analysis window, parser mode, taxonomy categories) into each prompt template's placeholders. Launch all 3 in a single message with `run_in_background: true` for maximum parallelism.
+
+**Pass `unresolved_findings` to the Transcript Scanner.** The subagents are the only actors that actually read this window's transcripts, so they are the only ones who can confirm whether a prior finding recurred. Substitute the `unresolved_findings` array from `setup_context` into Subagent 1's prompt and instruct it to actively look for those patterns, reporting any it finds as normal findings under the same `category` key with fresh evidence. If this array never reaches a subagent, Phase 2 step 6a has nothing to match against and carry-forward is dead on arrival.
 
 **Parallelism fallback and subagent prompts:** See [references/subagent-prompts.md](references/subagent-prompts.md) for the full fallback collection pattern and all 3 subagent prompt templates (Transcript Scanner, Memory Auditor, Workspace Scanner).
 
@@ -233,6 +253,7 @@ After all subagents return and pass validation, synthesize their outputs:
    - MODERATE: 2 instances or strong single instance with indirect corroboration
    - WEAK: 1 instance, inferred pattern, or low-confidence match
 6. **Group related findings** that share a root cause.
+6a. **Match carry-forward findings.** For each entry in `setup_context.unresolved_findings` (loaded in Phase 0), try to match it against the merged findings list from step 1. A match requires BOTH: (i) the `category` taxonomy key is identical, and (ii) the new finding describes the same underlying behavior — judge by root cause, not string equality, because `pattern` text is regenerated fresh each run and will rarely match byte-for-byte. On a match, mark the *new* finding as carried forward: set `times_carried = unresolved.times_carried + 1` and bump `current_severity` one level per carry (LOW→MEDIUM→HIGH), capping at HIGH. Add it to `carry_forward_findings`. If several unresolved entries and several new findings share a category, pair the highest-severity ones first. If an unresolved entry has no match in this window, drop it silently — do not re-emit it as a finding. **Without this step `carry_forward_findings` is never populated and the `[HIGH↑]` display in 3b, the severity-bump mechanic, and the entire "is this getting worse" signal quietly stop working while everything still looks like it ran.**
 7. **Compute per-session friction scores** for the header sparkline: for each session, count `corrections + errors + retries` from transcript scanner data and cap at 10. The denominator is always 10 (not the max score observed). Store as an ordered array (oldest to newest). Compute the mean. Map each score to a block character: 0=▁, 1-2=▂, 3-4=▃, 5-6=▅, 7-8=▆, 9-10=█. Display as `avg <score>/10` (always /10, never /5 or any other denominator).
 8. **Compute trend delta** (if `last-retro.json` was loaded in Phase 0): compare `findings_count`, severity distribution, and which categories are new vs resolved. Store as a structured delta for the header.
 9. **Generate proposed actions** for each finding:
@@ -294,27 +315,31 @@ Present all findings sorted by severity (CRITICAL first) using this EXACT format
 
 **Privacy reminder:** Apply the [Privacy Rules](#privacy-rules) to all finding descriptions.
 
+**Category display rule:** `category` is ALWAYS stored as the taxonomy key (snake_case, one of the categories loaded in Phase 0 step 2). Never invent a key at storage time — a genuinely novel pattern goes to `uncategorized` with a suggested key. For display only, Title-Case the key with spaces: `unauthorized_actions` → `Unauthorized Actions`, `memory_staleness` → `Memory Staleness`. The display string is never written back to `last-retro.json`. If a freeform label reaches storage, the next run's carry-forward matching (Phase 2 step 6a, which compares taxonomy keys) silently fails to match it and the trend delta treats it as a brand-new category forever.
+
+**Tone applies to every finding.** When a focus mode is active (`--human` or `--ai`), focus changes only the sort order — it does not soften the tone on deprioritized findings. A `--roast --human` run roasts the AI-side findings just as hard as the human-side ones; they simply appear further down.
+
 ```
   #1 [CRIT] Unauthorized Actions                   (4 incidents)
      AI posts externally without approval despite draft-confirm rules
      → Discuss: Verify rules are being loaded correctly
 
-  #2 [HIGH↑] Stale State                           (7 incidents)
+  #2 [HIGH↑] Memory Staleness                      (7 incidents)
      AI uses cached data instead of live checks; config files stale
      ↑ Carried from last retro (was MED, bumped after 2 runs)
      → Apply: Update stale config entries, move completed items to archive
 
-  #3 [MED]  Task Substitution                      (5 incidents)
+  #3 [MED]  Rule Contradiction                     (5 incidents)
      AI works on wrong target when user references are ambiguous
      → Apply: Add clarification rule to workspace config
 
-  #4 [LOW]  Verbose Outputs                        (3 incidents)
+  #4 [LOW]  Output Neglect                         (3 incidents)
      Plans/docs too long or formal for target audience
      → Apply: Add audience-awareness check before generating docs
 ```
 
 Format rules:
-- **Line 1:** `#N [SEVERITY] Category Name` left-aligned, `(N incidents)` right-aligned
+- **Line 1:** `#N [SEVERITY] Category Name` left-aligned, `(N incidents)` right-aligned. The category name is the Title-Cased taxonomy key — every label above maps to a real key.
 - **Line 2:** One-sentence pattern description, indented
 - **Line 3:** `→ Apply/Discuss/Skip: <action summary>`, indented
 - Blank line between findings
@@ -332,12 +357,13 @@ Format rules:
    - [ ] [HIGH] <category>: <pattern> — <proposed_action>
    - [ ] [CRIT] <category>: <pattern> — <proposed_action>
    ```
-3. Write the full report to `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.md` (same as the Level 3 "Full report" path in 3e). Do not wait for user input.
-4. Proceed directly to 3e wrap-up with `applied = <count of auto-applied>`, `skipped = 0`, `discussed = 0`.
+3. Collect all DISCUSS-tier findings, at any severity, and append them to the same `## Hindsight` section as `- [ ] [DISCUSS] <category>: <pattern> — <proposed_action>`. Set their `disposition` to `"discussed"`. DISCUSS exists precisely because a finding is ambiguous and needs a human; `--auto` is the one mode where no human is watching, so a DISCUSS finding that is neither applied nor flagged here vanishes silently.
+4. Write the full report to `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.md` (same as the Level 3 "Full report" path in 3e). Do not wait for user input.
+5. Proceed directly to 3e wrap-up with `applied = <count of auto-applied>`, `skipped = 0`, `discussed = <count of DISCUSS-tier plus HIGH/CRIT findings flagged to overnight-flags.md>`.
 
 **If `auto=false` (interactive mode, default):** Follow the full interactive flow below.
 
-**You MUST call the AskUserQuestion tool after presenting findings.** Do not print options as text. Do not present a numbered list. Do not skip this step. Do not proceed to detail views without calling AskUserQuestion first. If you find yourself typing "1.", "2.", "3." as navigation options, STOP and use AskUserQuestion instead. This is the primary interactive mechanism and is required for the pipeline to function correctly.
+**You MUST call the AskUserQuestion tool after presenting findings — unless it is genuinely unavailable in this tool context, which is the only exception (see Fallback below).** Do not print options as text because it is faster. Do not present a numbered list out of convenience. Do not skip this step. Do not proceed to detail views without calling AskUserQuestion first. If you find yourself typing "1.", "2.", "3." as navigation options while the tool IS available, STOP and use AskUserQuestion instead. This is the primary interactive mechanism and is required for the pipeline to function correctly.
 
 After presenting the header and findings summary, use AskUserQuestion to let the user navigate interactively. AskUserQuestion provides clickable options which is a better UX than plain text.
 
@@ -473,9 +499,9 @@ Write `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.md` containing:
 
 This workflow runs 15+ minutes with subagents. After context compaction:
 1. Re-invoke the hindsight skill to reload this file (works for both plugin and local installs; the SKILL.md location is resolved by the skill loader, not a hardcoded path)
-2. Re-read the workflow state file (`/tmp/workflow-${CLAUDE_CODE_CURRENT_SESSION_ID}.json`) to determine current step
+2. Re-read the workflow state file (`/tmp/workflow-${RUN_ID}.json`) to determine current step
 3. Re-read persisted intermediate results from `/tmp/hindsight_*.json` (fingerprints, sessions, memory, workspace manifest)
-4. Re-read `~/.claude/hindsight/last-retro.json` if it was loaded in Phase 0
+4. Re-read `~/.claude/hindsight/last-retro.json` from disk. This is unconditional — do not reuse values you believe you already know. After compaction you have no memory of prior turns, so anything that "feels" already loaded is a reconstruction, not data.
 5. Resume from the first non-done step in the state file — do not restart from Phase 0
 
 **STOP. You MUST re-read this file after any context compaction.** The workflow state file tracks which phases completed. Skip done phases and resume from the first pending or in-progress step.

@@ -450,7 +450,7 @@
           "description": "With an empty 'git status --porcelain', does it resolve the committed cleanup as a diff against the merge-base instead of exiting with 'no uncommitted changes'?",
           "importance": "CRITICAL",
           "rubric": {
-            "1": "Runs 'git status --porcelain', finds nothing, and exits with no verdict — the review never happens.",
+            "1": "Runs 'git status --porcelain', finds nothing, and exits with no verdict \u2014 the review never happens.",
             "2": "Exits or asks the user which files to scan rather than resolving the branch diff itself.",
             "3": "Reviews something, but sourced from the post-fix file contents rather than a diff, so deletions are invisible to it.",
             "4": "Resolves the branch diff but by an ad-hoc route (e.g. 'git show HEAD') that would miss a multi-commit cleanup.",
@@ -549,18 +549,20 @@
           }
         },
         {
-          "description": "Does it apply the gate-exempt comment deletions FIRST, snapshot api/notify.py, and only then apply the gated runtime-string rewrite — so a failed gate would back out the string rewrite without resurrecting the deleted comments?",
+          "description": "Does it apply the gate-exempt comment deletions FIRST, snapshot api/notify.py, and only then apply the gated runtime-string rewrite \u2014 so a failed gate would back out the string rewrite without resurrecting the deleted comments?",
           "importance": "HIGH",
           "rubric": {
             "1": "Snapshots the file before any edit, so the recorded revert target would undo the exempt comment deletions too.",
             "2": "Applies all edits in one pass with no snapshot boundary between exempt and gated.",
             "3": "Mentions the exempt/gated split but records a single pre-everything snapshot anyway.",
             "4": "Orders the waves correctly but is vague about when the snapshot is taken.",
-            "5": "Wave 1 (comment deletions) applied, then pre_fix_content snapshotted, then wave 2 (the logger.error string) applied and gated — and says so."
+            "5": "Wave 1 (comment deletions) applied, then pre_fix_content snapshotted, then wave 2 (the logger.error string) applied and gated \u2014 and says so."
           }
         }
       ],
-      "required_present": [],
+      "required_present": [
+        "fixes_applied"
+      ],
       "required_absent": [
         "How would you like to proceed?",
         "Fix by severity"
@@ -670,7 +672,7 @@
           "description": "Does --auto produce the report and stop, applying NO fixes and asking NO questions?",
           "importance": "CRITICAL",
           "rubric": {
-            "1": "Applied fixes under --auto, which is report-only — it edited files the user never authorized it to touch.",
+            "1": "Applied fixes under --auto, which is report-only \u2014 it edited files the user never authorized it to touch.",
             "2": "Called AskUserQuestion or presented the fix menu despite --auto being non-interactive.",
             "3": "Made no edits but was ambiguous about whether fixes were applied.",
             "4": "Report-only with a stray offer to apply fixes.",
@@ -685,7 +687,7 @@
             "2": "Runs a check and reports it as gate evidence for fixes that were never applied.",
             "3": "Mentions the gate confusingly.",
             "4": "Skips the gate without noting why.",
-            "5": "No gate run, because no fix was applied — the report stands alone."
+            "5": "No gate run, because no fix was applied \u2014 the report stands alone."
           }
         },
         {
@@ -702,6 +704,9 @@
       ],
       "required_absent": [
         "How would you like to proceed?"
+      ],
+      "required_present": [
+        "user_id"
       ]
     },
     {
@@ -725,7 +730,7 @@
           "importance": "CRITICAL",
           "rubric": {
             "1": "Reports the fixes as verified, or as complete, with no mention that nothing was checked.",
-            "2": "Silently skips the gate — the output reads exactly like a passing run.",
+            "2": "Silently skips the gate \u2014 the output reads exactly like a passing run.",
             "3": "Mentions verification was limited but buries it.",
             "4": "States behavior was unverified but does not list which files changed.",
             "5": "States plainly that behavior was not verified, lists exactly which files changed, and recommends the user run their own tests."
