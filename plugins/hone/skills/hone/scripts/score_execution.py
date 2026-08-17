@@ -57,11 +57,6 @@ CLAUSE_BREAK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A tail that is nothing but a conjunction is still inside the denial
-# ("I did not run the audit, or proceed to Phase 2"), so the clause split is
-# discarded when it leaves no clause behind.
-EMPTY_CLAUSE_RE = re.compile(r"^[\s,]*(?:or|and|nor)?\s*$", re.IGNORECASE)
-
 
 def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
     """True when `phrase` appears in `text` outside a negating context.
