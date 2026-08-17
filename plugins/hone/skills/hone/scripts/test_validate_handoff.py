@@ -103,6 +103,31 @@ class TestValidateValue(unittest.TestCase):
         validate_value(False, {"type": "number", "min_value": 0}, "test", errors)
         self.assertEqual(len(errors), 1)
 
+    def test_infinity_rejected_on_min_only_bounds(self) -> None:
+        # json.loads parses the nonstandard Infinity literal by default,
+        # and inf >= 0 satisfies a min-only bound, so counter fields
+        # (actionable_failures, test_count, line_count) blessed +inf.
+        errors: list[ValidationError] = []
+        validate_value(
+            float("inf"), {"type": "number", "min_value": 0}, "test", errors
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Infinity", errors[0].message)
+
+    def test_negative_infinity_rejected_without_bounds(self) -> None:
+        errors: list[ValidationError] = []
+        validate_value(float("-inf"), {"type": "number"}, "test", errors)
+        self.assertEqual(len(errors), 1)
+
+    def test_huge_int_does_not_crash_finiteness_check(self) -> None:
+        # math.isfinite raises OverflowError on ints beyond float range;
+        # the finiteness guard applies to floats only (ints are finite).
+        errors: list[ValidationError] = []
+        validate_value(
+            10**400, {"type": "number", "min_value": 0}, "test", errors
+        )
+        self.assertEqual(len(errors), 0)
+
     def test_number_in_range(self) -> None:
         errors: list[ValidationError] = []
         validate_value(
@@ -595,11 +620,26 @@ class TestValidateStep(unittest.TestCase):
         )
 
 
-class TestValidateAll(unittest.TestCase):
-    """Test --all mode."""
+def _fix_only_steps(**overrides: str) -> dict:
+    """A steps map in SKILL.md's --fix-only entry shape."""
+    from hone_common import PHASE1_STEPS, PHASE23_STEPS
 
-    def test_validates_present_handoffs_only(self) -> None:
+    steps = {
+        **{step: "skipped" for step in PHASE1_STEPS},
+        **{step: "pending" for step in PHASE23_STEPS},
+    }
+    steps.update(overrides)
+    return steps
+
+
+class TestValidateAll(unittest.TestCase):
+    """Test --all mode (run-shape aware; see hone_common's table)."""
+
+    def test_validates_present_handoffs_in_fix_only_shape(self) -> None:
+        # The fix-only shape expects no handoffs, so only present ones are
+        # validated — but present ones ARE validated.
         state = {
+            "steps": _fix_only_steps(),
             "hook_metadata": {
                 "event_type": "Stop",
                 "has_throttle": False,
@@ -611,9 +651,38 @@ class TestValidateAll(unittest.TestCase):
         self.assertEqual(results[0].handoff, "hook_metadata")
         self.assertTrue(results[0].valid)
 
-    def test_empty_state_returns_nothing(self) -> None:
+    def test_empty_state_is_not_a_vacuous_pass(self) -> None:
+        # A truncated/corrupt state file ({}: no steps, no handoffs)
+        # derives the normal shape, whose untracked Phase 1 handoffs
+        # (artifact_context, routing_decision) are always expected; their
+        # absence must surface as failures, never as ALL PASS over an
+        # empty result set.
         results = validate_all({})
-        self.assertEqual(len(results), 0)
+        self.assertTrue(results)
+        self.assertFalse(all(r.valid for r in results))
+        self.assertIn("artifact_context", {r.handoff for r in results})
+
+    def test_fix_only_entry_yields_no_results(self) -> None:
+        # SKILL.md's --fix-only entry: all Phase 1 steps skipped, zero
+        # handoff blocks. Nothing is expected, so nothing is validated
+        # (the CLI maps the empty set to an explicit pass, exit 0).
+        self.assertEqual(validate_all({"steps": _fix_only_steps()}), [])
+
+    def test_missing_expected_handoff_is_flagged(self) -> None:
+        # Normal shape with phase1_evaluate done but eval_results absent:
+        # --all must demand it (checking only present handoffs let a
+        # truncated file pass vacuously).
+        results = validate_all({"steps": {"phase1_evaluate": "done"}})
+        eval_rows = [r for r in results if r.handoff == "eval_results"]
+        self.assertTrue(eval_rows)
+        self.assertFalse(eval_rows[0].valid)
+
+    def test_fix_only_after_phase2_expects_phase2_outputs(self) -> None:
+        # Once a fix-only run's phase2_improve is done, its outputs are
+        # expected; their absence fails --all even in the lax shape.
+        state = {"steps": _fix_only_steps(phase2_improve="done")}
+        failing = {r.handoff for r in validate_all(state) if not r.valid}
+        self.assertIn("applied_edits", failing)
 
 
 class TestSchemaCompleteness(unittest.TestCase):
@@ -807,8 +876,182 @@ class TestStructuralAuditScriptOutputValidates(unittest.TestCase):
             result.valid,
             f"Errors: {[e.message for e in result.errors]}",
         )
-        results = validate_all(state)
-        self.assertTrue(all(r.valid for r in results))
+        audit_rows = [
+            r for r in validate_all(state) if r.handoff == "structural_audit"
+        ]
+        self.assertTrue(audit_rows)
+        self.assertTrue(audit_rows[0].valid)
+
+
+class TestRunShapeTable(unittest.TestCase):
+    """Both --step and --all consult hone_common's run-shape table."""
+
+    IMPROVEMENT_HANDOFFS = {
+        "improvement_findings": {
+            "findings": [
+                {
+                    "id": "F1",
+                    "fix_type": "content",
+                    "section": "Usage",
+                    "description": "clarify flag",
+                    "source": "eval",
+                    "priority": "HIGH",
+                }
+            ],
+        },
+        "improvement_plan": {
+            "edits": [
+                {
+                    "id": "F1",
+                    "target_section": "Usage",
+                    "change": "clarified",
+                    "approved": True,
+                }
+            ],
+            "total_approved": 1,
+        },
+        "applied_edits": {
+            "edit_count": 1,
+            "confirmed_on_disk": True,
+            "artifact_before_snapshot": "/tmp/snap.md",
+            "syntax_check_passed": True,
+        },
+    }
+
+    def test_table_covers_the_step_contract_vocabulary(self) -> None:
+        # The declarative table and STEP_CONTRACTS must describe the same
+        # step vocabulary, and the lax shapes must partition it.
+        from hone_common import RUN_SHAPE_ACTIVE_STEPS
+
+        self.assertEqual(
+            RUN_SHAPE_ACTIVE_STEPS["normal"], frozenset(STEP_CONTRACTS)
+        )
+        self.assertEqual(
+            RUN_SHAPE_ACTIVE_STEPS["fix-only"]
+            | RUN_SHAPE_ACTIVE_STEPS["no-improvement"],
+            RUN_SHAPE_ACTIVE_STEPS["normal"],
+        )
+        self.assertEqual(
+            RUN_SHAPE_ACTIVE_STEPS["fix-only"]
+            & RUN_SHAPE_ACTIVE_STEPS["no-improvement"],
+            frozenset(),
+        )
+
+    def test_fix_only_done_improve_step_needs_no_eval_results(self) -> None:
+        # Round-3 regression: the skipped-step carve-out did not extend to
+        # done steps, so a fix-only run's completed phase2_improve demanded
+        # the eval_results that shape never produces, and the executor's
+        # only paths forward were fabricating the block or skipping the
+        # mandatory gate.
+        state = {
+            "steps": _fix_only_steps(phase2_improve="done"),
+            **self.IMPROVEMENT_HANDOFFS,
+        }
+        results = validate_step(state, "phase2_improve")
+        self.assertTrue(
+            all(r.valid for r in results),
+            [e.message for r in results for e in r.errors],
+        )
+
+    def test_fix_only_done_fresh_eyes_needs_no_eval_results(self) -> None:
+        state = {
+            "steps": _fix_only_steps(phase2_fresh_eyes="done"),
+            "fresh_eyes": {"proposals": []},
+        }
+        results = validate_step(state, "phase2_fresh_eyes")
+        self.assertTrue(
+            all(r.valid for r in results),
+            [e.message for r in results for e in r.errors],
+        )
+
+    def test_fix_only_done_phase3_needs_only_applied_edits(self) -> None:
+        state = {
+            "steps": _fix_only_steps(
+                phase2_improve="done", phase3_reevaluate="done"
+            ),
+            **self.IMPROVEMENT_HANDOFFS,
+        }
+        results = validate_step(state, "phase3_reevaluate")
+        self.assertTrue(
+            all(r.valid for r in results),
+            [e.message for r in results for e in r.errors],
+        )
+
+    def test_normal_done_improve_step_still_requires_eval_results(self) -> None:
+        # In the normal shape phase1_evaluate ran, so its output is a hard
+        # requirement of the done phase2_improve; the lax fix-only rule
+        # must not leak into runs that did evaluate.
+        state = {
+            "steps": {"phase1_evaluate": "done", "phase2_improve": "done"},
+            **self.IMPROVEMENT_HANDOFFS,
+        }
+        results = validate_step(state, "phase2_improve")
+        self.assertFalse(all(r.valid for r in results))
+        failing = {r.handoff for r in results if not r.valid}
+        self.assertIn("eval_results", failing)
+
+
+class TestCliExitCodes(unittest.TestCase):
+    """Exit-code contract: 0 pass, 1 validation failure, 2 usage error."""
+
+    def _run(self, state: dict, *args: str):
+        import json as _json
+        import subprocess
+        import tempfile
+
+        script = str(Path(__file__).parent / "validate_handoff.py")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as handle:
+            _json.dump(state, handle)
+            tmp_path = handle.name
+        return subprocess.run(
+            [sys.executable, script, tmp_path, *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_unknown_handoff_name_is_usage_error(self) -> None:
+        # A typo'd name exited 1, indistinguishable from a real state-file
+        # failure, misdirecting exit-code consumers into "fix the state
+        # file" loops. The docstring contract says 2.
+        result = self._run({}, "--handoff", "eval_result")
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertIn("unknown handoff name", result.stderr)
+
+    def test_unknown_step_name_is_usage_error(self) -> None:
+        result = self._run({}, "--step", "phase1_structual_audit")
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertIn("unknown step name", result.stderr)
+
+    def test_known_name_with_missing_data_is_exit_1(self) -> None:
+        result = self._run({}, "--handoff", "eval_results")
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+
+    def test_known_name_with_valid_data_is_exit_0(self) -> None:
+        state = {
+            "routing_decision": {
+                "has_existing_criteria": True,
+                "criteria_path": "/tmp/criteria.json",
+                "criteria_valid": True,
+                "route": "reuse",
+            }
+        }
+        result = self._run(state, "--handoff", "routing_decision")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+    def test_all_on_fix_only_entry_is_exit_0(self) -> None:
+        # The documented fix-only entry shape (steps only, zero handoff
+        # blocks) deadlocked --all at exit 2 with "no known handoffs
+        # found" and nothing fixable.
+        result = self._run({"steps": _fix_only_steps()}, "--all")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("fix-only", result.stdout)
+
+    def test_all_on_empty_state_is_exit_1_with_concrete_errors(self) -> None:
+        result = self._run({}, "--all")
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertIn("artifact_context", result.stdout)
 
 
 class TestCliReadErrors(unittest.TestCase):

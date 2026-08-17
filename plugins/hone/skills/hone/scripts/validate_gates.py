@@ -9,20 +9,28 @@ table) all describe constraints this script enforces mechanically.
 What it checks:
   1. Schema: every event has step, judge, result; judge is in the
      references/gate-event-schema.json enum; result is exactly "pass" or
-     "fail"; step/ts are strings and findings is an array of strings, as
-     the schema declares; rubric items (when present) carry
-     severity/item/result with the schema's enums and a string item.
-     Violations of the published schema are errors —
+     "fail"; step/ts are strings, findings is an array of strings, and
+     rubric items carry severity/item/result with the schema's enums and a
+     string item. A present key holding null violates the schema exactly
+     as a wrong type does (draft-07 rejects null for a declared
+     string/array). Violations of the published schema are errors —
      this script is the deterministic compliance check the schema promises,
      so it must not bless a state file the schema rejects.
-  2. Completeness: the expected event set for the run mode is present.
-  3. Fail semantics: a "fail" event is legitimate when it is terminal (the
-     pipeline halted there) or when a later "pass" for the same step records
-     the repair. A "fail" followed by unrelated forward progress is flagged.
+  2. Completeness: the expected event set for the run mode is present. The
+     mode is derived from the state file's steps{} map via hone_common's
+     run-shape table (fix-only / no-improvement / normal, plus error-halt
+     when non-done, non-skipped steps remain) — the executor does not get
+     to pick the gate set it is graded against. --mode is an explicit
+     override; a contradiction with the derived mode draws a warning.
+  3. Fail semantics: a "fail" event is legitimate when it is terminal —
+     the pipeline halted there, followed at most by the mandated final
+     workflow_exit event(s) — or when a later "pass" for the same step
+     records the repair. A "fail" followed by unrelated forward progress
+     is flagged.
 
 Exit codes: 0 valid, 1 validation failure, 2 usage error.
 
-Stdlib only. Invoke as: python3 <skill-dir>/scripts/validate_gates.py <state> --mode normal
+Stdlib only. Invoke as: python3 <skill-dir>/scripts/validate_gates.py <state> --json
 """
 
 from __future__ import annotations
@@ -31,6 +39,8 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+from hone_common import derive_gate_mode
 
 VALID_RESULTS = ("pass", "fail")
 
@@ -93,13 +103,15 @@ def _rubric_errors(index: int, rubric: object) -> list[str]:
 
     gate-event-schema.json requires each rubric item to be an object with
     severity/item/result, severity in RUBRIC_SEVERITIES and result in
-    RUBRIC_RESULTS. An absent or null rubric is fine (the field is
-    optional); anything else must match the published schema.
+    RUBRIC_RESULTS. Only an absent rubric is fine (the field is optional);
+    a present null is rejected by the schema like any other non-array, so
+    the caller gates on key presence, not `is not None`.
     """
-    if rubric is None:
-        return []
     if not isinstance(rubric, list):
-        return [f"gates[{index}] rubric is not an array"]
+        return [
+            f"gates[{index}] rubric must be an array, got "
+            f"{type(rubric).__name__}"
+        ]
     errors: list[str] = []
     for item_index, item in enumerate(rubric):
         label = f"gates[{index}] rubric[{item_index}]"
@@ -153,23 +165,29 @@ def validate_gates(gates: list, mode: str) -> dict:
         # presence and enum membership: a list-valued step crashed the
         # emitted-set build below, and null step / numeric ts / dict
         # findings were blessed as VALID against the published schema.
-        # (judge and result need no separate check — enum membership
-        # already rejects any non-string.)
+        # Optional fields (ts, findings, rubric) gate on key presence, not
+        # `is not None`: draft-07 rejects an explicit null for a declared
+        # string/array, so a present null is a schema error too. (judge and
+        # result need no separate check — enum membership already rejects
+        # any non-string.)
         step = gate.get("step")
         if "step" in gate and not isinstance(step, str):
             errors.append(
                 f"gates[{index}] step must be a string, got "
                 f"{type(step).__name__}"
             )
-        ts = gate.get("ts")
-        if ts is not None and not isinstance(ts, str):
+        if "ts" in gate and not isinstance(gate["ts"], str):
             errors.append(
-                f"gates[{index}] ts must be a string, got {type(ts).__name__}"
+                f"gates[{index}] ts must be a string, got "
+                f"{type(gate['ts']).__name__}"
             )
-        findings = gate.get("findings")
-        if findings is not None:
+        if "findings" in gate:
+            findings = gate["findings"]
             if not isinstance(findings, list):
-                errors.append(f"gates[{index}] findings is not an array")
+                errors.append(
+                    f"gates[{index}] findings must be an array, got "
+                    f"{type(findings).__name__}"
+                )
             else:
                 for finding_index, finding in enumerate(findings):
                     if not isinstance(finding, str):
@@ -191,13 +209,23 @@ def validate_gates(gates: list, mode: str) -> dict:
             errors.append(
                 f"gates[{index}] judge '{judge}' is not one of {VALID_JUDGES}"
             )
-        errors.extend(_rubric_errors(index, gate.get("rubric")))
+        if "rubric" in gate:
+            errors.extend(_rubric_errors(index, gate["rubric"]))
 
-    # Fail semantics: terminal, or repaired by a later pass for the same step.
+    # Fail semantics: terminal, or repaired by a later pass for the same
+    # step. "Terminal" means the pipeline halted at that fail: SKILL.md
+    # mandates a final workflow_exit event before ANY exit, so a legitimate
+    # halt (error halt, regression auto-revert) is followed by workflow_exit
+    # event(s), never by unrelated forward progress. Requiring the literal
+    # last index flagged every documented halt shape and invited the
+    # executor to append a fabricated repair pass to silence the warning.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
-        terminal = index == len(gates) - 1
+        terminal = all(
+            isinstance(later, dict) and later.get("step") == "workflow_exit"
+            for later in gates[index + 1 :]
+        )
         repaired = any(
             isinstance(later, dict)
             and later.get("step") == gate.get("step")
@@ -239,8 +267,13 @@ def main() -> None:
     parser.add_argument(
         "--mode",
         choices=sorted(REQUIRED_STEPS),
-        default="normal",
-        help="Run mode determining the expected event set (default: normal)",
+        default=None,
+        help=(
+            "Override the run mode determining the expected event set. By "
+            "default the mode is derived from the state file's steps{} map "
+            "(hone_common.derive_gate_mode); a contradiction between the "
+            "override and the derived mode draws a warning."
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")
     args = parser.parse_args()
@@ -266,7 +299,30 @@ def main() -> None:
         print("ERROR: state file root must be a JSON object", file=sys.stderr)
         sys.exit(2)
 
-    report = validate_gates(state.get("gates", []), args.mode)
+    # Derive the mode from steps{} rather than trusting the caller-supplied
+    # flag: the expected gate set is the one thing the executor must not
+    # pick for itself (an incomplete run would simply claim --mode
+    # error-halt). --mode stays as an explicit override; a mismatch with
+    # the derived mode is warned about, not silently resolved.
+    derived_mode = derive_gate_mode(state.get("steps"))
+    if args.mode is not None:
+        mode = args.mode
+    elif derived_mode is not None:
+        mode = derived_mode
+    else:
+        mode = "normal"
+
+    report = validate_gates(state.get("gates", []), mode)
+
+    if (
+        args.mode is not None
+        and derived_mode is not None
+        and args.mode != derived_mode
+    ):
+        report["warnings"].append(
+            f"--mode '{args.mode}' contradicts the steps{{}}-derived run "
+            f"shape '{derived_mode}'; the explicit override was honored"
+        )
 
     if args.json:
         json.dump(report, sys.stdout, indent=2)

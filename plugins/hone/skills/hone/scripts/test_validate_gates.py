@@ -71,9 +71,16 @@ class TestSchema(unittest.TestCase):
         self.assertTrue(any("severity 'SEVERE'" in e for e in report["errors"]))
         self.assertTrue(any("rubric[1] is not an object" in e for e in report["errors"]))
 
-    def test_null_rubric_is_allowed(self):
+    def test_null_rubric_is_schema_error(self):
+        # gate-event-schema.json declares rubric as "type": "array", and
+        # draft-07 rejects an explicit null for a present property; this
+        # script must not bless a state file the schema rejects.
         gates = NORMAL_RUN[:-1] + [dict(gate("workflow_exit"), rubric=None)]
-        self.assertTrue(validate_gates(gates, "normal")["valid"])
+        report = validate_gates(gates, "normal")
+        self.assertFalse(report["valid"])
+        self.assertTrue(
+            any("rubric must be an array" in e for e in report["errors"])
+        )
 
     def test_gates_not_a_list(self):
         report = validate_gates("nope", "normal")
@@ -102,7 +109,7 @@ class TestSchema(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertTrue(any("step must be a string" in e for e in report["errors"]))
         self.assertTrue(any("ts must be a string" in e for e in report["errors"]))
-        self.assertTrue(any("findings is not an array" in e for e in report["errors"]))
+        self.assertTrue(any("findings must be an array" in e for e in report["errors"]))
         self.assertTrue(any("item must be a string" in e for e in report["errors"]))
 
     def test_non_string_finding_items_are_errors(self):
@@ -113,13 +120,19 @@ class TestSchema(unittest.TestCase):
             any("findings[1] is not a string" in e for e in report["errors"])
         )
 
-    def test_null_ts_and_null_findings_tolerated(self):
-        # Optional fields follow the rubric precedent: explicit null reads
-        # as absent, only a wrong non-null type is a schema error.
+    def test_null_ts_and_null_findings_are_schema_errors(self):
+        # The published schema declares ts as string and findings as array;
+        # a present null violates both under draft-07, so the previous
+        # `is not None` guards blessed exactly what jsonschema rejects.
         gates = NORMAL_RUN[:-1] + [
             dict(gate("workflow_exit"), ts=None, findings=None)
         ]
-        self.assertTrue(validate_gates(gates, "normal")["valid"])
+        report = validate_gates(gates, "normal")
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("ts must be a string" in e for e in report["errors"]))
+        self.assertTrue(
+            any("findings must be an array" in e for e in report["errors"])
+        )
 
 
 class TestCompleteness(unittest.TestCase):
@@ -181,6 +194,142 @@ class TestFailSemantics(unittest.TestCase):
         ]
         report = validate_gates(gates, "normal")
         self.assertTrue(any("continued" in w for w in report["warnings"]))
+
+    def test_error_halt_shape_is_terminal(self):
+        # SKILL.md mandates a final workflow_exit event before ANY exit, so
+        # an honest error halt is [<step> fail, workflow_exit fail] — the
+        # halting fail is never the literal last element. Flagging it
+        # invited the executor to fabricate a repair pass to silence the
+        # warning, corrupting the failure record being measured.
+        gates = [
+            gate("phase1_to_phase2", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]
+        report = validate_gates(gates, "error-halt")
+        self.assertEqual(report["warnings"], [])
+
+    def test_regression_auto_revert_shape_is_terminal(self):
+        # Regression auto-revert: phase3_exit fail followed by the mandated
+        # workflow_exit pass. The fail is terminal, not "run continued".
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("workflow_exit"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertEqual(report["warnings"], [])
+
+
+class TestModeDerivation(unittest.TestCase):
+    """The expected-event mode comes from steps{}, not the caller's flag."""
+
+    def _run(self, state: dict, *extra: str):
+        import json as _json
+        import subprocess
+        import sys as _sys
+        import tempfile
+        from pathlib import Path
+
+        script = str(Path(__file__).parent / "validate_gates.py")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as handle:
+            _json.dump(state, handle)
+            tmp_path = handle.name
+        return subprocess.run(
+            [_sys.executable, script, tmp_path, "--json", *extra],
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    def _steps(phase1: str, phase23: str) -> dict:
+        from hone_common import PHASE1_STEPS, PHASE23_STEPS
+
+        return {
+            **{step: phase1 for step in PHASE1_STEPS},
+            **{step: phase23 for step in PHASE23_STEPS},
+        }
+
+    def test_fix_only_mode_derived_from_steps(self):
+        import json as _json
+
+        state = {
+            "steps": self._steps("skipped", "done"),
+            "gates": [
+                gate("fixonly_entry"),
+                gate("phase2_to_phase3"),
+                gate("phase3_exit"),
+                gate("workflow_exit"),
+            ],
+        }
+        result = self._run(state)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(_json.loads(result.stdout)["mode"], "fix-only")
+
+    def test_no_improvement_mode_derived_from_steps(self):
+        import json as _json
+
+        state = {
+            "steps": self._steps("done", "skipped"),
+            "gates": [gate("phase1_to_phase2"), gate("workflow_exit")],
+        }
+        result = self._run(state)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(_json.loads(result.stdout)["mode"], "no-improvement")
+
+    def test_error_halt_mode_derived_from_in_flight_steps(self):
+        import json as _json
+
+        steps = dict(self._steps("done", "done"), phase2_improve="in_progress")
+        state = {
+            "steps": steps,
+            "gates": [
+                gate("phase1_to_phase2"),
+                gate("workflow_exit", result="fail"),
+            ],
+        }
+        result = self._run(state)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(_json.loads(result.stdout)["mode"], "error-halt")
+
+    def test_incomplete_normal_run_cannot_claim_error_halt(self):
+        # Round-3 exploit: steps{} shows a completed normal run but gates[]
+        # lacks phase2_to_phase3/phase3_exit; a caller-supplied
+        # --mode error-halt blessed it. Derivation closes the hole.
+        import json as _json
+
+        state = {
+            "steps": self._steps("done", "done"),
+            "gates": [gate("phase1_to_phase2"), gate("workflow_exit")],
+        }
+        result = self._run(state)
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        report = _json.loads(result.stdout)
+        self.assertEqual(report["mode"], "normal")
+        self.assertIn("phase2_to_phase3", report["missing_steps"])
+
+    def test_explicit_mode_override_honored_with_mismatch_warning(self):
+        import json as _json
+
+        state = {
+            "steps": self._steps("done", "done"),
+            "gates": [gate("workflow_exit")],
+        }
+        result = self._run(state, "--mode", "error-halt")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        report = _json.loads(result.stdout)
+        self.assertEqual(report["mode"], "error-halt")
+        self.assertTrue(any("contradicts" in w for w in report["warnings"]))
+
+    def test_missing_steps_map_defaults_to_normal(self):
+        import json as _json
+
+        state = {"gates": NORMAL_RUN}
+        result = self._run(state)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(_json.loads(result.stdout)["mode"], "normal")
 
 
 class TestCliStateFileGuards(unittest.TestCase):

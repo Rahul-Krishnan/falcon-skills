@@ -15,10 +15,34 @@ that used to be duplicated (and drifted) across them:
     analyze_results.py and criteria_self_repair.py.
   - Side-effecting bash command patterns shared by side_effect_guard.py
     (sandboxing) and validate_eval_criteria.py (runner_context hygiene).
+  - The delegation-shaped slash-invocation regex shared by
+    side_effect_guard.py (fail-closed sandboxing) and
+    validate_eval_criteria.py (missing_skill_tool audit).
   - YAML frontmatter splitting and field extraction shared by
     side_effect_guard.py and structural_audit.py.
   - Pass/acceptance/triage score thresholds. These are AUTHORITATIVE; the
     numbers quoted in references/*.md mirror this module.
+  - The run-shape table (RUN_SHAPE_ACTIVE_STEPS + derive_run_shape /
+    derive_gate_mode). This is AUTHORITATIVE and stated once: a hone run
+    has one of three documented shapes, each derived from the state file's
+    steps{} map, and the shape decides which steps (hence which handoffs
+    and which gate events) the run is expected to produce:
+
+      normal          phase1_evaluate ran        all steps active
+      fix-only        phase1_evaluate "skipped"  Phase 2/3 steps only
+                      (SKILL.md's --fix-only entry marks every Phase 1
+                      step skipped in one write; no other documented
+                      shape skips phase1_evaluate)
+      no-improvement  phase2_improve "skipped"   Phase 1 steps only
+                      (Phase 1 found nothing to improve; Phases 2 and 3
+                      never ran)
+
+    validate_handoff.py consults the table for --step and --all (a handoff
+    is required exactly when its producing step is active in the shape and
+    actually ran), and validate_gates.py derives its expected-event mode
+    from the same map (plus "error-halt" when non-done, non-skipped steps
+    remain). SKILL.md and references/*.md defer to this table; do not
+    restate the shape rules in prose.
 
 Stdlib only. Keep it dependency-free so the plugin ships self-contained.
 """
@@ -46,6 +70,75 @@ ACCEPTANCE_THRESHOLD = 0.65
 # gap worth a Phase 2 improvement round. PASS/FAIL labels in operator
 # summaries must use this same bar so triage and reporting never disagree.
 ACTIONABLE_THRESHOLD = 0.8
+
+
+# ---------------------------------------------------------------------------
+# Run shapes (authoritative — see the module docstring)
+# ---------------------------------------------------------------------------
+# Step-name vocabulary matches the SKILL.md state-file template and
+# validate_handoff.py's STEP_CONTRACTS (which has a test asserting the two
+# stay in sync).
+
+PHASE1_STEPS: tuple[str, ...] = (
+    "phase1_structural_audit",
+    "phase1_criteria_audit",
+    "phase1_evaluate",
+    "phase1_reference_validation",
+    "phase1_spec_artifacts",
+)
+
+PHASE23_STEPS: tuple[str, ...] = (
+    "phase2_trigger_test",
+    "phase2_fresh_eyes",
+    "phase2_improve",
+    "phase3_reevaluate",
+)
+
+# The single declarative statement of which tracked steps run in each
+# documented run shape. "Active" means the shape can run the step at all;
+# whether it actually ran is the step's own status.
+RUN_SHAPE_ACTIVE_STEPS: dict[str, frozenset[str]] = {
+    "normal": frozenset(PHASE1_STEPS + PHASE23_STEPS),
+    "fix-only": frozenset(PHASE23_STEPS),
+    "no-improvement": frozenset(PHASE1_STEPS),
+}
+
+
+def derive_run_shape(steps: object) -> str:
+    """Run shape derived from the state file's steps{} map.
+
+    Discriminators (see the module docstring's table): phase1_evaluate
+    "skipped" marks fix-only, phase2_improve "skipped" marks
+    no-improvement, anything else is normal. Tier-based skips of other
+    Phase 1 steps (eg phase1_structural_audit on lightweight artifacts)
+    deliberately do not change the shape. A non-dict/absent steps map
+    derives "normal" — the strictest shape, so a truncated state file is
+    never blessed by accident.
+    """
+    if not isinstance(steps, dict):
+        return "normal"
+    if steps.get("phase1_evaluate") == "skipped":
+        return "fix-only"
+    if steps.get("phase2_improve") == "skipped":
+        return "no-improvement"
+    return "normal"
+
+
+def derive_gate_mode(steps: object) -> str | None:
+    """validate_gates.py's expected-event mode, derived from steps{}.
+
+    The gate check runs as the last action before any exit (SKILL.md's
+    Mechanical Exit Gate), where a compliant run has every step "done" or
+    "skipped". Any other status means the run halted mid-flight:
+    "error-halt". Otherwise the mode is the run shape. Returns None when
+    the steps map is absent or unusable (mode cannot be derived; the
+    caller falls back to --mode / "normal").
+    """
+    if not isinstance(steps, dict) or not steps:
+        return None
+    if any(status not in ("done", "skipped") for status in steps.values()):
+        return "error-halt"
+    return derive_run_shape(steps)
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +222,9 @@ def resolve_score(
     composite only as a fallback.
     """
     det_scores = det_scores or {}
-    det = det_scores.get(get(result, "test_id", "unknown"))
+    # expected=str: dict.get hashes its key even on an empty dict, so a
+    # non-string test_id (list, dict) raised TypeError on every call path.
+    det = det_scores.get(get(result, "test_id", "unknown", expected=str))
     if prefer_deterministic and det is not None:
         return det
     llm = _raw_llm_score(result)
@@ -184,12 +279,15 @@ def load_deterministic_scores(results_path: str) -> dict[str, float]:
 
     Inconclusive tests carry composite: null; they are excluded so numeric
     comparisons downstream never see None. Returns an empty dict when the
-    file is missing or unreadable.
+    file is missing or unreadable. test_id must be a string: it becomes a
+    dict key here and a set member in load_inconclusive_ids, and an
+    unhashable one (list, dict) raised TypeError before any output.
     """
     return {
         test["test_id"]: test["composite"]
         for test in _per_test_entries(results_path)
-        if "test_id" in test and isinstance(test.get("composite"), (int, float))
+        if isinstance(test.get("test_id"), str)
+        and isinstance(test.get("composite"), (int, float))
     }
 
 
@@ -206,7 +304,7 @@ def load_inconclusive_ids(results_path: str) -> set[str]:
     return {
         test["test_id"]
         for test in _per_test_entries(results_path)
-        if "test_id" in test
+        if isinstance(test.get("test_id"), str)
         and (
             test.get("status") == "inconclusive"
             or not isinstance(test.get("composite"), (int, float))
@@ -250,6 +348,47 @@ FS_MUTATING_BASH_PATTERNS: list[tuple[str, str]] = [
 BASH_SIDE_EFFECT_PATTERNS: list[tuple[str, str]] = (
     GIT_MUTATING_BASH_PATTERNS + FS_MUTATING_BASH_PATTERNS
 )
+
+# Runner-context header side_effect_guard.py appends when sandboxing side
+# effects. validate_eval_criteria.py's hygiene check skips everything after
+# this header: the sandbox block itself names the commands it simulates
+# ("cp → simulate: ..."), which would otherwise draw a fixable
+# runner_context_side_effect finding against the guard's own output on
+# every criteria-reuse run.
+SANDBOX_HEADER = "SAFETY SANDBOX — side-effect simulation mode"
+
+
+# ---------------------------------------------------------------------------
+# Delegation-shaped slash-invocation detection
+# ---------------------------------------------------------------------------
+# Shared by side_effect_guard.py (fail-closed sandboxing of unknown
+# delegations) and validate_eval_criteria.py (missing_skill_tool audit).
+# These were previously two separate regexes that disagreed on identical
+# prompts: "Run /forge." and "`/forge`" sandboxed but never drew the
+# missing-Skill-tool repair. The pattern matches a delegation-shaped token
+# (line start / whitespace / backtick / bracket / paren before the slash, no
+# second slash after the name) so file paths like /tmp/x or factor/face
+# never fire; the stoplist drops bare filesystem path heads.
+
+DELEGATION_RE = re.compile(
+    r"(?:^|[\s`(\[])/([a-z][a-z0-9-]{2,})\b(?!/)", re.MULTILINE
+)
+DELEGATION_STOPLIST = frozenset(
+    {"tmp", "usr", "bin", "etc", "var", "opt", "dev", "home", "private", "users"}
+)
+
+
+def find_slash_invocations(text: str) -> list[str]:
+    """Names of delegation-shaped /slash-commands in text.
+
+    Stoplist-filtered, deduplicated, in order of first appearance.
+    """
+    names: list[str] = []
+    for match in DELEGATION_RE.finditer(text):
+        name = match.group(1)
+        if name not in DELEGATION_STOPLIST and name not in names:
+            names.append(name)
+    return names
 
 
 # ---------------------------------------------------------------------------

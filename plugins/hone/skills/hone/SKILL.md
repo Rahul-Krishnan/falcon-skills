@@ -205,10 +205,10 @@ and then halt with an error message including the file path. Do not proceed with
 Then run the deterministic gate check as the last action before stopping:
 
 ```bash
-python3 <skill-dir>/scripts/validate_gates.py /tmp/workflow-${RUN_ID}.json --mode <normal|fix-only|error-halt|no-improvement> --json
+python3 <skill-dir>/scripts/validate_gates.py /tmp/workflow-${RUN_ID}.json --json
 ```
 
-Use `--mode no-improvement` when Phase 1 found nothing to improve and Phases 2 and 3 were skipped: it requires only the `phase1_to_phase2` and `workflow_exit` events, so a legitimate skip-Phase-2 run is not flagged for transitions that never fired.
+The expected event set is derived from the state file's `steps{}` map via the run-shape table in `scripts/hone_common.py` (`derive_gate_mode`): normal, fix-only, no-improvement (Phase 1 found nothing to improve, so it requires only `phase1_to_phase2` and `workflow_exit`), or error-halt when non-done, non-skipped steps remain. Do not pass `--mode` in normal operation — it exists only as an explicit override and draws a warning when it contradicts the derived shape.
 
 If it exits non-zero, emit the missing or malformed events before stopping. This compiles the gate-emission constraint into a check rather than relying on the executor remembering four separate prose warnings.
 
@@ -224,7 +224,7 @@ python3 <skill-dir>/scripts/validate_handoff.py \
 
 If validation fails: fix the state file, re-validate. Do not proceed with invalid handoff data.
 
-`--step` mode on a skipped step checks a required input only when its producing step actually ran, so run shapes that legitimately skip producers (`--fix-only`, no-improvement) validate cleanly without fabricated handoff blocks. The contract is stated once, in `scripts/validate_handoff.py` (`_skipped_step_input_expected`); do not restate it here.
+Both `--step` and `--all` consult the run-shape table in `scripts/hone_common.py` (`RUN_SHAPE_ACTIVE_STEPS` / `derive_run_shape`): a handoff is required exactly when its producing step is active in the derived run shape (normal, fix-only, no-improvement) and actually ran. Run shapes that legitimately skip producers therefore validate cleanly without fabricated handoff blocks — on `--fix-only` this covers done steps too (`--step phase2_improve` does not demand `eval_results`, and `--all` at Phase 2 entry passes with zero handoff blocks). The contract is stated once, in that table; do not restate it here.
 
 Every validation attempt emits an event to `gates[]`, appended not replaced:
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -28,6 +29,11 @@ from pathlib import Path
 # Null-tolerant dict access (same-directory flat import). State files under
 # validation are exactly where present-but-null keys show up; a raw
 # state.get("steps", {}) returns None for {"steps": null} and crashes.
+# The run-shape table (RUN_SHAPE_ACTIVE_STEPS / derive_run_shape) is the
+# authoritative statement of which steps run in each documented run shape
+# (normal, fix-only, no-improvement); see hone_common's module docstring.
+# Both --step and --all consult it via _input_expected below.
+from hone_common import RUN_SHAPE_ACTIVE_STEPS, derive_run_shape
 from hone_common import get as null_safe_get
 
 
@@ -573,36 +579,33 @@ HANDOFF_PRODUCERS: dict[str, str] = {
 }
 
 
-def _skipped_step_input_expected(steps: dict, handoff_name: str) -> bool:
-    """Whether a skipped step's required input handoff must exist.
+def _input_expected(steps: dict, handoff_name: str) -> bool:
+    """Whether a required input handoff must exist in this run shape.
 
-    CONTRACT (single statement — SKILL.md's run shapes defer to this): a
-    skipped step's required input must exist exactly when the step that
-    produces it actually ran. SKILL.md documents two run shapes where a
-    skipped step's inputs are legitimately absent:
+    CONTRACT (the prose statement of hone_common's run-shape table, which
+    SKILL.md's run shapes defer to): a handoff is required exactly when the
+    step that produces it is active in the derived run shape AND actually
+    ran. Requiring inputs unconditionally forces the executor of a shape
+    that legitimately skips producers (fix-only skips all of Phase 1,
+    no-improvement skips Phases 2-3) to fabricate handoff blocks; requiring
+    only present keys lets a corrupt state file (no artifact_context, hence
+    no original_backup_path for Phase 3 auto-revert) sail through as a
+    vacuous ALL PASS. The table threads between the two, and it applies to
+    "done" consumers as much as "skipped" ones — a fix-only run's done
+    phase2_improve must not demand the eval_results that shape never
+    produces.
 
-      - `--fix-only` marks every Phase 1 step "skipped", so
-        artifact_context / routing_decision / eval_results are never
-        produced;
-      - a no-improvement run skips phase3_reevaluate after Phase 2 was
-        skipped, so applied_edits is never produced (validate_gates even
-        has a dedicated `--mode no-improvement` for this shape).
-
-    Requiring such inputs unconditionally forces the executor to fabricate
-    handoff blocks; requiring only present keys lets a corrupt state file
-    (no artifact_context, hence no original_backup_path for Phase 3
-    auto-revert) sail through as a vacuous ALL PASS. The producer check
-    threads between the two. For handoffs produced by a tracked step
-    (HANDOFF_PRODUCERS), the producer must be "done". For the untracked
+    For handoffs produced by a tracked step (HANDOFF_PRODUCERS), the
+    producer must be active in the shape and "done". The untracked
     producers (artifact_context, routing_decision, from Phase 1's Discover
-    and routing steps), the fix-only marker is phase1_evaluate == "skipped"
-    — the SKILL.md fix-only entry protocol marks all Phase 1 steps skipped
-    in one write, and no other documented shape skips phase1_evaluate.
+    and routing steps) run whenever Phase 1 runs at all, so they are
+    expected exactly when the shape activates Phase 1.
     """
+    active = RUN_SHAPE_ACTIVE_STEPS[derive_run_shape(steps)]
     producer = HANDOFF_PRODUCERS.get(handoff_name)
     if producer is not None:
-        return null_safe_get(steps, producer) == "done"
-    return null_safe_get(steps, "phase1_evaluate") != "skipped"
+        return producer in active and null_safe_get(steps, producer) == "done"
+    return "phase1_evaluate" in active
 
 
 # ---------------------------------------------------------------------------
@@ -670,12 +673,19 @@ def validate_value(
                     f"expected number, got {type(value).__name__}",
                 )
             )
-        elif value != value:
-            # NaN (json.loads parses the nonstandard NaN literal by default).
-            # Every comparison on NaN is False, so the min/max bounds below
-            # cannot reject it and downstream range/regression checks would
-            # silently bless it.
-            errors.append(ValidationError(path, "NaN is not a valid number"))
+        elif isinstance(value, float) and not math.isfinite(value):
+            # json.loads parses the nonstandard NaN/Infinity/-Infinity
+            # literals by default. Comparisons cannot reject NaN, and the
+            # min-only bounds below cannot reject +Infinity (inf >= 0), so
+            # downstream range/regression checks would silently bless
+            # either. Guarded to floats: ints are always finite, and
+            # math.isfinite raises OverflowError on ints too large for
+            # float.
+            errors.append(
+                ValidationError(
+                    path, "NaN and Infinity are not valid numbers"
+                )
+            )
         else:
             if "min_value" in spec and value < spec["min_value"]:
                 errors.append(
@@ -881,13 +891,11 @@ def validate_step(
     if step_status == "skipped":
         # Skipped steps don't need output validation. Required inputs are
         # validated when present, and their absence is an error only when
-        # the producing step actually ran — see _skipped_step_input_expected
-        # for the contract and the SKILL.md run shapes (fix-only,
+        # the run shape expects them — see _input_expected for the contract
+        # and hone_common's run-shape table for the shapes (fix-only,
         # no-improvement) that legitimately leave inputs absent.
         for handoff_name in contract["requires"]:
-            if handoff_name in state or _skipped_step_input_expected(
-                steps, handoff_name
-            ):
+            if handoff_name in state or _input_expected(steps, handoff_name):
                 results.append(validate_handoff(state, handoff_name))
         if not results:
             # Step has no required inputs (or none expected in this run
@@ -915,22 +923,41 @@ def validate_step(
         )
         return results
 
-    # Validate required inputs
+    # Validate required inputs. Same run-shape gate as the skipped branch:
+    # a done step's input is demanded only when this run shape produced it
+    # (a fix-only run's done phase2_improve has no eval_results to demand),
+    # but anything present is validated regardless.
     for handoff_name in contract["requires"]:
-        results.append(validate_handoff(state, handoff_name))
+        if handoff_name in state or _input_expected(steps, handoff_name):
+            results.append(validate_handoff(state, handoff_name))
 
-    # Validate produced outputs
+    # Validate produced outputs: a done step must have produced them, in
+    # every run shape (it ran).
     for handoff_name in contract["produces"]:
         results.append(validate_handoff(state, handoff_name))
+
+    if not results:
+        # No inputs expected in this run shape and no declared outputs;
+        # record an explicit pass so the report is never empty.
+        results.append(ValidationResult(handoff=step_name, valid=True))
 
     return results
 
 
 def validate_all(state: dict) -> list[ValidationResult]:
-    """Validate every handoff present in the state file."""
+    """Validate every handoff that is present or expected by the run shape.
+
+    Consults the same run-shape table as --step (via _input_expected): a
+    handoff whose producing step is active in the derived shape and marked
+    "done" is validated even when absent, so a truncated state file cannot
+    vacuously ALL PASS; a handoff the shape never produces (all of Phase 1
+    on a fix-only run) is validated only when present. A fix-only run at
+    Phase 2 entry therefore legitimately yields zero results.
+    """
+    steps = null_safe_get(state, "steps", {}, expected=dict)
     results: list[ValidationResult] = []
     for handoff_name in HANDOFF_SCHEMAS:
-        if handoff_name in state:
+        if handoff_name in state or _input_expected(steps, handoff_name):
             results.append(validate_handoff(state, handoff_name))
     return results
 
@@ -1061,21 +1088,54 @@ def main() -> int:
         print("Error: state file root must be a JSON object", file=sys.stderr)
         return 2
 
+    # Unknown --handoff/--step names are usage errors (exit 2), per the
+    # docstring contract: SKILL.md and the phase references treat exit 1 as
+    # "fix the state file, re-validate", which misdirects an exit-code
+    # consumer when the failure is a one-character typo in the name.
     if args.handoff:
+        if args.handoff not in HANDOFF_SCHEMAS:
+            print(
+                f"Error: unknown handoff name: {args.handoff!r}. "
+                f"Valid names: {', '.join(sorted(HANDOFF_SCHEMAS))}",
+                file=sys.stderr,
+            )
+            return 2
         results = [validate_handoff(state, args.handoff)]
     elif args.step:
+        if args.step not in STEP_CONTRACTS:
+            print(
+                f"Error: unknown step name: {args.step!r}. "
+                f"Valid steps: {', '.join(sorted(STEP_CONTRACTS))}",
+                file=sys.stderr,
+            )
+            return 2
         results = validate_step(state, args.step)
     elif args.all:
         results = validate_all(state)
         if not results:
-            # An empty/truncated/corrupt state file has no known handoffs;
-            # `all()` over an empty list would report a vacuous ALL PASS.
-            print(
-                "Error: no known handoffs found in state file; "
-                "nothing to validate",
-                file=sys.stderr,
-            )
-            return 2
+            steps = null_safe_get(state, "steps", {}, expected=dict)
+            if derive_run_shape(steps) == "fix-only":
+                # Documented fix-only entry shape (SKILL.md marks all
+                # Phase 1 steps skipped; zero handoff blocks exist yet).
+                # Nothing is expected, so nothing to validate is a pass,
+                # not a corrupt file.
+                results = [
+                    ValidationResult(
+                        handoff="(fix-only: no handoffs expected yet)",
+                        valid=True,
+                    )
+                ]
+            else:
+                # Defensive: outside the fix-only shape, validate_all
+                # always expects at least artifact_context, so an empty
+                # result set means the expectations machinery is broken —
+                # never report a vacuous ALL PASS.
+                print(
+                    "Error: no known handoffs found in state file; "
+                    "nothing to validate",
+                    file=sys.stderr,
+                )
+                return 2
     else:
         parser.print_help()
         return 2

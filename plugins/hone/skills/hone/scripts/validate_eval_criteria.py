@@ -38,9 +38,15 @@ import re
 import sys
 from pathlib import Path
 
-# Shared filesystem-mutation regexes (also used by side_effect_guard.py for
-# sandboxing); pattern edits belong in hone_common, not here.
-from hone_common import FS_MUTATING_BASH_PATTERNS, get
+# Shared filesystem-mutation regexes, sandbox header, and slash-invocation
+# detector (also used by side_effect_guard.py for sandboxing); edits to any
+# of them belong in hone_common, not here.
+from hone_common import (
+    FS_MUTATING_BASH_PATTERNS,
+    SANDBOX_HEADER,
+    find_slash_invocations,
+    get,
+)
 
 # Canonical pipeline-command list shared with side_effect_guard.py; add names there.
 from pipeline_skills import PIPELINE_COMMANDS
@@ -294,6 +300,13 @@ def check_runner_context_hygiene(tc: dict) -> list[dict]:
          that describe what a command would output instead.
       3. When runner_context is non-empty, it must declare SIMULATION MODE
          so the executor knows not to issue real tool calls.
+
+    The side_effect_guard sandbox block (everything from SANDBOX_HEADER on)
+    is exempt from rules 1-2: the guard's own simulation listing quotes the
+    commands it sandboxes ("cp → simulate: ..."), and criteria reuse runs
+    this audit on the on-disk file a previous run's guard already modified.
+    Flagging the guard's output would tell the executor to rewrite the very
+    block that keeps the eval side-effect-free.
     """
     findings: list[dict] = []
     tc_id = _get_id(tc)
@@ -301,8 +314,9 @@ def check_runner_context_hygiene(tc: dict) -> list[dict]:
     if not rc:
         return findings
 
+    own_context = rc.split(SANDBOX_HEADER, 1)[0]
     for pattern, label in _FS_MUTATING_PATTERNS:
-        if pattern.search(rc):
+        if pattern.search(own_context):
             findings.append(
                 {
                     "test_id": tc_id,
@@ -352,9 +366,13 @@ def check_allowed_tools_audit(tc: dict) -> dict | None:
             },
         }
 
-    # Check if prompt invokes a skill but Skill not in allowed_tools
-    # Match /word at start of string or after whitespace, not in file paths
-    if re.search(r"(?:^|\s)/[a-zA-Z][\w-]*(?:\s|$)", prompt) and "Skill" not in tools:
+    # Check if prompt invokes a skill but Skill not in allowed_tools.
+    # find_slash_invocations is the shared hardened detector (hone_common),
+    # the same one side_effect_guard uses for sandboxing: the previous local
+    # regex required whitespace/EOL after the command, so "Run /forge.",
+    # "Invoke /hone, then report", and backticked `/forge` all silently
+    # skipped the missing_skill_tool repair while still being sandboxed.
+    if find_slash_invocations(prompt) and "Skill" not in tools:
         return {
             "test_id": tc_id,
             "issue": "missing_skill_tool",

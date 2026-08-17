@@ -23,6 +23,12 @@ from hone_common import (
     BASH_SIDE_EFFECT_PATTERNS,
     CRITERIA_BUG_THRESHOLD,
     FS_MUTATING_BASH_PATTERNS,
+    PHASE1_STEPS,
+    PHASE23_STEPS,
+    RUN_SHAPE_ACTIVE_STEPS,
+    derive_gate_mode,
+    derive_run_shape,
+    find_slash_invocations,
     frontmatter_field,
     get,
     load_deterministic_scores,
@@ -192,6 +198,130 @@ class TestDeterministicLoaders(unittest.TestCase):
         results_path = self._write({"per_test": None})
         self.assertEqual(load_deterministic_scores(results_path), {})
         self.assertEqual(load_inconclusive_ids(results_path), set())
+
+
+class TestNonStringTestId(unittest.TestCase):
+    """A non-string test_id must degrade, not raise TypeError.
+
+    dict.get hashes its key even on an empty dict, and set.add hashes its
+    member, so an unhashable test_id (list, dict) crashed resolve_score and
+    both loaders with a raw traceback and no JSON on stdout — starving the
+    Phase 2 triage gate.
+    """
+
+    def test_resolve_score_tolerates_unhashable_test_id(self):
+        result = {"test_id": ["a"], "score": 0.7}
+        self.assertEqual(resolve_score(result, {}), 0.7)
+        # With no usable score anywhere, the default applies.
+        self.assertEqual(resolve_score({"test_id": {"x": 1}}, {}), 0.0)
+
+    def test_loaders_drop_non_string_test_id_entries(self):
+        tmpdir = tempfile.mkdtemp()
+        results_path = os.path.join(tmpdir, "results.json")
+        with open(results_path, "w") as f:
+            json.dump({"results": []}, f)
+        with open(os.path.join(tmpdir, "deterministic_scores.json"), "w") as f:
+            json.dump(
+                {
+                    "per_test": [
+                        {"test_id": ["a"], "composite": 0.8},
+                        {"test_id": {"x": 1}, "composite": None},
+                        {"test_id": "T1", "composite": 0.6},
+                    ]
+                },
+                f,
+            )
+        self.assertEqual(load_deterministic_scores(results_path), {"T1": 0.6})
+        self.assertEqual(load_inconclusive_ids(results_path), set())
+
+
+class TestSlashInvocationDetection(unittest.TestCase):
+    """The shared delegation detector (sandboxer and auditor must agree)."""
+
+    def test_trailing_punctuation_and_backticks_match(self):
+        # The auditor's old local regex required whitespace/EOL after the
+        # command, so these shapes were sandboxed but never drew the
+        # missing_skill_tool repair.
+        self.assertEqual(find_slash_invocations("Run /forge."), ["forge"])
+        self.assertEqual(
+            find_slash_invocations("Invoke /hone, then report"), ["hone"]
+        )
+        self.assertEqual(find_slash_invocations("Use `/forge` now"), ["forge"])
+
+    def test_paths_and_stoplist_heads_do_not_match(self):
+        self.assertEqual(
+            find_slash_invocations("see /tmp/x, factor/face, src/spbench"),
+            [],
+        )
+        self.assertEqual(find_slash_invocations("a bare /tmp mention"), [])
+
+    def test_dedup_preserves_first_appearance_order(self):
+        self.assertEqual(
+            find_slash_invocations("/forge then /hone then /forge again"),
+            ["forge", "hone"],
+        )
+
+
+class TestRunShapes(unittest.TestCase):
+    """derive_run_shape / derive_gate_mode / the active-steps table."""
+
+    def test_shape_derivation(self):
+        self.assertEqual(
+            derive_run_shape({"phase1_evaluate": "skipped"}), "fix-only"
+        )
+        self.assertEqual(
+            derive_run_shape(
+                {"phase1_evaluate": "done", "phase2_improve": "skipped"}
+            ),
+            "no-improvement",
+        )
+        self.assertEqual(
+            derive_run_shape(
+                {"phase1_evaluate": "done", "phase2_improve": "done"}
+            ),
+            "normal",
+        )
+        # Tier-based skips of other Phase 1 steps do not change the shape.
+        self.assertEqual(
+            derive_run_shape(
+                {
+                    "phase1_structural_audit": "skipped",
+                    "phase1_evaluate": "done",
+                }
+            ),
+            "normal",
+        )
+        # Absent/unusable steps derive the strictest shape.
+        self.assertEqual(derive_run_shape(None), "normal")
+        self.assertEqual(derive_run_shape({}), "normal")
+
+    def test_gate_mode_derivation(self):
+        done = {step: "done" for step in PHASE1_STEPS + PHASE23_STEPS}
+        self.assertEqual(derive_gate_mode(done), "normal")
+        self.assertEqual(
+            derive_gate_mode(dict(done, phase2_improve="in_progress")),
+            "error-halt",
+        )
+        fixonly = {
+            **{step: "skipped" for step in PHASE1_STEPS},
+            **{step: "done" for step in PHASE23_STEPS},
+        }
+        self.assertEqual(derive_gate_mode(fixonly), "fix-only")
+        # Underivable: the caller falls back to --mode / "normal".
+        self.assertIsNone(derive_gate_mode({}))
+        self.assertIsNone(derive_gate_mode(None))
+
+    def test_lax_shapes_partition_the_normal_shape(self):
+        self.assertEqual(
+            RUN_SHAPE_ACTIVE_STEPS["fix-only"]
+            | RUN_SHAPE_ACTIVE_STEPS["no-improvement"],
+            RUN_SHAPE_ACTIVE_STEPS["normal"],
+        )
+        self.assertEqual(
+            RUN_SHAPE_ACTIVE_STEPS["fix-only"]
+            & RUN_SHAPE_ACTIVE_STEPS["no-improvement"],
+            frozenset(),
+        )
 
 
 class TestThresholdConsistency(unittest.TestCase):

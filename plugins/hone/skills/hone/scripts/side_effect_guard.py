@@ -23,11 +23,15 @@ import re
 import sys
 from pathlib import Path
 
-# Shared pattern set + frontmatter helpers; the bash patterns are also
-# consumed by validate_eval_criteria.py's runner_context hygiene check, so
-# pattern edits belong in hone_common, not here.
+# Shared pattern set + frontmatter helpers; the bash patterns, the
+# delegation regex, and the sandbox header are also consumed by
+# validate_eval_criteria.py's hygiene and allowed-tools checks, so edits to
+# any of them belong in hone_common, not here.
 from hone_common import (
     BASH_SIDE_EFFECT_PATTERNS,
+    DELEGATION_RE,
+    DELEGATION_STOPLIST,
+    SANDBOX_HEADER,
     frontmatter_field,
     split_frontmatter,
 )
@@ -66,8 +70,9 @@ MCP_TOOL_BLOCKLIST = [
     "send_message_as_user",
 ]
 
-# Runner context block prepended to each test case when side effects are detected.
-SANDBOX_HEADER = "SAFETY SANDBOX — side-effect simulation mode"
+# The sandbox block appended to each test case's runner_context opens with
+# hone_common.SANDBOX_HEADER (shared so validate_eval_criteria.py can exempt
+# the block from its hygiene scan).
 
 # Harness tools exempt from the allowed-tools intersection: Skill invokes the
 # artifact under test, AskUserQuestion is added for error-handling tests, and
@@ -82,14 +87,10 @@ SAFE_FALLBACK_TOOLS = ("Read", "Grep", "Glob")
 # Fail-closed delegation detection: any /slash-command in the artifact that is
 # not a known side-effecting skill is still treated as side-effecting, because
 # an unlisted user pipeline (/deploy, /release) escaping the sandbox can run a
-# real `git push` during an unattended eval. The pattern matches a
-# delegation-shaped token (line start / whitespace / backtick / bracket before
-# the slash, no second slash after the name) so file paths like /tmp/x or
-# factor/face never fire; the stoplist below drops bare path heads.
-DELEGATION_RE = re.compile(r"(?:^|[\s`(\[])/([a-z][a-z0-9-]{2,})\b(?!/)", re.MULTILINE)
-DELEGATION_STOPLIST = frozenset(
-    {"tmp", "usr", "bin", "etc", "var", "opt", "dev", "home", "private", "users"}
-)
+# real `git push` during an unattended eval. DELEGATION_RE and
+# DELEGATION_STOPLIST live in hone_common (imported above), shared with
+# validate_eval_criteria.py so the sandboxer and the auditor agree on what
+# counts as a slash invocation.
 
 
 def _base_tool_name(tool: str) -> str:

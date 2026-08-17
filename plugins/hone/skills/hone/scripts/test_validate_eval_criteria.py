@@ -475,6 +475,38 @@ class TestRunnerContextHygiene(unittest.TestCase):
         self.assertNotIn("runner_context_side_effect", issues)
         self.assertNotIn("runner_context_missing_simulation_header", issues)
 
+    def test_side_effect_guard_sandbox_block_is_exempt(self):
+        # Criteria reuse runs this audit on the on-disk file a previous
+        # run's guard already modified; the guard's own simulation listing
+        # ("cp → simulate: ...") must not be flagged as a real mutation.
+        from side_effect_guard import build_sandbox_context
+
+        sandbox = build_sandbox_context(["cp", "mkdir", "echo > file"], [])
+        tc = _make_tc(
+            runner_context=(
+                "SIMULATION MODE: do not issue real tool calls." + sandbox
+            ),
+        )
+        _, payload = self._audit({"test_cases": [tc]})
+        issues = [f["issue"] for f in payload["findings"]]
+        self.assertNotIn("runner_context_side_effect", issues)
+
+    def test_real_mutation_before_sandbox_block_still_flagged(self):
+        # The carve-out covers only the guard's block; the test's own
+        # context is still held to the hygiene rules.
+        from side_effect_guard import build_sandbox_context
+
+        sandbox = build_sandbox_context(["cp"], [])
+        tc = _make_tc(
+            runner_context=(
+                "SIMULATION MODE: do not issue real tool calls.\n"
+                "mkdir -p /tmp/fixture\n" + sandbox
+            ),
+        )
+        _, payload = self._audit({"test_cases": [tc]})
+        issues = [f["issue"] for f in payload["findings"]]
+        self.assertIn("runner_context_side_effect", issues)
+
     def test_clean_simulation_runner_context_passes(self):
         tc = _make_tc(
             runner_context=(

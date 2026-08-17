@@ -7,7 +7,7 @@ python3 <skill-dir>/scripts/validate_handoff.py \
   /tmp/workflow-${RUN_ID}.json --all --json
 ```
 
-This validates every handoff written during Phase 1 (`artifact_context`, `eval_results`, and optionally `structural_audit`, `reference_validation`). If any fail: fix the state file, re-validate, do not proceed. `structural_audit` and `reference_validation` may be absent (if steps were skipped per scope_intent tier), which is fine since `--all` only checks handoffs that are present.
+This validates every handoff written during Phase 1 (`artifact_context`, `eval_results`, and optionally `structural_audit`, `reference_validation`). If any fail: fix the state file, re-validate, do not proceed. `--all` consults the run-shape table in `scripts/hone_common.py`: it checks every handoff that is present, plus any whose producing step the derived run shape activates and marks `done` — so a handoff a skipped step never produced (per scope_intent tier, or all of Phase 1 on a `--fix-only` run) is not demanded, and a `--fix-only` run at Phase 2 entry passes with zero handoff blocks.
 
 ### Step 1: Read and analyze results
 
