@@ -291,6 +291,8 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     # "inconclusive" (score null) / "score_error". The schema must be able to
     # represent that output, or an all-inconclusive run has no legal encoding
     # and the mandatory pre-Phase-2 gate hard-stops with nothing to fix.
+    # Documented in references/phase1-evaluation.md ("Handoff interface
+    # (Phase 1 -> Phase 2)"); keep the enums there in sync with these.
     "eval_results": {
         "fields": {
             "output_dir": _str(required=False),
@@ -320,6 +322,13 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
         },
     },
     # P2 Step 1 -> Step 1.7
+    # Inconclusive tests (analyze_results --triage: classification
+    # "inconclusive", score null) route to excluded[] with reason
+    # "inconclusive" — never actionable_failures. Same widening as
+    # eval_results above: without the slot an inconclusive run has no legal
+    # encoding and the pre-Phase-2 gate hard-stops. Documented in
+    # references/phase2-improvement.md ("Handoff interface (P2 Step 1 ->
+    # Step 2)"); update both together.
     "triaged_results": {
         "fields": {
             "actionable_failures": _arr(
@@ -342,6 +351,7 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
                                 "criteria_bug",
                                 "variance",
                                 "criteria_repaired",
+                                "inconclusive",
                             ]
                         ),
                     },

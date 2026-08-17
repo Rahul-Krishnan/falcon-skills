@@ -33,7 +33,7 @@ from pathlib import Path
 
 # Shared filesystem-mutation regexes (also used by side_effect_guard.py for
 # sandboxing); pattern edits belong in hone_common, not here.
-from hone_common import FS_MUTATING_BASH_PATTERNS
+from hone_common import FS_MUTATING_BASH_PATTERNS, get
 
 # Canonical pipeline-command list shared with side_effect_guard.py; add names there.
 from pipeline_skills import PIPELINE_COMMANDS
@@ -98,40 +98,47 @@ DEFAULT_SKILL_TOOLS = [
 ]
 
 
+# These helpers go through hone_common.get, which treats an explicit JSON
+# null the same as an absent key. Audit mode runs on schema-invalid files by
+# design, so any of these fields can arrive as null; a raw tc.get(k, default)
+# returns None in that case and crashes the audit (e.g. None.strip()) before
+# any findings reach stdout.
+
+
 def _get_required_present(tc: dict) -> list:
     """Get required_present from test case."""
-    return tc.get("required_present", [])
+    return get(tc, "required_present", [])
 
 
 def _get_required_absent(tc: dict) -> list:
     """Get required_absent from test case."""
-    return tc.get("required_absent", [])
+    return get(tc, "required_absent", [])
 
 
 def _get_checks(tc: dict) -> list:
     """Get checks from test case."""
-    return tc.get("checks", [])
+    return get(tc, "checks", [])
 
 
 def _get_runner_context(tc: dict) -> str:
     """Get runner_context from test case."""
-    return tc.get("runner_context", "").strip()
+    return get(tc, "runner_context", "").strip()
 
 
 def _get_allowed_tools(tc: dict) -> list:
     """Get allowed_tools from test case."""
-    return tc.get("allowed_tools", []) or []
+    return get(tc, "allowed_tools", [])
 
 
 def _get_target_skills(tc: dict) -> list:
     """Get target_skills from test case."""
-    return tc.get("target_skills", [])
+    return get(tc, "target_skills", [])
 
 
 def check_unsimulatable_pipeline(tc: dict) -> str | None:
     """Check if a test case invokes a pipeline command and expects full execution."""
-    tc_id = tc.get("id", "unknown")
-    prompt = tc.get("prompt", "")
+    tc_id = get(tc, "id", "unknown")
+    prompt = get(tc, "prompt", "")
 
     invoked_command = None
     for cmd in PIPELINE_COMMANDS:
@@ -165,7 +172,7 @@ def check_unsimulatable_pipeline(tc: dict) -> str | None:
 
 def check_tool_call_string_matching(tc: dict) -> list[str]:
     """Check if required_present contains tool-call artifacts."""
-    tc_id = tc.get("id", "unknown")
+    tc_id = get(tc, "id", "unknown")
     results = []
 
     for val in _get_required_present(tc):
@@ -210,7 +217,7 @@ def is_brittle_present(value: str) -> tuple[bool, str]:
 
 def check_runner_context_present(tc: dict) -> dict | None:
     """Flag test cases missing runner_context."""
-    tc_id = tc.get("id", "unknown")
+    tc_id = get(tc, "id", "unknown")
     if not _get_runner_context(tc):
         return {
             "test_id": tc_id,
@@ -251,7 +258,7 @@ def check_runner_context_hygiene(tc: dict) -> list[dict]:
          so the executor knows not to issue real tool calls.
     """
     findings: list[dict] = []
-    tc_id = tc.get("id", "unknown")
+    tc_id = get(tc, "id", "unknown")
     rc = _get_runner_context(tc)
     if not rc:
         return findings
@@ -291,9 +298,9 @@ def check_runner_context_hygiene(tc: dict) -> list[dict]:
 
 def check_allowed_tools_audit(tc: dict) -> dict | None:
     """Flag test cases with missing or incomplete allowed_tools."""
-    tc_id = tc.get("id", "unknown")
+    tc_id = get(tc, "id", "unknown")
     tools = _get_allowed_tools(tc)
-    prompt = tc.get("prompt", "")
+    prompt = get(tc, "prompt", "")
 
     if not tools:
         return {
@@ -326,7 +333,7 @@ def check_allowed_tools_audit(tc: dict) -> dict | None:
 
 def check_target_skills_audit(tc: dict, artifact_path: str | None) -> dict | None:
     """Flag test cases missing target_skills."""
-    tc_id = tc.get("id", "unknown")
+    tc_id = get(tc, "id", "unknown")
     targets = _get_target_skills(tc)
 
     if not targets and artifact_path:
@@ -346,7 +353,7 @@ def check_target_skills_audit(tc: dict, artifact_path: str | None) -> dict | Non
 
 def check_semantic_check_quality(tc: dict) -> list[dict]:
     """Heuristically detect keyword-only semantic checks."""
-    tc_id = tc.get("id", "unknown")
+    tc_id = get(tc, "id", "unknown")
     findings = []
     checks = _get_checks(tc)
 
@@ -434,7 +441,7 @@ def validate(path: str, output_stream=None) -> int:
     errors = []
 
     for tc in test_cases:
-        tc_id = tc.get("id", "unknown")
+        tc_id = get(tc, "id", "unknown")
 
         required_present = _get_required_present(tc)
         required_absent = _get_required_absent(tc)
@@ -456,7 +463,7 @@ def validate(path: str, output_stream=None) -> int:
                 f"  {tc_id}: no checks defined (only programmatic checks)"
             )
 
-        if not tc.get("prompt", "").strip():
+        if not get(tc, "prompt", "").strip():
             errors.append(f"  {tc_id}: empty prompt")
 
         pipeline_warning = check_unsimulatable_pipeline(tc)

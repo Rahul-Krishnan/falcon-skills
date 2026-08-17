@@ -318,7 +318,7 @@ def main() -> None:
                 modified_ids.append(result["test_id"])
 
         if result["skipped"]:
-            if result["test_id"] not in modified_ids:
+            if result["test_id"] not in skipped_ids:
                 skipped_ids.append(result["test_id"])
             continue
 

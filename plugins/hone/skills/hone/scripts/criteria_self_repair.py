@@ -68,7 +68,12 @@ def _check_recursive_timeout(test_result: dict) -> bool:
     duration = get(test_result, "duration_seconds", 0)
     score = get(test_result, "score", 1.0)
 
-    if score > 0.0:
+    # Gate on the failing threshold, not exactly 0.0: on deterministic-only
+    # rounds match_patterns normalizes result["score"] to the deterministic
+    # composite, and score_execution clamps every dimension to a small floor
+    # before the weighted sum, so a floored total failure scores ~0.05 and a
+    # `score > 0.0` bail made this pattern unreachable on those rounds.
+    if score >= CRITERIA_BUG_THRESHOLD:
         return False
 
     # Look for recursive eval patterns in tool calls + timeout
@@ -131,7 +136,9 @@ def _check_empty_response(test_result: dict) -> bool:
     details = get(test_result, "details", {})
     timeout_analysis = get(details, "timeout_analysis", "")
 
-    if score > 0.0:
+    # Same threshold gate as _check_recursive_timeout: deterministic floors
+    # keep composites above exactly 0.0, so match at the failing bar instead.
+    if score >= CRITERIA_BUG_THRESHOLD:
         return False
 
     # Empty response without timeout (timeout is handled by recursive_timeout)

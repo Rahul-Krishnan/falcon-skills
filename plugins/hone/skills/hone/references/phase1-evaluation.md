@@ -603,6 +603,8 @@ spec_artifacts: {
 }
 ```
 
+After writing the handoff, set `steps.phase1_spec_artifacts` to `"done"` in the workflow state file (`"skipped"` if this step was skipped) — the key is seeded as `"pending"` by the SKILL.md state template and the Mechanical Exit Gate checks it.
+
 ### Step 11: Reference Validation (skills and commands only)
 
 **Skip this step for hooks and scripts** (they are self-contained executables without cross-references to other artifacts).
@@ -739,12 +741,12 @@ state["gates"].append({"step": "phase1_to_phase2", "judge": "self-check", "resul
 eval_results: {
   output_dir: string,                // path to results.json
   results_path: string,              // full path to results.json file
-  composite_score: number,           // 0.0-1.0
-  grade: "A" | "B" | "C" | "D" | "F",
+  composite_score: number | null,    // 0.0-1.0; null when grade is "INCONCLUSIVE"
+  grade: "A" | "B" | "C" | "D" | "F" | "INCONCLUSIVE",
   per_test: [{
     test_id: string,
-    score: number,
-    status: "pass" | "fail" | "error",
+    score: number | null,            // null when status is "inconclusive"
+    status: "pass" | "fail" | "error" | "inconclusive" | "score_error",
     failure_type?: "criteria_bug" | "variance" | "real_issue",
     dimension_scores: {[dimension: string]: number}
   }],
@@ -752,5 +754,7 @@ eval_results: {
 }
 ```
 Write this to workflow state file before entering Phase 2. Phase 2 reads from the file, not from memory.
+
+`score_execution.py` emits `grade: "INCONCLUSIVE"` with `composite_score: null` when no test is conclusive, per-test `status: "inconclusive"` (score null) for tests without execution evidence, and `status: "score_error"` when scoring itself failed. Transcribe these values verbatim — never coerce `INCONCLUSIVE` to `F`, which fabricates a failing grade that then drives Phase 2 targeting and the Phase 3 auto-revert check. These enums mirror the `eval_results` schema in `scripts/validate_handoff.py`, which is authoritative; update both together.
 
 Additionally, if Step 2 (Structural Audit) produced findings, include the `structural_audit` object from the workflow state. If Step 11 (Reference Validation) produced broken references, include the `reference_validation` object. Only findings with `effective_priority: "HIGH"` drive Phase 2 improvements; LOW findings are reported but not acted on. Broken references from Step 11 are always HIGH priority (a skill referencing nonexistent files is functionally broken).

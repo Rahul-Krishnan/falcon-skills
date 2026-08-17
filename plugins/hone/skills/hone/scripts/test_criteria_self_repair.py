@@ -113,16 +113,33 @@ class TestRecursiveTimeoutPattern(unittest.TestCase):
         self.assertEqual(len(out["matched"]), 1)
         self.assertEqual(out["matched"][0]["pattern"], "recursive_timeout")
 
-    def test_no_match_when_score_positive(self):
-        """Score > 0 should not match even with timeout signals."""
+    def test_no_match_when_score_at_or_above_failing_threshold(self):
+        """Score >= CRITERIA_BUG_THRESHOLD should not match even with timeout signals."""
         data = self._make_result(
             "TC-013",
-            score=0.3,
+            score=0.6,
             duration=1200,
             timeout_analysis="run_eval triggered. Duration: 1200s",
         )
         out = run_script(data)
         self.assertEqual(len(out["matched"]), 0)
+
+    def test_matches_floored_deterministic_score(self):
+        """A dimension-floored composite (~0.05) is a total failure and must match.
+
+        score_execution clamps every dimension to a small floor before the
+        weighted sum, so deterministic-only rounds never produce exactly 0.0;
+        an exact-zero gate made this pattern unreachable on those rounds.
+        """
+        data = self._make_result(
+            "TC-013b",
+            score=0.05,
+            duration=1200,
+            timeout_analysis="launching eval. Duration: 1200s",
+        )
+        out = run_script(data)
+        self.assertEqual(len(out["matched"]), 1)
+        self.assertEqual(out["matched"][0]["pattern"], "recursive_timeout")
 
     def test_no_match_without_recursive_keyword(self):
         """Timeout without recursive keyword should not match recursive_timeout."""
@@ -225,10 +242,17 @@ class TestEmptyResponsePattern(unittest.TestCase):
         self.assertEqual(len(out["matched"]), 1)
         self.assertEqual(out["matched"][0]["pattern"], "empty_response")
 
-    def test_no_match_when_score_positive(self):
-        data = self._make_result("TC-023", score=0.1, response="")
+    def test_no_match_when_score_at_or_above_failing_threshold(self):
+        data = self._make_result("TC-023", score=0.6, response="")
         out = run_script(data)
         self.assertEqual(len(out["matched"]), 0)
+
+    def test_matches_floored_deterministic_score(self):
+        """Floored composite (~0.05) with an empty response must still match."""
+        data = self._make_result("TC-023b", score=0.05, response="")
+        out = run_script(data)
+        self.assertEqual(len(out["matched"]), 1)
+        self.assertEqual(out["matched"][0]["pattern"], "empty_response")
 
     def test_no_match_when_response_has_content(self):
         data = self._make_result(

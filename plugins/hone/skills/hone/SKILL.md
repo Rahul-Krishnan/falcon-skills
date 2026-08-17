@@ -188,9 +188,9 @@ If that returns nothing, no run is in progress and you are starting fresh.
 
 Write state to `/tmp/workflow-${RUN_ID}.json` at start:
 ```json
-{"workflow": "hone", "steps": {"phase1_structural_audit": "pending", "phase1_criteria_audit": "pending", "phase1_evaluate": "pending", "phase1_reference_validation": "pending", "phase2_fresh_eyes": "pending", "phase2_improve": "pending", "phase3_reevaluate": "pending"}, "iteration": {"current": 0, "target": <max_rounds>}}
+{"workflow": "hone", "steps": {"phase1_structural_audit": "pending", "phase1_criteria_audit": "pending", "phase1_evaluate": "pending", "phase1_spec_artifacts": "pending", "phase1_reference_validation": "pending", "phase2_fresh_eyes": "pending", "phase2_trigger_test": "pending", "phase2_improve": "pending", "phase3_reevaluate": "pending"}, "iteration": {"current": 0, "target": <max_rounds>}}
 ```
-Update each step to `"in_progress"` then `"done"` as you go. **After every Write or Edit to any file (state file, artifact, or eval criteria), immediately Read it back to verify the write persisted.** Before any exit, re-read the file: if steps remain non-done or iterations remain, keep going.
+Every key in this template maps to a step contract in `scripts/validate_handoff.py` `STEP_CONTRACTS` (including `phase1_spec_artifacts`, Phase 1 Step 10, and `phase2_trigger_test`, Phase 2 Step 7); seed all of them — the Mechanical Exit Gate iterates only keys present in `steps`, so an unseeded step can silently never run. Update each step to `"in_progress"` then `"done"` as you go. **After every Write or Edit to any file (state file, artifact, or eval criteria), immediately Read it back to verify the write persisted.** Before any exit, re-read the file: if steps remain non-done or iterations remain, keep going.
 
 **Corrupt state file:** If the state file cannot be parsed (corrupt or truncated JSON), emit
 

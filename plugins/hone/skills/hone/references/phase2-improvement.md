@@ -113,10 +113,11 @@ Write to workflow state file. Step 2 reads the updated `triaged_results` which n
 ```
 triaged_results: {
   actionable_failures: [{test_id: string, score: number, failure_type: "real_issue"}],
-  excluded: [{test_id: string, reason: "criteria_bug" | "variance"}],
+  excluded: [{test_id: string, reason: "criteria_bug" | "variance" | "criteria_repaired" | "inconclusive"}],
   structural_findings: string[]   // from structural_audit, carried forward
 }
 ```
+Reason routing: `criteria_repaired` is set by Step 1.5 when a criteria fix was verified; `inconclusive` covers tests that `analyze_results.py --triage` classified as inconclusive (score null, no execution evidence) — they are excluded, never coerced into `actionable_failures`. This enum mirrors the `triaged_results` schema in `scripts/validate_handoff.py`, which is authoritative; update both together.
 
 **Gate: P2 Step 1 → Step 3 (checklist)**
 - [ ] Results file was read and parsed successfully (not empty, valid JSON)
@@ -383,6 +384,8 @@ trigger_test: {
   queries_path: string                   // path to trigger_queries.json
 }
 ```
+
+After writing the handoff, set `steps.phase2_trigger_test` to `"done"` in the workflow state file (`"skipped"` when `--skip-trigger-test` is set) — the key is seeded as `"pending"` by the SKILL.md state template and the Mechanical Exit Gate checks it.
 
 ## Context Compaction Protection (Phase 2)
 

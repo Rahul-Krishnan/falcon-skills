@@ -145,9 +145,15 @@ def scan_artifact(content: str, self_names: frozenset[str] = frozenset()) -> dic
         if re.search(pattern, content, re.IGNORECASE):
             bash_hits.append(label)
 
+    # Substring match, mirroring the guard_criteria removal filter: real MCP
+    # tool names join segments with underscores (mcp__server__tool_name), and
+    # underscores are word characters, so \b-bounded regexes never fire inside
+    # them (\bsend_message\b cannot match ...slack_send_message). Lookaround
+    # boundaries fail the same way on the leading "_".
+    content_lower = content.lower()
     mcp_hits: list[str] = []
     for tool_pattern in MCP_TOOL_BLOCKLIST:
-        if re.search(rf"\b{re.escape(tool_pattern)}\b", content, re.IGNORECASE):
+        if tool_pattern in content_lower:
             mcp_hits.append(tool_pattern)
 
     # Detect invocations of known side-effecting skills/commands
@@ -279,10 +285,14 @@ def guard_criteria(
         # restore. Fall back to the declared frontmatter set (MCP-filtered),
         # else a read-only default.
         if tc.get("allowed_tools") == [] and modified:
+            # Filter against blocked_patterns (scan hits + full blocklist),
+            # exactly like the removal filter above: filtering on scan hits
+            # alone re-adds the very tool the blocklist just removed whenever
+            # the artifact frontmatter declares it.
             fallback = [
                 t
                 for t in (artifact_allowed_tools or [])
-                if not any(blocked in t.lower() for blocked in mcp_tools)
+                if not any(blocked in t.lower() for blocked in blocked_patterns)
             ]
             if not fallback:
                 fallback = list(SAFE_FALLBACK_TOOLS)
