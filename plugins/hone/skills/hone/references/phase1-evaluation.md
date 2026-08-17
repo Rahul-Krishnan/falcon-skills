@@ -458,7 +458,22 @@ Spawn one subagent per test case in the eval criteria (parallel, up to `{workers
 - The `allowed_tools` from the test case
 - Instruction to write its response to `$OUTPUT_DIR/tc-{test_id}.json`
 
-Collect all subagent results. Write a merged `$OUTPUT_DIR/results.json` in the standard format: `{"results": [{test_id, score, agent_response, ...}]}`.
+Collect all subagent results. Write a merged `$OUTPUT_DIR/results.json` in the standard format: `{"results": [{test_id, score, agent_response, execution_timeline, ...}]}`.
+
+**`execution_timeline` is mandatory for deterministic scoring.** `score_execution.py` derives every conclusive skill/command dimension (workflow_sequence, gate_compliance, parallel_efficiency, state_persistence, error_handling, verify_actions, research_first) from this array; a test whose timeline is empty or missing is marked `status: "inconclusive"` with `composite: null`, so omitting it silences the deterministic half of the pipeline. Instruct each subagent to record, in order, one entry per step it takes and include the array in its `tc-{test_id}.json` output:
+
+```
+execution_timeline: [{
+  step_type: "tool_use" | "text" | "condition_fired" | "fallback_text_output" | "fallback_output",
+  tool_name: string,     // tool_use entries: "Read", "Bash", "Write", "Skill", "ToolSearch", ...
+  tool_input: object,    // tool_use entries: the tool's input (file_path, content, command, ...)
+  content: string,       // text entries: the prose emitted; tool_use entries: result text if available
+  is_error: boolean,     // true when the tool call errored
+  step_index: number     // assistant-message index; entries sharing an index ran as one parallel batch
+}]
+```
+
+In SIMULATION MODE test cases no real tool calls occur; the timeline may then be empty and the scorer falls back to `agent_response` pattern checks for the profiles that support it.
 
 ```bash
 EVAL_END_NS=$(date +%s%N)

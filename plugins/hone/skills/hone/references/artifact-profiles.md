@@ -30,7 +30,7 @@ Each artifact type has a profile that configures the shared hone loop.
 | **Discovery** | `~/.claude/hooks/{name}.sh` or hook entry in `~/.claude/settings.json` |
 | **Eval criteria path** | `~/.claude/hooks/{name}-evals/eval_criteria.json` |
 | **Edit target** | The hook script file |
-| **Default dimensions** | trigger_accuracy (0.55, crash-rate proxy — absorbed the former false_positive_rate dimension, which computed the same quantity), performance (0.2), output_quality (0.15), resilience (0.1) |
+| **Default dimensions** | trigger_accuracy (0.55, crash-rate proxy — absorbed the former false_positive_rate dimension, which computed the same quantity), performance (0.2), output_structure (0.15), error_handling (0.1) — mirrors `HOOK_WEIGHTS` in `scripts/score_execution.py`, which is authoritative |
 | **Eval generator** | Generate inline with hook-specific test patterns (test inputs, expected triggers, expected non-triggers) |
 
 **Hook pre-scan (run during Step 1 discovery, before criteria generation):** When discovering a hook, extract the following metadata from the script before generating any test criteria. This prevents incomplete coverage and avoids shell quoting errors caused by mismatched input schemas:
@@ -48,5 +48,5 @@ Record these as `hook_metadata: {event_type, has_throttle, shebang}` in the work
 | **Discovery** | `~/.claude/scripts/{name}` (any extension) |
 | **Eval criteria path** | `~/.claude/scripts/{name}-evals/eval_criteria.json` |
 | **Edit target** | The script file |
-| **Default dimensions** | correctness (0.35), performance (0.25), error_handling (0.2), output_format (0.1), maintainability (0.1) |
+| **Default dimensions** | correctness (0.35), error_handling (0.25), performance (0.15), output_structure (0.15), output_format (0.1) — mirrors `SCRIPT_WEIGHTS` in `scripts/score_execution.py`, which is authoritative |
 | **Eval generator** | Generate inline with input/output test cases |

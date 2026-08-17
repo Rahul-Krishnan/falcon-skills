@@ -131,9 +131,10 @@ def check_unsimulatable_pipeline(tc: dict) -> str | None:
 
     invoked_command = None
     for cmd in PIPELINE_COMMANDS:
-        if re.search(rf"/{cmd}\b", prompt) or re.search(
-            rf"\b{re.escape(cmd)}\b", prompt
-        ):
+        # Slash form only. PIPELINE_COMMANDS includes ordinary English verbs
+        # ("present", "ship"); bare-word matching flagged benign prompts like
+        # "present its audit results" as pipeline invocations.
+        if re.search(rf"/{re.escape(cmd)}\b", prompt):
             invoked_command = cmd
             break
 
@@ -177,6 +178,11 @@ def check_tool_call_string_matching(tc: dict) -> list[str]:
 
 def is_brittle_present(value: str) -> tuple[bool, str]:
     """Check if a required_present value is too brittle."""
+    if value.startswith("#"):
+        # Markdown headers like "## Summary" are fine: they are structural
+        # output the artifact emits verbatim, casing included. This exemption
+        # must precede the uppercase check or it is unreachable.
+        return False, ""
     if value != value.lower() and len(value) > 3:
         return (
             True,
@@ -189,8 +195,6 @@ def is_brittle_present(value: str) -> tuple[bool, str]:
             True,
             f"very long substring ({len(value)} chars) — unlikely to match exactly",
         )
-    if value.startswith("#"):
-        return False, ""  # Markdown headers like "##" are fine
     words = value.split()
     if len(words) >= 3 and any(w[0].isupper() for w in words):
         return True, "looks like a section header (multi-word with capitals)"

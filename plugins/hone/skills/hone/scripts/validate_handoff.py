@@ -100,6 +100,10 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             "artifact_content": _str(non_empty=True),
             "artifact_path": _str(non_empty=True),
             "edit_path": _str(non_empty=True),
+            # Phase 3 auto-revert and the recovery paths restore from this
+            # backup; a state file without it would pass validation and then
+            # have nothing to revert to.
+            "original_backup_path": _str(non_empty=True),
             "artifact_type": _enum(["skill", "command", "hook", "script"]),
             "artifact_name": _str(non_empty=True),
             "scope_intent": _obj(
@@ -777,7 +781,7 @@ def validate_step(
     """Validate all handoffs for a completed step.
 
     Checks that:
-    1. The step is marked 'done' or 'skip' in the state file
+    1. The step is marked 'done' or 'skipped' in the state file
     2. All required input handoffs are present and valid
     3. All produced output handoffs are present and valid (unless step was skipped)
     """
@@ -802,7 +806,9 @@ def validate_step(
     steps = state.get("steps", {})
     step_status = steps.get(step_name)
 
-    if step_status == "skip":
+    # SKILL.md's Mechanical Exit Gate and reuse path both write "skipped";
+    # this is the canonical spelling for a skipped step status.
+    if step_status == "skipped":
         # Skipped steps don't need output validation, but inputs should exist
         for handoff_name in contract["requires"]:
             if handoff_name in state:
@@ -824,7 +830,7 @@ def validate_step(
                 errors=[
                     ValidationError(
                         f"steps.{step_name}",
-                        f"step status is {step_status!r}, expected 'done' or 'skip'",
+                        f"step status is {step_status!r}, expected 'done' or 'skipped'",
                     )
                 ],
             )

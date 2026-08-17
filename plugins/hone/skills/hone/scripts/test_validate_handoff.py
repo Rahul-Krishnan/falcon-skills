@@ -243,6 +243,7 @@ class TestValidateHandoff(unittest.TestCase):
                 "artifact_content": "# My Skill\nDoes stuff",
                 "artifact_path": "/home/user/.claude/skills/test/SKILL.md",
                 "edit_path": "/home/user/.claude/skills/test/SKILL.md",
+                "original_backup_path": "/tmp/hone-backup/SKILL.md",
                 "artifact_type": "skill",
                 "artifact_name": "test",
                 "scope_intent": {
@@ -389,7 +390,7 @@ class TestValidateStep(unittest.TestCase):
         self.assertFalse(all(r.valid for r in results))
 
     def test_skipped_step_ok(self) -> None:
-        state = {"steps": {"phase1_structural_audit": "skip"}}
+        state = {"steps": {"phase1_structural_audit": "skipped"}}
         results = validate_step(state, "phase1_structural_audit")
         self.assertTrue(all(r.valid for r in results))
 
@@ -410,6 +411,7 @@ class TestValidateStep(unittest.TestCase):
                 "artifact_content": "content",
                 "artifact_path": "/path",
                 "edit_path": "/path",
+                "original_backup_path": "/tmp/hone-backup/SKILL.md",
                 "artifact_type": "skill",
                 "artifact_name": "test",
                 "scope_intent": {

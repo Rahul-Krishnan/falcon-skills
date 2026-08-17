@@ -58,9 +58,10 @@ MCP_TOOL_BLOCKLIST = [
 SANDBOX_HEADER = "SAFETY SANDBOX — side-effect simulation mode"
 
 # Harness tools exempt from the allowed-tools intersection: Skill invokes the
-# artifact under test and criteria_self_repair.py adds AskUserQuestion for
-# error-handling tests; artifacts never declare either. Lowercase base names.
-HARNESS_TOOLS = frozenset({"skill", "askuserquestion"})
+# artifact under test, AskUserQuestion is added for error-handling tests, and
+# ToolSearch loads deferred tools like AskUserQuestion (score_execution.py
+# scores that attempt as gate evidence). Artifacts never declare any of these.
+HARNESS_TOOLS = frozenset({"skill", "askuserquestion", "toolsearch"})
 
 # Read-only default used when filtering would otherwise empty a test case's
 # allowed_tools (which the criteria schema rejects as invalid).

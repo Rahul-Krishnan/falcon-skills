@@ -236,7 +236,10 @@ def analyze(path: str) -> None:
     ]
 
     score_source = "deterministic" if det_per_test else "llm_judge"
-    passed = sum(1 for r in conclusive if score_of(r) > 0.5)
+    # PASS/FAIL here must agree with classify_failure's triage band: a test
+    # below ACTIONABLE_THRESHOLD is a real_issue, so it must not be reported
+    # as passing in the operator summary.
+    passed = sum(1 for r in conclusive if score_of(r) >= ACTIONABLE_THRESHOLD)
     denom = len(conclusive)
     avg_score = sum(score_of(r) for r in conclusive) / denom if denom else 0.0
 
@@ -282,7 +285,7 @@ def analyze(path: str) -> None:
         if tid in inconclusive_ids:
             status, score_label = "INCONCLUSIVE", "score=n/a"
         else:
-            status = "PASS" if score > 0.5 else "FAIL"
+            status = "PASS" if score >= ACTIONABLE_THRESHOLD else "FAIL"
             score_label = f"score={score:.3f}"
         print(f"\n--- {tid} [{suite}] {status} ({score_label}) ---")
 
@@ -324,7 +327,7 @@ def analyze(path: str) -> None:
             cat = details.get("category", r.get("suite", "unknown"))
             score = score_of(r)
             composite = details.get("composite_1_5", 0)
-            status = "PASS" if score > 0.5 else "FAIL"
+            status = "PASS" if score >= ACTIONABLE_THRESHOLD else "FAIL"
             print(f"{cat:<20} {score:>6.3f} {composite:>5.1f} {status:>8}")
 
     # Actionable recommendations
