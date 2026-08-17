@@ -1,0 +1,135 @@
+## Phase 3: Re-Evaluate (MANDATORY after improvement)
+
+**Re-evaluation is not optional.** Every improvement round MUST end with a re-evaluation using the same eval criteria as Phase 1. This produces the after_score that gets compared to the before_score. Without re-evaluation, improvements are ungraded assertions, not measured results. The `--rounds N` flag controls how many improve-then-reevaluate cycles to run, but there is always at least one re-evaluation after improvement. Setting `--rounds 0` would mean evaluate-only (dry run, no improvement).
+
+If `{current_round} >= {max_rounds}`, go to Final Output (but only AFTER the re-evaluation for this round is complete).
+
+**CRITICAL: Anti-bias protocol for re-evaluation.** The re-evaluation after improvement is the highest-risk point for self-confirmation bias. The agent that made the improvements is now asking itself whether the improvements worked. Three mandatory countermeasures:
+
+1. **Blind evaluation.** The re-evaluation judge prompt MUST NOT mention: that improvements were made, what was changed, what round this is, or any before/after framing. The judge receives ONLY (response_text, rubrics). It scores a response, not an improvement. This prevents anchoring bias.
+
+2. **Multi-perspective judge panel.** For the 1-2 test cases with scores in the 0.4-0.7 ambiguous zone (or the lowest-scoring test if all pass), do not accept a single judge's number. Spawn 3 subagents in parallel, one each with the Pragmatist, Skeptic, and Systems Thinker roles, each scoring the blind judge prompt independently, then average their composites. Perspective diversity is the point here: a lone judge scoring output from its own session is the weakest link in the loop. There is no silent fallback to a single judge.
+
+   Give each role the same blind prompt:
+   ```
+   Score this response on the rubric below. Do not mention improvements or what round this is.
+   Response: [agent_response for {test_id}]
+   Rubric checks: [checks array from eval criteria for {test_id}]
+   Return: score (1-5 per check), one-sentence rationale per check, composite (0.0-1.0).
+   ```
+
+   Average the panel composite with the standard judge score and log `"cross_model_judge": "inline_3role"` in the workflow state.
+
+   If you have a cross-model consensus command installed (one that fans the same question out to several model CLIs), use it here instead and log `"cross_model_judge": "cross_model"`. Genuinely different models disagree in more useful ways than three roles on one model, but the 3-role panel is the portable default and is what runs unless you wire something else in.
+
+3. **Same criteria, same judge framing.** Use identical eval criteria and identical judge system prompt as Phase 1. The only variable is the executor output. This makes before/after scores directly comparable.
+
+**Pre-re-evaluation: Refresh enrichment (skills and commands only).** Phase 2 may have modified the artifact, making `required_present` entries from Phase 1 Step 6 stale (referencing identifiers no longer in the artifact). Before re-running eval runner, re-run enrichment to refresh:
+
+```bash
+python3 <skill-dir>/scripts/enrich_programmatic_checks.py \
+  --artifact-path {artifact_path} \
+  --criteria-path {eval_criteria_path} \
+  --json
+```
+
+This is idempotent: it strips stale entries (no longer in artifact) and adds any new identifiers introduced by Phase 2 edits.
+
+Steps:
+1. Re-read artifact and eval criteria from disk (compaction protection).
+2. Re-run eval runner with `--reuse-criteria`.
+3. Run deterministic scoring on re-eval results:
+   ```bash
+   python3 <skill-dir>/scripts/score_execution.py $REEVAL_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --json
+   ```
+4. Compare scores: before/after table per-dimension using deterministic scores from workflow state file.
+5. **Regression check (rubric):** Re-read previous scores from the workflow state file (`eval_results.per_test` or last round's recorded scores). Do NOT use in-memory scores from earlier in the conversation. For each dimension, compare new score to previous score read from the state file. If ANY dimension dropped by more than 0.1, flag as regression, then run the variance control below before reverting anything.
+
+   **Variance control (required before auto-revert).** One re-eval run is a single sample per test, and executor behavior varies across runs on anything that depends on tool availability (whether an executor reached for `AskUserQuestion` before falling back to text, whether it emitted a structured gate event). A single noisy sample must not discard working improvements.
+
+   - Identify which tests feed the regressed dimension. Re-run only those tests, twice more, using identical criteria and the same blind framing.
+   - Recompute the dimension from the **median** of the three samples per test.
+   - If the median still shows a drop > 0.1: the regression is real. Auto-revert and halt.
+   - If the median clears the threshold: record `"variance_confirmed": true` with the per-sample scores in the state file and continue. Do not revert.
+
+   Record the attribution alongside the decision: which edits this round touched the sections or scripts that feed the regressed dimension. A regressed dimension with no edit touching its inputs is evidence for variance, but it does not replace the resampling. Resampling is the operative test, because attribution reasoning is exactly the kind of judgment call the mechanical gate exists to constrain.
+
+   When the regression survives resampling, auto-revert edits from the last round (restore from the pre-edit re-read) and report "Round N caused regression in {dimensions}; changes reverted." **After auto-revert, halt the improvement loop immediately — do not loop back to Phase 2.** A regression signals that the improvement direction was wrong; blindly retrying without understanding the failure would waste rounds. Present final output using pre-revert scores.
+
+   **When the scorer itself changed this round** (any edit to `score_execution.py`), re-score the previous round's `results.json` with the updated scorer before comparing. Otherwise the before/after delta mixes an artifact change with a measurement change, and improvements to the scorer read as improvements to the artifact. Record both the original and adjusted baseline in the state file.
+6. Write this round's scores to the workflow state file under `round_{N}_scores`. Also append a gate event to `gates[]`:
+   ```json
+   {"step": "phase3_exit", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
+   ```
+   Set `result` to `"fail"` if a regression was detected and edits were reverted. Append to `state["gates"]` — do not replace.
+7. **Mechanical exit gate** (see Final Output below). The state file decides whether to continue or exit, not the LLM.
+8. If gate says CONTINUE: increment round, loop back to Phase 2.
+
+## Final Output
+
+
+**MECHANICAL EXIT GATE (replaces introspective anti-laziness checklist):**
+
+The prior approach was an LLM-evaluated checklist: the improving agent would ask itself "have I tried hard enough?" This is gameable — the same agent evaluating whether to continue has incentive to rationalize early exit. The mechanical gate replaces that checklist with a state-file-driven decision: the LLM reads objective data (scores, iterations, delta) and applies deterministic rules. The LLM can read the gate conditions but cannot override them.
+
+The state file decides when to exit. The LLM cannot override these checks. Re-read `/tmp/workflow-${RUN_ID}.json` and evaluate each condition:
+
+**PRECEDENCE: BLOCKED conditions are checked FIRST. If ANY BLOCKED condition is true, do NOT exit, regardless of ALLOWED conditions.** This prevents the failure mode where "all individual test scores >= 0.8" triggers exit while momentum exists and rounds remain.
+
+**Exit BLOCKED (keep going) when ANY are true** (checked FIRST):
+- [ ] Any step is `"pending"` or `"in_progress"` in the state file
+- [ ] `open_questions` is non-empty
+- [ ] `iteration.current < iteration.target` AND score improved this round by >= 0.02 AND composite < 0.9 AND (`{target_score}` is unset OR composite < `{target_score}`) (momentum, not plateau — but grade A artifacts or target-met artifacts are allowed to exit early)
+- [ ] Any test has score < 0.5 AND `iteration.current < iteration.target` (significant failure with rounds remaining)
+
+**Exit ALLOWED when ALL are true** (checked ONLY if no BLOCKED conditions matched):
+- [ ] All steps in `steps` object are `"done"` (no `"pending"` or `"in_progress"`)
+- [ ] `open_questions` array is empty (all tracked questions resolved)
+- [ ] Phase 3 re-evaluation completed for this round (`phase3_reevaluate` is `"done"`)
+- [ ] One of:
+  - `iteration.current >= iteration.target` (round budget exhausted), OR
+  - Composite score >= 0.9 (grade A, nothing left to improve). Note: this is the COMPOSITE score, not individual test scores. A composite of 0.87 with all tests above 0.8 is still grade B and should keep improving if rounds remain., OR
+  - `{target_score}` is set AND composite score >= `{target_score}` (user-specified convergence target met early), OR
+  - Score delta between last two rounds < 0.02 AND zero actionable failures remain (genuine plateau)
+
+**Forced exit with human gate (--confirm mode only):**
+- If rounds exhausted but tests with score < 0.5 remain: present the failures to the user and ask whether to add more rounds or accept the current state. In `--auto` mode: log `"exit_with_low_scores": true` and the test IDs in the state file, but do exit (the round budget is a hard cap in --auto to prevent infinite overnight loops).
+
+**Anti-gaming note:** `open_questions` is auto-populated from structural data (eval scores in 0.4-0.7, failed structural pillars, fresh-eyes disagreements) BEFORE the main thread touches the array. Auto-generated questions are tagged `"source": "auto"` and cannot be removed by the LLM. The main thread can add `"source": "manual"` questions but cannot delete auto-generated ones. The remaining trust surface is limited to: the LLM choosing not to add manual questions it should have. This is a narrower gap than the original (LLM populating the entire array), and is partially covered by fresh-eyes reconciliation surfacing findings the main thread missed.
+
+```
+═══════════════════════════════════════════════════
+Hone Complete: {type}/{name}
+
+  Rounds: {rounds_completed}
+  Grade:  {initial_grade} → {final_grade} ({initial_score} → {final_score})
+  Structure: {structural_score} ({ungated_count} ungated, {untyped_count} untyped handoffs)
+
+  Dimension Progress:
+    {dim1}:  {before} → {after}
+    {dim2}:  {before} → {after}
+    ...
+
+  Changes Applied: {count} edits ({structural_fixes} structural, {content_fixes} content)
+═══════════════════════════════════════════════════
+```
+
+## Common Executor Mistakes
+
+> **TOOL CALL REQUIRED, NOT TEXT OUTPUT:** When the STOP section says "Call `AskUserQuestion`", you MUST invoke the `AskUserQuestion` tool. The judge checks the execution trace for tool calls. Printing the question as assistant text is a gate failure even if the question text is correct.
+
+When executing this skill, avoid these patterns:
+
+1. **Printing text instead of using AskUserQuestion.** When the STOP section or argument validation says "Call AskUserQuestion", you must call the `AskUserQuestion` tool. Printing the question as assistant text does NOT satisfy the gate. The tool provides an interactive picker UI that text output cannot replicate.
+
+2. **Proceeding past a STOP gate.** When a gate says "STOP immediately", that means no further workflow steps should execute. Do not write the workflow state file, do not run structural audit, do not launch eval runner. Stop and address the gate failure.
+
+3. **Leaking workflow terms into error output.** When stopping on a validation error (invalid type, missing args, conflicting flags), your response must ONLY contain the error message and guidance. Do NOT describe what the skill would have done (phases, eval runner, structural audit, etc.). The `required_absent` checks in eval criteria will fail your response if workflow terms appear in error output.
+
+4. **Using workflow-internal terms in fallback output.** When AskUserQuestion is unavailable and the fallback fires, your output must contain ONLY the question and options — no references to Phase 1, structural audit, eval criteria, or any other hone-internal step. Leaking internal terms into a user-facing stop message is a hard failure even if the question itself is correct.
+
+5. **Sequential reads for independent files.** When a phase starts by reading multiple unrelated files (artifact, reference file, state file), issuing them one at a time is a latency violation. Batch all independent Read calls into a single parallel tool-use turn.
+
+## Context Compaction Protection
+
+This workflow runs 30+ minutes per eval round. After generating/editing eval criteria, re-read from disk. After each eval runner run, record output path and scores. After applying edits, re-read to confirm. Before re-evaluation, re-read both files.

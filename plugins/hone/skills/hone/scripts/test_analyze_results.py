@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Tests for analyze_results.py --triage deterministic failure classification."""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import unittest
+
+from analyze_results import classify_failure, triage
+
+
+class TestClassifyFailure(unittest.TestCase):
+    """Test the deterministic failure classification logic."""
+
+    def test_all_zero_is_criteria_bug(self):
+        result = classify_failure(0.0, [0.0, 0.0, 0.0])
+        self.assertEqual(result, "criteria_bug")
+
+    def test_single_zero_with_others_passing_is_variance(self):
+        result = classify_failure(0.0, [0.0, 0.8, 0.9])
+        self.assertEqual(result, "variance")
+
+    def test_low_score_is_real_issue(self):
+        result = classify_failure(0.3, [0.3, 0.8, 0.9])
+        self.assertEqual(result, "real_issue")
+
+    def test_passing_score(self):
+        result = classify_failure(0.8, [0.8, 0.9, 0.7])
+        self.assertEqual(result, "pass")
+
+    def test_zero_with_no_high_scores_is_criteria_bug(self):
+        """When all scores are below 0.5, uniformly low = criteria_bug."""
+        result = classify_failure(0.0, [0.0, 0.3, 0.2])
+        self.assertEqual(result, "criteria_bug")
+
+    def test_actionable_threshold_boundary(self):
+        """0.8 is the Phase 1 exit gate: at or above it is passing."""
+        result = classify_failure(0.8, [0.8, 0.9, 0.85])
+        self.assertEqual(result, "pass")
+
+    def test_below_actionable_threshold_is_real_issue(self):
+        """A 0.637 test is a real_issue, matching the gate's below-0.8 rule."""
+        result = classify_failure(0.637, [0.637, 0.9, 1.0])
+        self.assertEqual(result, "real_issue")
+
+    def test_just_below_threshold(self):
+        result = classify_failure(0.49, [0.49, 0.6, 0.7])
+        self.assertEqual(result, "real_issue")
+
+    def test_all_low_but_nonzero_is_criteria_bug(self):
+        """All scores uniformly low (0.1-0.4) = criteria_bug, not real_issue."""
+        result = classify_failure(0.1, [0.1, 0.2, 0.3, 0.4])
+        self.assertEqual(result, "criteria_bug")
+
+    def test_single_low_score_is_real_issue_not_criteria_bug(self):
+        """Single-element list bypasses the all-low check (len > 1 guard)."""
+        result = classify_failure(0.2, [0.2])
+        self.assertEqual(result, "real_issue")
+
+    def test_all_at_exactly_half_is_real_issue_not_criteria_bug(self):
+        """0.5 clears the criteria_bug bar but sits below the actionable gate."""
+        result = classify_failure(0.5, [0.5, 0.5, 0.5])
+        self.assertEqual(result, "real_issue")
+
+    def test_mixed_low_and_high_is_not_criteria_bug(self):
+        """If any score is >= 0.5, the uniform-low check doesn't trigger."""
+        result = classify_failure(0.2, [0.2, 0.6, 0.3])
+        self.assertEqual(result, "real_issue")
+
+
+class TestTriageFunction(unittest.TestCase):
+    """Test the triage function with mock results.json files."""
+
+    def _write_results(self, results_data, det_scores=None):
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "results.json")
+        with open(path, "w") as f:
+            json.dump(results_data, f)
+        if det_scores is not None:
+            det_path = os.path.join(tmpdir, "deterministic_scores.json")
+            with open(det_path, "w") as f:
+                json.dump(det_scores, f)
+        return path
+
+    def test_empty_results(self):
+        path = self._write_results({"results": []})
+        result = triage(path)
+        self.assertEqual(result["summary"]["pass"], 0)
+        self.assertEqual(len(result["classifications"]), 0)
+
+    def test_all_passing(self):
+        path = self._write_results(
+            {
+                "results": [
+                    {"test_id": "TC-001", "score": 0.9},
+                    {"test_id": "TC-002", "score": 0.8},
+                ]
+            }
+        )
+        result = triage(path)
+        self.assertEqual(result["summary"]["pass"], 2)
+        self.assertEqual(result["summary"]["real_issue"], 0)
+
+    def test_all_zero_classified_as_criteria_bug(self):
+        path = self._write_results(
+            {
+                "results": [
+                    {"test_id": "TC-001", "score": 0.0},
+                    {"test_id": "TC-002", "score": 0.0},
+                ]
+            }
+        )
+        result = triage(path)
+        self.assertEqual(result["summary"]["criteria_bug"], 2)
+
+    def test_single_zero_classified_as_variance(self):
+        path = self._write_results(
+            {
+                "results": [
+                    {"test_id": "TC-001", "score": 0.0},
+                    {"test_id": "TC-002", "score": 0.8},
+                ]
+            }
+        )
+        result = triage(path)
+        self.assertEqual(result["summary"]["variance"], 1)
+        self.assertEqual(result["summary"]["pass"], 1)
+
+    def test_deterministic_scores_preferred(self):
+        path = self._write_results(
+            {
+                "results": [
+                    {"test_id": "TC-001", "score": 0.3},
+                    {"test_id": "TC-002", "score": 0.9},
+                ]
+            },
+            det_scores={
+                "per_test": [
+                    {"test_id": "TC-001", "composite": 0.85},
+                    {"test_id": "TC-002", "composite": 0.92},
+                ]
+            },
+        )
+        result = triage(path)
+        tc1 = next(c for c in result["classifications"] if c["test_id"] == "TC-001")
+        self.assertEqual(tc1["score_source"], "deterministic")
+        self.assertAlmostEqual(tc1["score"], 0.85, places=2)
+        self.assertEqual(tc1["classification"], "pass")
+
+    def test_score_source_field(self):
+        path = self._write_results(
+            {
+                "results": [
+                    {"test_id": "TC-001", "score": 0.7},
+                ]
+            }
+        )
+        result = triage(path)
+        self.assertEqual(result["classifications"][0]["score_source"], "llm_judge")
+
+    def test_invalid_json_returns_error(self):
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "results.json")
+        with open(path, "w") as f:
+            f.write("not json")
+        result = triage(path)
+        self.assertIn("error", result)
+
+
+if __name__ == "__main__":
+    unittest.main()

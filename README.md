@@ -1,6 +1,6 @@
 # falcon-skills
 
-A small marketplace of practical Claude Code skills. Ships three plugins: **hindsight**, **unslop-code**, and **context-contradiction-checker**.
+A small marketplace of practical Claude Code skills. Ships four plugins: **hindsight**, **unslop-code**, **context-contradiction-checker**, and **hone**.
 
 ## Quick Start
 
@@ -11,6 +11,7 @@ Add the marketplace, then install the plugin you want:
 /plugin install hindsight@falcon-skills
 /plugin install unslop-code@falcon-skills
 /plugin install context-contradiction-checker@falcon-skills
+/plugin install hone@falcon-skills
 ```
 
 Then run them:
@@ -19,6 +20,7 @@ Then run them:
 /hindsight
 /unslop-code
 /context-contradiction-checker
+/hone <artifact-name>
 ```
 
 ## hindsight
@@ -144,6 +146,48 @@ It reads instruction files, not code. It's not a linter or a code reviewer.
 - Judgment calls are heuristic. A TENSION is a suggestion to look, not a verdict.
 - It reports on the context sources it can find on disk. Rules that live only in a system prompt or an MCP server's instructions are invisible to it.
 - Survives context compaction via a state file in `/tmp`, keyed on the session ID, but a very large context set still takes a while to walk.
+
+## hone
+
+You write a skill, it works, and then it quietly rots: a script it calls gets renamed, a rule it depends on changes, a phase stops firing. You find out when it misbehaves. hone grades one of your own artifacts against an eval suite, fixes what the evidence says is broken, and re-scores to prove the fix held.
+
+Works on skills, commands, hooks, and scripts. Skills and commands are judged by an executor-plus-judge eval; hooks and scripts are tested by direct invocation with input/output pairs, because a hook either fires on the right input or it doesn't.
+
+### What it does
+
+- Runs a deterministic structural audit over 14 pillars (typed handoffs, gate events, state persistence, security, spec compliance), scoped by artifact complexity so a 40-line hook isn't graded like a 3-phase pipeline.
+- Validates every path, script, and skill the artifact references actually exists. Text quality can grade A while the skill calls a script you deleted.
+- Runs the eval suite, scores it deterministically, and triages each failure as a real issue, a criteria bug, or run-to-run variance.
+- Gets a second opinion from a clean-context subagent that never sees the main thread's analysis, then reconciles the two before editing anything.
+- Applies the fixes, re-runs the same suite blind, and compares per dimension. If a dimension drops more than 0.1, it resamples before believing it, and auto-reverts if the drop is real.
+
+### Usage
+
+```
+/hone my-skill --auto          # infers the type from the name
+/hone hook my-hook --auto      # explicit type when the name is ambiguous
+/hone my-skill --confirm       # approve each step instead of running unattended
+/hone my-skill --rounds 3      # up to 3 improve-then-verify cycles
+/hone my-skill --target 0.9    # stop early once the composite hits 0.9
+/hone my-skill --fix-only      # reuse the last evaluation, skip straight to fixing
+```
+
+`--auto` is fully non-interactive, so it's the mode to use when you walk away. Every run writes state to `/tmp/workflow-hone-<name>-<timestamp>.json`, keyed per run, so honing several artifacts back to back won't clobber scores.
+
+### When to use it
+
+- A skill has started behaving worse than it used to and you want evidence, not a guess.
+- You changed a skill and want to know whether you actually improved it.
+- You want a quality grade on an artifact before publishing it.
+
+It only makes sense on artifacts you own and can edit. It is not a code reviewer: it grades the instruction file and its bundled scripts, not your application code.
+
+### Limitations
+
+- One eval round spawns a subagent per test case, so a 12-case suite is not cheap and not fast. `--rounds 3` triples that.
+- Scores move between runs on anything that depends on tool availability. That's why the regression check resamples instead of reverting on a single sample, but it also means small deltas are noise.
+- The improvement preferences encode opinions (parallelism over token thrift, latency over cost, gates only where a workflow runs unattended). If you disagree with those, edit the preferences list in `SKILL.md`, since it is what drives every fix.
+- The bundled scripts are stdlib-only Python 3 with no install step, but Python 3 has to be on PATH.
 
 ## Plugin layout
 
