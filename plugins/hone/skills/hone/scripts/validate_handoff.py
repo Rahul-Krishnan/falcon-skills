@@ -215,7 +215,10 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     "generated_criteria": {
         "fields": {
             "criteria_path": _str(non_empty=True),
-            "test_count": _num(min_value=3),
+            # Minimum 2, not 3: the lightweight complexity tier legitimately
+            # generates 2 test cases (references/phase1-evaluation.md), and a
+            # higher floor here hard-stops runs that followed their own spec.
+            "test_count": _num(min_value=2),
             "validation_passed": _bool(),
             "dimensions": _arr(items={"type": "string"}, non_empty=True),
         },

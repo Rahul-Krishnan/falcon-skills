@@ -222,6 +222,12 @@ def guard_criteria(
     tools_removed: list[str] = []
     fallbacks_applied = 0
 
+    # Filter against the full MCP_TOOL_BLOCKLIST, not just scan hits:
+    # mcp_tools only carries patterns the artifact text happens to name, and
+    # LLM-generated criteria can grant a dangerous tool the artifact never
+    # mentions. Keying the filter off artifact text alone fails open.
+    blocked_patterns = set(mcp_tools) | set(MCP_TOOL_BLOCKLIST)
+
     for tc in criteria.get("test_cases", []):
         modified = False
 
@@ -231,7 +237,7 @@ def guard_criteria(
             filtered = [
                 t
                 for t in allowed
-                if not any(blocked in t.lower() for blocked in mcp_tools)
+                if not any(blocked in t.lower() for blocked in blocked_patterns)
             ]
             removed = set(allowed) - set(filtered)
             if removed:
@@ -344,13 +350,32 @@ def main() -> int:
     # artifact's declared toolset.
     artifact_allowed = parse_allowed_tools_frontmatter(artifact_path.read_text())
 
-    # Proceed if ANY signal is present (including a declared toolset that may
-    # narrow allowed_tools in the criteria).
+    # Load criteria before deciding "no side effects": the MCP blocklist is
+    # enforced on the criteria's own allowed_tools, so a clean artifact scan
+    # alone cannot prove the criteria grant nothing dangerous.
+    criteria_text = criteria_path.read_text()
+    try:
+        criteria = json.loads(criteria_text)
+    except json.JSONDecodeError as exc:
+        print(f"Error: invalid criteria JSON: {exc}", file=sys.stderr)
+        return 1
+
+    if not criteria or "test_cases" not in criteria:
+        print("Error: invalid criteria file (no test_cases)", file=sys.stderr)
+        return 1
+
+    changes = guard_criteria(
+        criteria, bash_commands, mcp_tools, delegated_skills, artifact_allowed
+    )
+
+    # Genuinely clean only when the artifact shows no signals AND the guard
+    # removed nothing from the criteria themselves.
     if (
         not bash_commands
         and not mcp_tools
         and not delegated_skills
         and artifact_allowed is None
+        and changes["tests_modified"] == 0
     ):
         if args.json:
             print(
@@ -359,19 +384,6 @@ def main() -> int:
         else:
             print("No side effects detected.", file=sys.stderr)
         return 2
-
-    # Load criteria
-    criteria_text = criteria_path.read_text()
-    criteria = json.loads(criteria_text)
-
-    if not criteria or "test_cases" not in criteria:
-        print("Error: invalid criteria file (no test_cases)", file=sys.stderr)
-        return 1
-
-    # Guard criteria
-    changes = guard_criteria(
-        criteria, bash_commands, mcp_tools, delegated_skills, artifact_allowed
-    )
 
     result = {
         "side_effects_detected": True,

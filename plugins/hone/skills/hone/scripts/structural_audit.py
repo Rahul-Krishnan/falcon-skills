@@ -176,6 +176,23 @@ DEFENSIVE_INJECTION_KEYWORDS = [
     "adversarial",
 ]
 
+# Negation/hygiene phrasing near a credential, exfil, or base64 match marks
+# defensive documentation ("Never read ~/.ssh/", "do not commit .env files")
+# rather than live threat behavior. Kept separate from the injection keywords:
+# a bare "never"/"do not" near an injection directive is too weak a signal to
+# exempt it, but near a credential-path mention it is the dominant benign case.
+DEFENSIVE_HYGIENE_KEYWORDS = [
+    "never",
+    "do not",
+    "don't",
+    "must not",
+    "avoid",
+    "forbidden",
+    "prohibited",
+    "redact",
+    "hygiene",
+]
+
 # Research phase indicators
 RESEARCH_PHASE_PATTERNS = [
     re.compile(
@@ -585,38 +602,62 @@ def audit_data_provenance(content: str, artifact_type: str) -> PillarResult:
     )
 
 
-def _is_defensive_injection_context(content: str, start: int, end: int) -> bool:
-    """True if a prompt-injection match is a quoted example or sits inside
-    defensive security documentation, rather than a live injection attempt.
+def _is_defensive_context(
+    content: str, start: int, end: int, keywords: list[str]
+) -> bool:
+    """True if a security-pattern match is a quoted example or sits inside
+    defensive security documentation, rather than live threat behavior.
 
     Two signals, either is sufficient:
     1. The matched phrase is immediately wrapped in quotes or backticks (a cited
        example, e.g. `"ignore previous instructions"`).
-    2. A defensive keyword (trust boundary, untrusted, "do not obey", ...) appears
-       in the surrounding window (same sentence/paragraph)."""
+    2. One of the given defensive keywords appears in the surrounding window
+       (same sentence/paragraph)."""
     quote_chars = {'"', "'", "`"}
     before = content[start - 1] if start > 0 else ""
     after = content[end] if end < len(content) else ""
     if before in quote_chars and after in quote_chars:
         return True
     window = content[max(0, start - 240): min(len(content), end + 240)].lower()
-    return any(kw in window for kw in DEFENSIVE_INJECTION_KEYWORDS)
+    return any(kw in window for kw in keywords)
+
+
+def _is_defensive_injection_context(content: str, start: int, end: int) -> bool:
+    return _is_defensive_context(content, start, end, DEFENSIVE_INJECTION_KEYWORDS)
 
 
 def audit_security(content: str, artifact_type: str) -> PillarResult:
     """Pillar 9: Scan for security threat patterns."""
     findings = []
 
+    # Credential/exfil/base64 matches get the same defensive-context exemption
+    # as prompt injection below: prose documenting correct hygiene ("Never read
+    # ~/.ssh/ or .env credentials.") is guidance, not a threat, and without the
+    # exemption it fails the pillar and force-caps the grade.
+    hygiene_keywords = DEFENSIVE_HYGIENE_KEYWORDS + DEFENSIVE_INJECTION_KEYWORDS
+
     for pattern in CREDENTIAL_PATTERNS:
         for match in pattern.finditer(content):
+            if _is_defensive_context(
+                content, match.start(), match.end(), hygiene_keywords
+            ):
+                continue
             findings.append(f"CREDENTIAL: {match.group().strip()[:60]}")
 
     for pattern in EXFIL_PATTERNS:
         for match in pattern.finditer(content):
+            if _is_defensive_context(
+                content, match.start(), match.end(), hygiene_keywords
+            ):
+                continue
             findings.append(f"EXFILTRATION: {match.group().strip()[:60]}")
 
     for pattern in BASE64_PATTERNS:
         for match in pattern.finditer(content):
+            if _is_defensive_context(
+                content, match.start(), match.end(), hygiene_keywords
+            ):
+                continue
             findings.append(f"BASE64: {match.group().strip()[:60]}")
 
     for pattern in PROMPT_INJECTION_PATTERNS:

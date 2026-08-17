@@ -490,17 +490,13 @@ def audit(criteria_path: str, artifact_path: str | None) -> dict:
     """
     # Run schema validation first.
     # Route its summary to stderr: audit mode's contract is JSON on stdout.
+    # A failure must NOT short-circuit the audit: the schema requires exactly
+    # the fields (runner_context, non-empty allowed_tools) that the per-test
+    # checks below exist to catch and repair, so an early return here would
+    # report a legacy criteria file as "clean" and leave it to fail later at
+    # the pre-launch schema gate with no auto-repair chance left.
     schema_rc = validate_schema(criteria_path, output_stream=sys.stderr)
-    if schema_rc != 0:
-        return {
-            "error": f"Schema validation failed for {criteria_path}",
-            "findings": [],
-            "fixable_count": 0,
-            "warning_count": 0,
-            "should_regenerate": False,
-            "unfixable_test_ids": [],
-            "total_test_cases": 0,
-        }
+    schema_valid = schema_rc == 0
 
     try:
         with open(criteria_path) as f:
@@ -586,6 +582,7 @@ def audit(criteria_path: str, artifact_path: str | None) -> dict:
     should_regenerate = len(unfixable_test_ids) > len(test_cases) / 2
 
     return {
+        "schema_valid": schema_valid,
         "findings": findings,
         "fixable_count": len(fixable),
         "warning_count": len(warnings),

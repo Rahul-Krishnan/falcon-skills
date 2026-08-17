@@ -240,7 +240,15 @@ def generate_benchmark(results, det_scores, baseline_results, baseline_det):
         delta = {
             "composite_delta": composite_delta,
             "metric": metric,
-            "pass_count_delta": with_skill["pass_count"] - without_skill["pass_count"],
+            # pass_count derives solely from LLM score fields, so the delta is
+            # only meaningful when both runs actually have LLM scores; a
+            # deterministic-only run's pass_count of 0 is a metric artifact,
+            # not a regression (same like-metrics invariant as above).
+            "pass_count_delta": (
+                with_skill["pass_count"] - without_skill["pass_count"]
+            )
+            if both_avg
+            else None,
             "avg_score_delta": round(
                 with_skill["avg_score"] - without_skill["avg_score"], 4
             )

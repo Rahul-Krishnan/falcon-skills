@@ -209,22 +209,30 @@ class TestAuditMode(unittest.TestCase):
         returncode, payload = self._audit(VALID_CRITERIA)
         self.assertEqual(returncode, EXIT_CLEAN)
         self.assertNotIn("error", payload)
+        self.assertTrue(payload["schema_valid"])
         self.assertIsInstance(payload["findings"], list)
 
-    def test_audit_rejects_missing_runner_context_via_schema(self):
-        """runner_context is now required by the schema, so missing it triggers schema error."""
+    def test_audit_missing_runner_context_still_runs_repair_checks(self):
+        """A schema failure must not short-circuit the audit: missing
+        runner_context is exactly what check_runner_context_present exists to
+        catch, so the audit reports it instead of returning an empty error."""
         tc = _make_tc()
         del tc["runner_context"]
         _, payload = self._audit({"test_cases": [tc]})
-        # Schema validation catches this before audit checks run
-        self.assertIn("error", payload)
+        self.assertFalse(payload["schema_valid"])
+        issues = [f["issue"] for f in payload["findings"]]
+        self.assertIn("missing_runner_context", issues)
 
-    def test_audit_rejects_missing_allowed_tools_via_schema(self):
-        """allowed_tools is now required by the schema, so missing it triggers schema error."""
+    def test_audit_missing_allowed_tools_still_runs_repair_checks(self):
+        """Missing allowed_tools fails the schema but must still reach the
+        fixable missing_allowed_tools repair path."""
         tc = _make_tc()
         del tc["allowed_tools"]
         _, payload = self._audit({"test_cases": [tc]})
-        self.assertIn("error", payload)
+        self.assertFalse(payload["schema_valid"])
+        issues = [f["issue"] for f in payload["findings"]]
+        self.assertIn("missing_allowed_tools", issues)
+        self.assertGreaterEqual(payload["fixable_count"], 1)
 
     def test_audit_reports_missing_skill_tool_when_slash_command_in_prompt(self):
         tc = _make_tc(

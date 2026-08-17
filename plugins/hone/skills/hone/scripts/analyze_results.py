@@ -85,6 +85,16 @@ def load_inconclusive_ids(results_path: str) -> set[str]:
     }
 
 
+def _llm_score(result: dict) -> float:
+    """LLM judge score with an explicit null treated the same as a missing key.
+
+    The eval_results schema allows score: null for inconclusive/score_error
+    tests, and .get's default only covers an absent key, so a raw
+    result.get("score", 0.0) returns None and crashes the >= comparisons."""
+    score = result.get("score")
+    return score if score is not None else 0.0
+
+
 def classify_failure(score: float, all_scores: list[float]) -> str:
     """Deterministic failure classification.
 
@@ -149,7 +159,7 @@ def triage(path: str) -> dict:
         if test_id in det_per_test:
             all_scores.append(det_per_test[test_id])
         else:
-            all_scores.append(result.get("score", 0.0))
+            all_scores.append(_llm_score(result))
 
     classifications = []
     counts: dict[str, int] = {
@@ -177,7 +187,7 @@ def triage(path: str) -> dict:
             score = det_per_test[test_id]
             source = "deterministic"
         else:
-            score = result.get("score", 0.0)
+            score = _llm_score(result)
             source = "llm_judge"
 
         classification = classify_failure(score, all_scores)
@@ -227,7 +237,7 @@ def analyze(path: str) -> None:
         test_id = result.get("test_id", "unknown")
         if test_id in det_per_test:
             return det_per_test[test_id]
-        return result.get("score", 0.0)
+        return _llm_score(result)
 
     # Inconclusive tests were never scored; keep them out of pass/avg math
     # so "nothing was observed" does not read as a 0.0 failure.

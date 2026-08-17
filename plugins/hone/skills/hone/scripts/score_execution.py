@@ -466,11 +466,13 @@ def _extract_gate_events(
     for entry in reversed(tool_uses):
         if entry.get("tool_name") not in ("Write", "Edit"):
             continue
-        tool_input = entry.get("tool_input", {})
-        file_path = tool_input.get("file_path", "")
+        # `or {}` / `or ""` (not .get defaults): tool_use entries can carry an
+        # explicit tool_input: null, which the default would pass through.
+        tool_input = entry.get("tool_input") or {}
+        file_path = tool_input.get("file_path") or ""
         if not STATE_FILE_PATTERN.search(file_path):
             continue
-        content = tool_input.get("content", "")
+        content = tool_input.get("content") or ""
         if not content:
             continue
         try:
@@ -613,13 +615,14 @@ def score_state_persistence(timeline: list[dict]) -> dict[str, float | str]:
     for entry in tool_uses:
         tool_name = entry.get("tool_name", "")
         if tool_name in ("Write", "Edit"):
-            tool_input = entry.get("tool_input", {})
-            file_path = tool_input.get("file_path", "")
+            # `or {}` / `or ""`: tool_use entries can carry explicit nulls.
+            tool_input = entry.get("tool_input") or {}
+            file_path = tool_input.get("file_path") or ""
             if STATE_FILE_PATTERN.search(file_path):
                 return {"score": 1.0, "evidence": f"State file written: {file_path}"}
         elif tool_name == "Bash":
             # Check for cat/echo/heredoc writes to state files in the command
-            command = entry.get("tool_input", {}).get("command", "")
+            command = (entry.get("tool_input") or {}).get("command") or ""
             if STATE_FILE_PATTERN.search(command) and any(
                 redirect in command for redirect in (">", "cat >", "tee ", ">>")
             ):
@@ -709,11 +712,16 @@ def score_voice_compliance(agent_response: str) -> dict[str, float | str]:
     if not prose_lines:
         return {"score": 1.0, "evidence": "Code-only response, no prose to check"}
 
+    # Count violations over the same filtered lines the denominator uses.
+    # Scanning the unfiltered prose counts hits on table-separator and
+    # backtick-heavy lines that were excluded from line_count, so the
+    # violations/lines ratio could exceed 1 and zero out clean responses.
+    prose_text = "\n".join(prose_lines)
     violations = 0
-    violations += len(EM_DASH_PATTERN.findall(prose))
-    violations += len(STACCATO_PATTERN.findall(prose))
-    violations += len(NEGATION_ASSERTION.findall(prose))
-    violations += len(BANNED_PHRASES.findall(prose))
+    violations += len(EM_DASH_PATTERN.findall(prose_text))
+    violations += len(STACCATO_PATTERN.findall(prose_text))
+    violations += len(NEGATION_ASSERTION.findall(prose_text))
+    violations += len(BANNED_PHRASES.findall(prose_text))
 
     line_count = max(1, len(prose_lines))
     score = max(0.0, 1.0 - (violations / line_count))
@@ -900,9 +908,10 @@ def score_early_termination(timeline: list[dict]) -> dict[str, float | str]:
     tool_count = len(tool_uses)
 
     # Check for workflow-progression indicators (should be absent)
+    # `or {}` / `or ""`: tool_use entries can carry explicit nulls.
     wrote_state = any(
         t.get("tool_name") in ("Write", "Edit")
-        and STATE_FILE_PATTERN.search(t.get("tool_input", {}).get("file_path", ""))
+        and STATE_FILE_PATTERN.search((t.get("tool_input") or {}).get("file_path") or "")
         for t in tool_uses
     )
 
@@ -1134,8 +1143,14 @@ def _is_artifact_write_entry(entry: dict) -> bool:
     """
     tool_input = entry.get("tool_input") or {}
     file_path = tool_input.get("file_path", "") if isinstance(tool_input, dict) else ""
-    if file_path and _TEMP_PATH_RE.search(file_path):
-        return False
+    if file_path:
+        # A real path is authoritative: classify on it alone. Content sniffing
+        # here would let a Write to SKILL.md whose echoed content merely
+        # mentions /tmp/ or state files (exactly what hone's conventions tell
+        # skills to document) masquerade as a temp/state write.
+        if _TEMP_PATH_RE.search(file_path):
+            return False
+        return _is_write_entry(entry)
     content = entry.get("content") or ""
     if _TEMP_PATH_RE.search(content):
         return False
