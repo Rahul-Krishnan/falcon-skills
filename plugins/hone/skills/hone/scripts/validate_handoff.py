@@ -140,7 +140,10 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     # The has_*/*_needed booleans ARE emitted deterministically by the script.
     "structural_audit": {
         "fields": {
-            "structural_score": _num(min_value=0.0, max_value=1.0),
+            # null when no scoring pillar beyond the security scan applies to
+            # this artifact type and tier: the audit measured nothing, and a
+            # fabricated 1.0 is what that used to report.
+            "structural_score": _num(min_value=0.0, max_value=1.0, allow_null=True),
             "transitions": _arr(
                 required=False,
                 items={

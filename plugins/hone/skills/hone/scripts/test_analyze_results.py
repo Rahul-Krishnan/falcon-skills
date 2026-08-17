@@ -105,6 +105,13 @@ class TestTriageFunction(unittest.TestCase):
                 json.dump(det_scores, f)
         return path
 
+    def test_triage_skips_non_object_entries(self):
+        path = self._write_results(
+            {"results": ["oops", {"test_id": "a", "score": 0.9}]}
+        )
+        result = triage(path)
+        self.assertEqual([c["test_id"] for c in result["classifications"]], ["a"])
+
     def test_empty_results(self):
         path = self._write_results({"results": []})
         result = triage(path)
@@ -261,6 +268,21 @@ class TestAnalyzeOutput(unittest.TestCase):
         self.assertIn("INCONCL", sim_row)
         self.assertNotIn("0.000", sim_row)
         self.assertNotIn("FAIL", sim_row)
+
+    def test_analyze_skips_non_object_entries(self):
+        """score_execution warns and keeps going on a malformed record.
+
+        Both scripts read the same file through extract_results, so an entry
+        that score_execution tolerates must not abort analyze with an
+        AttributeError.
+        """
+        path = self._write(
+            {"results": ["oops", {"test_id": "a", "details": {"category": "exec"}}]},
+            {"per_test": [{"test_id": "a", "composite": 0.9}]},
+        )
+        output = self._run(path)
+        self.assertIn("a", output)
+        self.assertNotIn("No test results found", output)
 
     def test_analyze_reads_test_results_alias(self):
         path = self._write(

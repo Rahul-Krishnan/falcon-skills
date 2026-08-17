@@ -339,7 +339,9 @@ def load_inconclusive_ids(results_path: str) -> set[str]:
     """Set of test_ids marked inconclusive in deterministic_scores.json.
 
     score_execution.py emits `status: "inconclusive"` with `composite: null`
-    for tests with no execution evidence. load_deterministic_scores drops
+    for tests with no execution evidence, and `status: "score_error"` when the
+    scorer itself raised — an internal exception measured nothing either, so
+    both statuses belong here. load_deterministic_scores drops
     them from the score map, which made them indistinguishable from "never
     scored deterministically": on a deterministic-only run they then fell
     back to `score = 0.0`, dragging avg/FAIL counts and (on an
@@ -350,7 +352,7 @@ def load_inconclusive_ids(results_path: str) -> set[str]:
         for test in _per_test_entries(results_path)
         if isinstance(test.get("test_id"), str)
         and (
-            test.get("status") == "inconclusive"
+            test.get("status") in ("inconclusive", "score_error")
             or not isinstance(test.get("composite"), (int, float))
         )
     }

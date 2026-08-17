@@ -1357,6 +1357,7 @@ def audit(
         }
         return {
             "structural_score": 0.0,
+            "structural_score_status": "scored",
             "pillars": [],
             "findings": ["Empty artifact content"],
             "warnings": [],
@@ -1398,19 +1399,41 @@ def audit(
     scoring_pillars = [
         p for p in pillars if p.applicable and p.name not in WARNING_ONLY_PILLARS
     ]
-    if not scoring_pillars:
-        structural_score = 1.0
+    security_pillar = next((p for p in pillars if p.name == SECURITY), None)
+    security_failed = bool(
+        security_pillar and security_pillar.applicable and not security_pillar.passed
+    )
+
+    # A denominator of "security alone" is not a measurement of structure. The
+    # security scan reports the absence of threat patterns, which every ordinary
+    # artifact satisfies, so any hook or script with no hit scored a perfect 1.0
+    # at every tier — and an empty denominator failed open to 1.0 outright.
+    # Skills and commands escape this because description_guardrails is scored
+    # at every tier; hooks and scripts have no such pillar, and inventing one
+    # would fabricate a different number rather than fix the missing evidence.
+    # So: no non-security scoring pillar means no structural score at all.
+    substantive_pillars = [p for p in scoring_pillars if p.name != SECURITY]
+    score_inconclusive = not substantive_pillars
+
+    if score_inconclusive:
+        # A security failure is real evidence of a defect and still scores;
+        # a security pass is not evidence of quality.
+        structural_score = 0.3 if security_failed else None
     else:
         structural_score = sum(1 for p in scoring_pillars if p.passed) / len(
             scoring_pillars
         )
-
-    security_pillar = next((p for p in pillars if p.name == SECURITY), None)
-    if security_pillar and security_pillar.applicable and not security_pillar.passed:
-        structural_score = min(structural_score, 0.3)
+        if security_failed:
+            structural_score = min(structural_score, 0.3)
 
     findings = []
     warnings = []
+    if score_inconclusive:
+        warnings.append(
+            f"structural_score inconclusive: no scoring pillar applies to "
+            f"'{artifact_type}' at tier '{complexity_tier}' beyond the security "
+            f"scan, which only reports the absence of threat patterns"
+        )
     for pillar in pillars:
         if pillar.applicable and not pillar.passed:
             if pillar.name in WARNING_ONLY_PILLARS:
@@ -1440,7 +1463,12 @@ def audit(
         handoff_booleans[needed_key] = bool(pillar and pillar.applicable)
 
     return {
-        "structural_score": round(structural_score, 4),
+        "structural_score": (
+            None if structural_score is None else round(structural_score, 4)
+        ),
+        "structural_score_status": (
+            "inconclusive" if structural_score is None else "scored"
+        ),
         "pillars": pillar_dicts,
         "findings": findings,
         "warnings": warnings,
@@ -1496,7 +1524,10 @@ def main() -> None:
         json.dump(result, sys.stdout, indent=2)
         print()
     else:
-        print(f"Structural Score: {result['structural_score']:.2f}")
+        if result["structural_score"] is None:
+            print("Structural Score: n/a (INCONCLUSIVE)")
+        else:
+            print(f"Structural Score: {result['structural_score']:.2f}")
         print()
         for pillar in result["pillars"]:
             is_warning = pillar["name"] in WARNING_ONLY_PILLARS
@@ -1517,6 +1548,10 @@ def main() -> None:
             print(f"\nFindings ({len(result['findings'])}):")
             for finding in result["findings"]:
                 print(f"  - {finding}")
+        if result["warnings"]:
+            print(f"\nWarnings ({len(result['warnings'])}):")
+            for warning in result["warnings"]:
+                print(f"  - {warning}")
 
 
 if __name__ == "__main__":

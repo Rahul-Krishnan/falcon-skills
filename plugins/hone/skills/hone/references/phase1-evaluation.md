@@ -93,6 +93,8 @@ Parse JSON output. The script scans for 14 structural pillars using regex patter
 
 When a pillar is inapplicable, it is marked `applicable: false` in the script output and excluded from the structural_score denominator.
 
+When the denominator would contain nothing but the security scan — which reports the *absence* of threat patterns, not the presence of quality — the script emits `structural_score: null` with `structural_score_status: "inconclusive"` and a warning naming the artifact type and tier. This is the normal outcome for hooks and scripts, which have no other scoring pillar. Report it as INCONCLUSIVE; do not substitute 1.0, and do not treat it as a passing structural result. A *failing* security scan is real evidence and still scores (capped at 0.3).
+
 Map the script output to the handoff interface:
 - `structural_score`, `findings`, and the eight `has_*`/`*_needed` booleans are
   emitted by the script directly — copy them as-is.
@@ -111,12 +113,13 @@ Map the script output to the handoff interface:
 - [ ] Complexity-aware analysis verified (for temper-review only)
 - [ ] Data provenance verified (for artifacts producing scores consumed by decisions)
 - [ ] Compaction protection verified (for multi-step artifacts with 2+ steps)
-- [ ] If structural_score < 1.0: findings are recorded for Phase 2
+- [ ] If structural_score is null (inconclusive) or < 1.0: findings are recorded for Phase 2
 
 **Handoff interface (Step 2 → Phase 2 structural findings):**
 ```
 structural_audit: {
-  structural_score: number,              // 0.0-1.0
+  structural_score: number | null,       // 0.0-1.0; null when the audit had no
+                                         // scoring pillar beyond the security scan
   // transitions and handoffs are optional (model-derived enrichment);
   // everything else comes straight from structural_audit.py --json output
   transitions?: [{
@@ -754,6 +757,13 @@ eval_results: {
 }
 ```
 Write this to workflow state file before entering Phase 2. Phase 2 reads from the file, not from memory.
+
+**When the deterministic scorer declines to score.** A composite is only emitted where a dimension actually measured something:
+
+- `test_profile: "knowledge_extraction"` is **always** inconclusive deterministically. Its dimensions cannot read an answer — `error_handling` is 1.0 whenever nothing errored, which reports "did not crash" as "answered well". The dimension is still emitted as evidence; the semantic verdict belongs to the LLM judge.
+- `error_handling`, `side_effect_guarded`, and `failure_mode` tests with **zero tool calls** are inconclusive. Every dimension in those profiles defaults high in the absence of evidence, so an executor that did nothing scored near-perfect.
+- Gate events found only in prose (`agent_response`) are capped at 0.7: an echoed state-file template is indistinguishable from a gate that actually fired. A gate written to a state file scores in full.
+- A scoring exception records `status: "score_error"` with `composite: null`, never 0.0.
 
 `score_execution.py` emits `grade: "INCONCLUSIVE"` with `composite_score: null` when no test is conclusive, per-test `status: "inconclusive"` (score null) for tests without execution evidence, and `status: "score_error"` when scoring itself failed. Transcribe these values verbatim — never coerce `INCONCLUSIVE` to `F`, which fabricates a failing grade that then drives Phase 2 targeting and the Phase 3 auto-revert check. These enums mirror the `eval_results` schema in `scripts/validate_handoff.py`, which is authoritative; update both together.
 

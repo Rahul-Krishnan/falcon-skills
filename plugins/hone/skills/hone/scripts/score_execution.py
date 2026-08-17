@@ -21,7 +21,12 @@ from pathlib import Path
 # present-but-null fields (required_present, step_index) crashed a whole test
 # into a fabricated 0.0; `get(..., expected=T)` treats an explicit JSON null,
 # and a wrong-typed value, as absent, as the validators already do.
-from hone_common import DIMENSION_FLOOR, extract_results, get as typed_get
+from hone_common import (
+    DIMENSION_FLOOR,
+    SANDBOX_HEADER,
+    extract_results,
+    get as typed_get,
+)
 
 EPSILON = 1e-6
 
@@ -39,19 +44,41 @@ NEGATION_CUES = re.compile(
 # How far back to look for a negation cue preceding a forbidden-phrase match.
 NEGATION_WINDOW = 40
 
+# Clause boundaries inside a sentence. A negation only excuses the clause it
+# governs: "Skipping the audit and proceeding to Phase 2" negates the audit,
+# not the forward progress that follows the conjunction. Without this the
+# lookback credited any cue sharing a sentence with the forbidden phrase, so
+# a run that announced the forbidden behaviour verbatim scored 1.0.
+# "or" is deliberately absent: it coordinates the *scope* of a single denial
+# ("I did not run the audit or proceed to Phase 2") far more often than it
+# starts a new positive clause.
+CLAUSE_BREAK_RE = re.compile(
+    r",|;|\bthen\b|\band\b|\bbut\b|\bbefore\b|\bafter\b|\bwhile\b",
+    re.IGNORECASE,
+)
+
+# A tail that is nothing but a conjunction is still inside the denial
+# ("I did not run the audit, or proceed to Phase 2"), so the clause split is
+# discarded when it leaves no clause behind.
+EMPTY_CLAUSE_RE = re.compile(r"^[\s,]*(?:or|and|nor)?\s*$", re.IGNORECASE)
+
 
 def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
     """True when `phrase` appears in `text` outside a negating context.
 
-    The lookback window stops at the nearest sentence break so a denial in one
-    sentence cannot excuse a plain occurrence in the next.
+    The lookback window stops at the nearest sentence break, then at the
+    nearest clause break inside that sentence, so a denial only excuses the
+    clause it actually governs.
     """
     for match in re.finditer(re.escape(phrase), text, re.IGNORECASE):
         window = text[max(0, match.start() - NEGATION_WINDOW) : match.start()]
         for breaker in (".", "!", "?", ";", "\n"):
-            head, sep, tail = window.rpartition(breaker)
+            _head, sep, tail = window.rpartition(breaker)
             if sep:
                 window = tail
+        clause_breaks = list(CLAUSE_BREAK_RE.finditer(window))
+        if clause_breaks:
+            window = window[clause_breaks[-1].end() :]
         if not NEGATION_CUES.search(window):
             return True
     return False
@@ -78,6 +105,11 @@ STEP_PATTERNS = [
     re.compile(r"^#{2,4}\s+Part\s+[A-Z]", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^#{2,4}[ \t]+\d+\.[ \t]+\S.*$", re.MULTILINE),
 ]
+
+# Ceiling for gate evidence that was only quoted in prose (an echoed template
+# is indistinguishable from a real gate event), matching the legacy
+# keyword-counting cap.
+ECHOED_GATE_CAP = 0.7
 
 # Gate/validation keywords
 GATE_KEYWORDS = re.compile(
@@ -230,7 +262,10 @@ FM_MARKERS = ("failure condition", "failure_condition")
 # Read-only tools that indicate knowledge extraction (no side effects)
 READ_ONLY_TOOLS = frozenset({"Read", "Grep", "Glob"})
 # Markers in runner_context that explicitly flag knowledge extraction
-KE_MARKERS = ("knowledge extraction", "do not invoke")
+# "do not invoke" is deliberately NOT a marker: side_effect_guard.py injects
+# "Do NOT invoke these skills for real" into runner_context, which routed every
+# sandboxed test to the knowledge-extraction profile.
+KE_MARKERS = ("knowledge extraction",)
 
 
 def map_grade(score: float) -> str:
@@ -253,6 +288,21 @@ def _test_input_dict(test_result: dict) -> dict:
     return test_input if isinstance(test_input, dict) else {}
 
 
+def _runner_context(test_result: dict, *, authored_only: bool = True) -> str:
+    """Lowercased runner_context, by default with injected guard text removed.
+
+    side_effect_guard.py appends a SAFETY SANDBOX block to runner_context, and
+    that block contains ordinary English ("Do NOT invoke these skills for
+    real...") that the profile heuristics were matching on. A header the
+    pipeline injects must never be able to flip a test's profile, so every
+    heuristic except the sandbox detector itself reads the *authored* prefix.
+    """
+    raw = typed_get(_test_input_dict(test_result), "runner_context", "", expected=str)
+    if authored_only:
+        raw = raw.split(SANDBOX_HEADER)[0]
+    return raw.lower()
+
+
 def _is_knowledge_extraction(test_result: dict) -> bool:
     """Detect knowledge extraction tests vs execution tests.
 
@@ -262,10 +312,10 @@ def _is_knowledge_extraction(test_result: dict) -> bool:
     inapplicable to these tests.
 
     Detection uses two signals that must agree:
-    1. runner_context contains explicit KE markers
+    1. authored runner_context contains explicit KE markers
     2. Tool usage is read-only (no Skill/Write/Edit/Bash)
     """
-    runner_context = _test_input_dict(test_result).get("runner_context", "").lower()
+    runner_context = _runner_context(test_result)
     has_ke_marker = any(marker in runner_context for marker in KE_MARKERS)
 
     timeline = test_result.get("execution_timeline") or []
@@ -294,15 +344,17 @@ def _is_error_handling_test(test_result: dict) -> bool:
     test_input = _test_input_dict(test_result)
 
     # Signal 1: test category (normalize hyphen/underscore; the schema enum's
-    # canonical spelling is "error_handling")
-    category = test_input.get("category", "").lower().replace("-", "_")
+    # canonical spelling is "error_handling"). typed_get, not dict.get: an
+    # explicit `"category": null` is a real runner shape and .lower() on None
+    # crashed the whole test into a fabricated 0.0.
+    category = typed_get(test_input, "category", "", expected=str).lower().replace("-", "_")
     if category == "error_handling":
         return True
 
     # Signal 2: required_absent contains workflow progression keywords.
     # required_present/required_absent are top-level test-case fields per the
     # criteria schema (validate_criteria_schema.py) — the canonical location.
-    required_absent = test_input.get("required_absent", [])
+    required_absent = typed_get(test_input, "required_absent", [], expected=list)
     workflow_blockers = {
         "generating eval criteria",
         "launching eval runner",
@@ -318,8 +370,8 @@ def _is_error_handling_test(test_result: dict) -> bool:
     if blocker_count >= 2:
         return True
 
-    # Signal 3: runner_context mentions error/validation handling
-    runner_context = test_input.get("runner_context", "").lower()
+    # Signal 3: authored runner_context mentions error/validation handling
+    runner_context = _runner_context(test_result)
     if any(marker in runner_context for marker in EH_MARKERS):
         return True
 
@@ -337,13 +389,11 @@ def _is_failure_mode(test_result: dict) -> bool:
     state_persistence, output_structure) are inapplicable — the correct
     behavior is to detect and halt, not complete the workflow.
 
-    Detection: check runner_context for FAILURE CONDITION markers.
+    Detection: check the authored runner_context for FAILURE CONDITION markers.
     The explicit test_profile field is checked first in _resolve_test_profile
     and takes precedence; this is only the heuristic fallback.
     """
-    test_input = _test_input_dict(test_result)
-    runner_context = test_input.get("runner_context", "").lower()
-    return any(marker in runner_context for marker in FM_MARKERS)
+    return any(marker in _runner_context(test_result) for marker in FM_MARKERS)
 
 
 def _is_side_effect_guarded(test_result: dict) -> bool:
@@ -363,12 +413,14 @@ def _is_side_effect_guarded(test_result: dict) -> bool:
     test_input = _test_input_dict(test_result)
 
     # Signal 1: explicit test_profile field (preferred, typed)
-    profile = test_input.get("test_profile", "").lower()
+    profile = typed_get(test_input, "test_profile", "", expected=str).lower()
     if profile == "side_effect_guarded":
         return True
 
-    # Signal 2: SAFETY SANDBOX markers in runner_context (fallback, string-matching)
-    runner_context = test_input.get("runner_context", "").lower()
+    # Signal 2: SAFETY SANDBOX markers in runner_context (fallback,
+    # string-matching). This is the one detector that reads the injected
+    # block, because the injected block is exactly its evidence.
+    runner_context = _runner_context(test_result, authored_only=False)
     return any(marker in runner_context for marker in SEG_MARKERS)
 
 
@@ -435,7 +487,7 @@ def _get_text_entries(timeline: list[dict]) -> list[dict]:
 
 
 def score_workflow_sequence(
-    timeline: list[dict], artifact_content: str
+    timeline: list[dict], artifact_content: str, agent_response: str = ""
 ) -> dict[str, float | str]:
     """Score how well the execution follows the artifact's step sequence.
 
@@ -448,12 +500,17 @@ def score_workflow_sequence(
     if not steps:
         return {"score": 1.0, "evidence": "No steps detected in artifact, default 1.0"}
 
-    if not timeline:
-        return {"score": 0.0, "evidence": "Empty execution timeline"}
+    # The narrative lives in agent_response for runners that put tool arguments
+    # under tool_input and never populate `content`; reading the timeline alone
+    # scored 0/N on runs that named every step in order, and workflow_sequence
+    # is the critical dimension, so the whole test was capped to an F.
+    parts = [entry.get("content", "") for entry in timeline if entry.get("content")]
+    if agent_response:
+        parts.append(agent_response)
+    text_content = " ".join(parts)
 
-    text_content = " ".join(
-        entry.get("content", "") for entry in timeline if entry.get("content")
-    )
+    if not text_content.strip():
+        return {"score": 0.0, "evidence": "No execution text (empty timeline and response)"}
 
     steps_found_in_order = 0
     last_pos = -1
@@ -477,13 +534,17 @@ def score_workflow_sequence(
 
 def _extract_gate_events(
     timeline: list[dict], agent_response: str = ""
-) -> list[dict]:
+) -> tuple[list[dict], str]:
     """Extract gate events from state file writes or agent response text.
 
     Primary: Write/Edit tool calls to state files with a 'gates' array in content.
     Fallback: scan agent_response for inline gate event JSON (captures simulation mode
     where Write content is not stored in tool_input).
-    Returns the most complete gates[] array found.
+
+    Returns (gates, source) where source is "state_file", "response_text", or
+    "" when nothing was found. The source matters: a gate blob found in prose
+    is indistinguishable from a state-file template the executor merely quoted,
+    so the caller scores it as weaker evidence than an actual write.
     """
     # Primary: tool_input.content on Write/Edit calls to state files
     tool_uses = _get_tool_uses(timeline)
@@ -502,7 +563,7 @@ def _extract_gate_events(
         try:
             data = json.loads(content)
             if "gates" in data and isinstance(data["gates"], list):
-                return data["gates"]
+                return data["gates"], "state_file"
         except (json.JSONDecodeError, TypeError):
             pass
 
@@ -523,9 +584,9 @@ def _extract_gate_events(
             except (json.JSONDecodeError, TypeError):
                 pass
         if candidates:
-            return candidates
+            return candidates, "response_text"
 
-    return []
+    return [], ""
 
 
 def _is_well_formed_gate(gate: dict) -> bool:
@@ -555,7 +616,7 @@ def score_gate_compliance(
     Legacy score is capped at 0.7 to incentivize migration to structured events.
     """
     # Primary path: structured gate events (timeline writes or inline in agent_response)
-    gates = _extract_gate_events(timeline, agent_response)
+    gates, gate_source = _extract_gate_events(timeline, agent_response)
 
     if gates:
         total = len(gates)
@@ -584,6 +645,18 @@ def score_gate_compliance(
             evidence = f"All {total} gate(s) compliant with structured events"
             if expected_fail:
                 evidence += f" ({expected_fail} expected-fail)"
+            if gate_source == "response_text":
+                # A gate blob quoted in prose is not proof the gate ran: an
+                # executor that echoed the state-file template from the skill
+                # it was asked to describe produces byte-identical evidence.
+                # Same rationale, and same ceiling, as the legacy keyword path.
+                return {
+                    "score": ECHOED_GATE_CAP,
+                    "evidence": (
+                        f"{evidence} (quoted in response, not written to a state "
+                        "file; capped pending a real write)"
+                    ),
+                }
             return {"score": 1.0, "evidence": evidence}
 
         malformed = total - well_formed
@@ -593,6 +666,8 @@ def score_gate_compliance(
         # well_formed/total factor squared the penalty: 1 good + 1 malformed
         # scored 0.25 instead of 0.5.
         score = compliant / total
+        if gate_source == "response_text":
+            score = min(score, ECHOED_GATE_CAP)
         evidence = f"{compliant}/{total} gate(s) compliant"
         if expected_fail:
             evidence += f" ({expected_fail} expected-fail)"
@@ -935,6 +1010,20 @@ def score_early_termination(timeline: list[dict]) -> dict[str, float | str]:
     tool_uses = _get_tool_uses(timeline)
     tool_count = len(tool_uses)
 
+    # No tool calls at all is not a halt, it is an absence of observation: a
+    # correct early stop and an executor that never ran produce the same empty
+    # timeline. Crediting 1.0 here graded "nothing happened" as "handled the
+    # bad input well". The caller marks such tests inconclusive; the score
+    # below is recorded as evidence only.
+    if tool_count == 0:
+        return {
+            "score": 0.0,
+            "evidence": (
+                "0 tool calls: no evidence the executor examined the input "
+                "(cannot distinguish a correct halt from no execution)"
+            ),
+        }
+
     # Check for workflow-progression indicators (should be absent)
     # `or {}` / `or ""`: tool_use entries can carry explicit nulls.
     wrote_state = any(
@@ -1272,7 +1361,7 @@ def _resolve_test_profile(
     test_input = _test_input_dict(test_result)
 
     # Prefer explicit test_profile field in test_input (set by eval runner v2+)
-    profile = test_input.get("test_profile", "")
+    profile = typed_get(test_input, "test_profile", "", expected=str)
     if profile in PROFILE_WEIGHT_MAP:
         return profile
 
@@ -1280,18 +1369,21 @@ def _resolve_test_profile(
     # that omits test_profile; the original eval_criteria.json has the authoritative value)
     if criteria_index:
         test_id = test_result.get("test_id", "")
-        crit = criteria_index.get(test_id, {})
-        profile = crit.get("test_profile", "")
+        crit = typed_get(criteria_index, test_id, {}, expected=dict)
+        profile = typed_get(crit, "test_profile", "", expected=str)
         if profile in PROFILE_WEIGHT_MAP:
             return profile
 
-    # Last resort: heuristic detection (no criteria_index available)
+    # Last resort: heuristic detection (no criteria_index available). The
+    # sandbox detector runs first: its evidence is a header the pipeline
+    # injected, so a guarded test must never be claimed by a heuristic that
+    # is reading that same injected text.
+    if _is_side_effect_guarded(test_result):
+        return "side_effect_guarded"
     if _is_knowledge_extraction(test_result):
         return "knowledge_extraction"
     if _is_error_handling_test(test_result):
         return "error_handling"
-    if _is_side_effect_guarded(test_result):
-        return "side_effect_guarded"
     if _is_failure_mode(test_result):
         return "failure_mode"
 
@@ -1359,19 +1451,20 @@ def _score_single_test(
         dimensions: dict[str, dict] = {}
 
         if is_ke:
-            # Knowledge extraction: LLM judge handles semantic evaluation.
-            # Deterministic scoring only checks for errors (typically 1.0).
+            # Knowledge extraction asks "is this answer right?", which no
+            # deterministic dimension here measures. The profile's only
+            # dimension is error_handling, which is 1.0 whenever nothing
+            # errored — that reports "did not crash" as "answered well", and a
+            # one-Read run replying "asdf" scored a composite 1.0 that
+            # resolve_score(prefer_deterministic=True) then preferred over the
+            # judge's 0.15. KE composites are therefore always inconclusive:
+            # the dimension stays visible as evidence, and semantic judgment
+            # belongs to the LLM judge until a KE-specific deterministic
+            # dimension exists to score.
             dimensions["error_handling"] = score_error_handling(timeline)
-            active_weights = dict(KNOWLEDGE_EXTRACTION_WEIGHTS)
-            # One dimension at weight 1.0, and score_error_handling([]) is a
-            # constant 1.0 — the same shape the empty-timeline branch below is
-            # marked inconclusive for. Without this an empty answer scored a
-            # composite 1.0, which resolve_score then preferred over a judge
-            # who had scored the same answer 0.15.
-            if not timeline or not agent_response.strip():
-                partial_scoring = True
-                inconclusive = True
-                active_weights = {}
+            partial_scoring = True
+            inconclusive = True
+            active_weights = {}
         elif is_eh:
             # Error-handling: score on early termination and user communication.
             # Execution dimensions (workflow, state) are meaningless here
@@ -1382,6 +1475,14 @@ def _score_single_test(
                 agent_response, timeline, required_present, required_absent
             )
             active_weights = dict(ERROR_HANDLING_WEIGHTS)
+            # An executor that made no tool calls never demonstrated a halt:
+            # early_termination and quality_checks both default high on an
+            # empty timeline, so generic prose about doing nothing scored
+            # 0.886 and was reported as a pass.
+            if not _get_tool_uses(timeline):
+                partial_scoring = True
+                inconclusive = True
+                active_weights = {}
         elif is_seg:
             # Side-effect guarded: executor was told to simulate dangerous
             # commands. Execution dimensions (workflow_sequence, state_persistence)
@@ -1398,6 +1499,14 @@ def _score_single_test(
             dimensions["verify_actions"] = score_verify_actions(timeline)
             dimensions["research_first"] = score_research_first(timeline)
             active_weights = dict(SIDE_EFFECT_GUARDED_WEIGHTS)
+            # Every dimension in this profile defaults high in the absence of
+            # evidence (no errors, no writes to verify, no assertions), so a
+            # run with zero tool calls scored a perfect 1.0 off one narrating
+            # paragraph. No execution, no composite.
+            if not _get_tool_uses(timeline):
+                partial_scoring = True
+                inconclusive = True
+                active_weights = {}
         elif is_fm:
             # Failure-mode: a specific failure condition was injected (corrupt
             # state, handoff validation error, compaction, regression). Score
@@ -1413,9 +1522,14 @@ def _score_single_test(
                 agent_response, timeline, required_present, required_absent
             )
             active_weights = dict(FAILURE_MODE_WEIGHTS)
+            # Same absence-defaults-high shape as the guarded profile above.
+            if not _get_tool_uses(timeline):
+                partial_scoring = True
+                inconclusive = True
+                active_weights = {}
         elif timeline:
             dimensions["workflow_sequence"] = score_workflow_sequence(
-                timeline, artifact_content
+                timeline, artifact_content, agent_response
             )
             dimensions["gate_compliance"] = score_gate_compliance(
                 timeline, agent_response, artifact_content
@@ -1536,9 +1650,12 @@ def score_from_results(
         with open(results_path) as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
+        # Unreadable results file: nothing ran, so nothing was measured.
+        # 0.0/F claimed a catastrophic artifact where there is no observation
+        # at all; the published contract is composite_score null / INCONCLUSIVE.
         return {
-            "composite_score": 0.0,
-            "grade": "F",
+            "composite_score": None,
+            "grade": "INCONCLUSIVE",
             "per_test": [],
             "aggregate_dimensions": {},
             "metadata": {"error": str(exc)},
@@ -1548,7 +1665,10 @@ def score_from_results(
     # alias) — shared with analyze_results via hone_common so the two scripts
     # cannot disagree about which files contain tests. Fail loud on schema
     # mismatch instead of silently returning 0.0/F: a perfect artifact with the
-    # wrong top-level key should not look like a catastrophic failure.
+    # wrong top-level key should not look like a catastrophic failure. All
+    # three unscorable shapes (empty_results, schema_mismatch, empty_file)
+    # return composite_score null / INCONCLUSIVE, matching
+    # references/phase1-evaluation.md and the all-inconclusive path below.
     results, results_key_used = extract_results(data)
 
     if not results:
@@ -1569,8 +1689,8 @@ def score_from_results(
             error_reason = "empty_file"
             hint = "File is empty or has no top-level keys."
         return {
-            "composite_score": 0.0,
-            "grade": "F",
+            "composite_score": None,
+            "grade": "INCONCLUSIVE",
             "per_test": [],
             "aggregate_dimensions": {},
             "metadata": {
@@ -1594,9 +1714,12 @@ def score_from_results(
                 f"WARNING: could not score test '{test_id}': {type(exc).__name__}: {exc}",
                 file=sys.stderr,
             )
+            # composite None, not 0.0: an exception inside the scorer measured
+            # nothing. A numeric 0.0 was averaged into the run composite and
+            # triaged as a genuine failure of the artifact.
             scored = {
                 "test_id": test_id,
-                "composite": 0.0,
+                "composite": None,
                 "dimensions": {},
                 "partial_scoring": True,
                 "status": "score_error",

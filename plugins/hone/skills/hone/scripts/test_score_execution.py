@@ -587,8 +587,10 @@ class TestEndToEnd(unittest.TestCase):
 
         try:
             output = score_from_results(path, "skill")
-            self.assertEqual(output["composite_score"], 0.0)
-            self.assertEqual(output["grade"], "F")
+            # Nothing ran, so nothing was measured: null / INCONCLUSIVE, not a
+            # catastrophic 0.0/F (references/phase1-evaluation.md).
+            self.assertIsNone(output["composite_score"])
+            self.assertEqual(output["grade"], "INCONCLUSIVE")
             self.assertEqual(output["metadata"].get("error"), "empty_results")
         finally:
             os.unlink(path)
@@ -639,8 +641,8 @@ class TestEndToEnd(unittest.TestCase):
 
         try:
             output = score_from_results(path, "skill")
-            self.assertEqual(output["composite_score"], 0.0)
-            self.assertEqual(output["grade"], "F")
+            self.assertIsNone(output["composite_score"])
+            self.assertEqual(output["grade"], "INCONCLUSIVE")
             self.assertEqual(output["metadata"]["error"], "schema_mismatch")
             self.assertIn("checks", output["metadata"]["found_keys"])
             self.assertIn("summary", output["metadata"]["found_keys"])
@@ -838,7 +840,7 @@ class TestUserCommunication(unittest.TestCase):
 
 
 class TestKnowledgeExtractionScoring(unittest.TestCase):
-    """Test that KE tests use only error_handling, not voice_compliance."""
+    """KE tests expose error_handling as evidence and never a composite."""
 
     def test_ke_test_no_voice_compliance(self):
         from score_execution import _score_single_test
@@ -859,7 +861,10 @@ class TestKnowledgeExtractionScoring(unittest.TestCase):
         self.assertEqual(scored["test_type"], "knowledge_extraction")
         self.assertNotIn("voice_compliance", scored["dimensions"])
         self.assertIn("error_handling", scored["dimensions"])
-        self.assertEqual(scored["composite"], 1.0)
+        # error_handling is evidence, not a verdict: no deterministic
+        # dimension reads the answer, so there is no composite to report.
+        self.assertIsNone(scored["composite"])
+        self.assertEqual(scored["status"], "inconclusive")
 
 
 class TestErrorHandlingTestScoring(unittest.TestCase):
@@ -1033,8 +1038,11 @@ class TestMalformedTestInput(unittest.TestCase):
                 },
                 {
                     "test_id": "tc_b",
-                    "agent_response": "## Report\nDone.",
-                    "execution_timeline": [],
+                    "agent_response": "## Report\nInvalid input; stopping.",
+                    "execution_timeline": [
+                        {"step_type": "tool_use", "tool_name": "Read", "step_index": 0},
+                        {"step_type": "text", "content": "Invalid input; stopping."},
+                    ],
                     "test_input": {"test_profile": "error_handling"},
                 },
             ]
@@ -1050,6 +1058,27 @@ class TestMalformedTestInput(unittest.TestCase):
         self.assertIsInstance(scored["composite_score"], float)
 
 
+def _score_written_gates(gates: list[dict]) -> dict:
+    """Score gates that were actually written to a state file.
+
+    The authoritative evidence path. Gate JSON found only in prose is scored
+    through the capped fallback (see TestEchoedGateTemplate), because an
+    executor quoting a template produces byte-identical text.
+    """
+    from score_execution import score_gate_compliance
+
+    entry = {
+        "step_type": "tool_use",
+        "tool_name": "Write",
+        "tool_input": {
+            "file_path": "/tmp/workflow-state.json",
+            "content": json.dumps({"gates": gates}),
+        },
+        "step_index": 0,
+    }
+    return score_gate_compliance([entry], "")
+
+
 class TestGateComplianceFailSemantics(unittest.TestCase):
     """A gate that correctly reports failure is compliant (emission, not outcome)."""
 
@@ -1057,51 +1086,39 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
 
     def test_terminal_fail_is_compliant(self):
-        from score_execution import score_gate_compliance
-
-        response = json.dumps(self._gate("phase3_exit", "fail"))
-        result = score_gate_compliance([], response)
+        result = _score_written_gates([self._gate("phase3_exit", "fail")])
         self.assertEqual(result["score"], 1.0)
         self.assertIn("expected-fail", result["evidence"])
 
     def test_fail_then_pass_same_step_is_compliant(self):
-        from score_execution import score_gate_compliance
-
-        response = (
-            json.dumps(self._gate("handoff_eval_results", "fail"))
-            + "\n"
-            + json.dumps(self._gate("handoff_eval_results", "pass"))
+        result = _score_written_gates(
+            [
+                self._gate("handoff_eval_results", "fail"),
+                self._gate("handoff_eval_results", "pass"),
+            ]
         )
-        result = score_gate_compliance([], response)
         self.assertEqual(result["score"], 1.0)
 
     def test_fail_then_unrelated_progress_is_not_compliant(self):
-        from score_execution import score_gate_compliance
-
-        response = (
-            json.dumps(self._gate("phase1_to_phase2", "fail"))
-            + "\n"
-            + json.dumps(self._gate("phase2_to_phase3", "pass"))
+        result = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "fail"),
+                self._gate("phase2_to_phase3", "pass"),
+            ]
         )
-        result = score_gate_compliance([], response)
         self.assertLess(result["score"], 1.0)
 
     def test_all_pass_still_scores_one(self):
-        from score_execution import score_gate_compliance
-
-        response = (
-            json.dumps(self._gate("phase1_to_phase2", "pass"))
-            + "\n"
-            + json.dumps(self._gate("workflow_exit", "pass"))
+        result = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "pass"),
+                self._gate("workflow_exit", "pass"),
+            ]
         )
-        result = score_gate_compliance([], response)
         self.assertEqual(result["score"], 1.0)
 
     def test_invalid_result_value_is_malformed(self):
-        from score_execution import score_gate_compliance
-
-        response = json.dumps(self._gate("phase1_to_phase2", "enter_phase2"))
-        result = score_gate_compliance([], response)
+        result = _score_written_gates([self._gate("phase1_to_phase2", "enter_phase2")])
         self.assertLess(result["score"], 1.0)
 
 
@@ -1227,7 +1244,16 @@ class TestEmptyTimelineInconclusive(unittest.TestCase):
                 {"test_id": "T1", "execution_timeline": [], "agent_response": "bad"},
                 {
                     "test_id": "T2",
-                    "execution_timeline": [],
+                    # A real halt shows tool calls: the executor looked at the
+                    # input and stopped. An empty timeline is inconclusive for
+                    # error_handling too.
+                    "execution_timeline": [
+                        {"step_type": "tool_use", "tool_name": "Read", "step_index": 0},
+                        {
+                            "step_type": "text",
+                            "content": "Invalid input. Which file should I scan?",
+                        },
+                    ],
                     "agent_response": "Invalid input. Which file should I scan?",
                     "test_input": {"test_profile": "error_handling"},
                 },
@@ -1253,25 +1279,20 @@ class TestGateComplianceSinglePenalty(unittest.TestCase):
     def _gate(self, step, result):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
 
-    def test_one_good_one_malformed_scores_half(self):
-        from score_execution import score_gate_compliance
+    def _score(self, gates):
+        return _score_written_gates(gates)
 
-        response = (
-            json.dumps(self._gate("a", "pass"))
-            + "\n"
-            + json.dumps(self._gate("b", "enter_phase2"))
+    def test_one_good_one_malformed_scores_half(self):
+        result = self._score(
+            [self._gate("a", "pass"), self._gate("b", "enter_phase2")]
         )
-        result = score_gate_compliance([], response)
         self.assertEqual(result["score"], 0.5)
 
     def test_three_good_one_malformed_scores_three_quarters(self):
-        from score_execution import score_gate_compliance
-
         gates = [self._gate(s, "pass") for s in ("a", "b", "c")]
         # Invalid result value: extracted as a gate event but malformed.
         gates.append(self._gate("d", "maybe"))
-        response = "\n".join(json.dumps(g) for g in gates)
-        result = score_gate_compliance([], response)
+        result = self._score(gates)
         self.assertEqual(result["score"], 0.75)
 
 
@@ -1345,7 +1366,14 @@ class TestScoringEvidenceIntegrity(unittest.TestCase):
         self.assertEqual(result["status"], "inconclusive")
         self.assertTrue(result["partial_scoring"])
 
-    def test_knowledge_extraction_with_evidence_still_scores(self):
+    def test_knowledge_extraction_with_evidence_is_still_inconclusive(self):
+        """Evidence of activity is not evidence of a correct answer.
+
+        The KE profile's only dimension is error_handling, which is 1.0
+        whenever nothing errored. Scoring a composite off it reported "did not
+        crash" as "answered well", so one Read plus any prose scored 1.0 and
+        was preferred over the judge. The dimension stays visible as evidence.
+        """
         from score_execution import _score_single_test
 
         result = _score_single_test(
@@ -1360,8 +1388,29 @@ class TestScoringEvidenceIntegrity(unittest.TestCase):
             "skill",
             "",
         )
-        self.assertIsNotNone(result["composite"])
-        self.assertNotIn("status", result)
+        self.assertIsNone(result["composite"])
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertIn("error_handling", result["dimensions"])
+
+    def test_knowledge_extraction_via_criteria_index_is_inconclusive(self):
+        """The reported bypass: profile arrives through criteria_index."""
+        from score_execution import _score_single_test
+
+        result = _score_single_test(
+            {
+                "test_id": "KE-A",
+                "agent_response": "asdf",
+                "execution_timeline": [
+                    {"step_type": "tool_use", "tool_name": "Read", "step_index": 0}
+                ],
+            },
+            "skill",
+            "",
+            {"KE-A": {"test_profile": "knowledge_extraction"}},
+        )
+        self.assertNotEqual(result["composite"], 1.0)
+        self.assertIsNone(result["composite"])
+        self.assertEqual(result["status"], "inconclusive")
 
     # --- tool_name / tool alias, applied consistently ---
 
@@ -1500,6 +1549,346 @@ class TestScoringEvidenceIntegrity(unittest.TestCase):
         result = score_from_results(path, "skill", "")
         self.assertEqual(len(result["per_test"]), 1)
         self.assertNotIn("error", result["metadata"])
+
+
+class TestInjectedSandboxHeaderCannotSetProfile(unittest.TestCase):
+    """A header the pipeline injects must not decide the test's profile."""
+
+    def _guarded_result(self) -> dict:
+        from hone_common import SANDBOX_HEADER
+
+        context = (
+            "Run the skill end to end.\n\n"
+            f"{SANDBOX_HEADER}\n"
+            "The skill being evaluated has real-world side effects.\n"
+            "Do NOT invoke these skills for real. Instead, simulate success:\n"
+            '  /some-skill → simulate: "/some-skill completed successfully"'
+        )
+        return {
+            "test_id": "guarded",
+            "agent_response": "I simulated the skill.",
+            "execution_timeline": [
+                {"step_type": "tool_use", "tool_name": "Read", "step_index": 0}
+            ],
+            "test_input": {"runner_context": context},
+        }
+
+    def test_guard_banner_does_not_route_to_knowledge_extraction(self):
+        from score_execution import _resolve_test_profile
+
+        self.assertEqual(
+            _resolve_test_profile(self._guarded_result()), "side_effect_guarded"
+        )
+
+    def test_do_not_invoke_is_not_a_ke_marker(self):
+        import score_execution
+
+        self.assertNotIn("do not invoke", score_execution.KE_MARKERS)
+
+    def test_guarded_test_is_not_scored_as_knowledge_extraction(self):
+        from score_execution import _score_single_test
+
+        scored = _score_single_test(self._guarded_result(), "skill", "")
+        self.assertEqual(scored["test_type"], "side_effect_guarded")
+        self.assertNotEqual(scored["composite"], 1.0)
+
+    def test_authored_ke_marker_still_routes_to_ke(self):
+        from score_execution import _resolve_test_profile
+
+        result = {
+            "test_id": "ke",
+            "execution_timeline": [
+                {"step_type": "tool_use", "tool_name": "Read", "step_index": 0}
+            ],
+            "test_input": {
+                "runner_context": "This is a knowledge extraction task about the file."
+            },
+        }
+        self.assertEqual(_resolve_test_profile(result), "knowledge_extraction")
+
+
+class TestWorkflowSequenceReadsAgentResponse(unittest.TestCase):
+    """The narrative lives in agent_response on tool_input-shaped runners."""
+
+    ARTIFACT = "## Step 1: Read\ntext\n## Step 2: Write\ntext\n## Step 3: Report\n"
+
+    def test_steps_named_in_response_count_as_in_order(self):
+        from score_execution import score_workflow_sequence
+
+        timeline = [
+            {
+                "step_type": "tool_use",
+                "tool_name": "Read",
+                "tool_input": {"file_path": "/tmp/x"},
+                "step_index": 0,
+            },
+            {
+                "step_type": "tool_use",
+                "tool_name": "Write",
+                "tool_input": {"file_path": "/tmp/y"},
+                "step_index": 1,
+            },
+        ]
+        response = (
+            "I ran Step 1 Read, then Step 2 Write, then Step 3 Report. "
+            "All gates passed."
+        )
+        result = score_workflow_sequence(timeline, self.ARTIFACT, response)
+        self.assertEqual(result["score"], 1.0)
+
+    def test_no_timeline_and_no_response_scores_zero(self):
+        from score_execution import score_workflow_sequence
+
+        result = score_workflow_sequence([], self.ARTIFACT, "")
+        self.assertEqual(result["score"], 0.0)
+
+
+class TestRequiredAbsentClauseScoping(unittest.TestCase):
+    """A negation only excuses the clause it governs."""
+
+    def test_conjunction_after_denial_does_not_excuse_forward_progress(self):
+        from score_execution import _has_unnegated_occurrence
+
+        combined = (
+            "I could not find the state file. Skipping the audit and "
+            "proceeding to Phase 2 now."
+        )
+        self.assertTrue(
+            _has_unnegated_occurrence("proceeding to Phase 2", combined)
+        )
+
+    def test_violation_scores_zero_not_one(self):
+        from score_execution import score_quality_checks
+
+        combined = (
+            "I could not find the state file. Skipping the audit and "
+            "proceeding to Phase 2 now."
+        )
+        result = score_quality_checks(combined, [], [], ["proceeding to Phase 2"])
+        self.assertEqual(result["score"], 0.0)
+
+    def test_direct_denial_is_still_negated(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(
+            _has_unnegated_occurrence(
+                "run the structural audit",
+                "This step does NOT run the structural audit.",
+            )
+        )
+
+    def test_coordinated_denial_is_still_negated(self):
+        """"not A or B" scopes one denial across both, so "or" is not a break."""
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(
+            _has_unnegated_occurrence(
+                "proceed to Phase 2",
+                "I did not run the audit or proceed to Phase 2.",
+            )
+        )
+
+
+class TestNullTestInputFields(unittest.TestCase):
+    """An explicit null in test_input must not crash a test into a 0.0."""
+
+    ARTIFACT = "## Step 1: Read\ntext\n## Step 2: Report\n"
+
+    def test_each_null_field_still_scores(self):
+        from score_execution import _score_single_test
+
+        for field in ("runner_context", "category", "required_absent", "test_profile"):
+            with self.subTest(field=field):
+                scored = _score_single_test(
+                    {
+                        "test_id": "n",
+                        "agent_response": "Step 1 done. Step 2 done.",
+                        "execution_timeline": [
+                            {
+                                "step_type": "tool_use",
+                                "tool_name": "Read",
+                                "step_index": 0,
+                            }
+                        ],
+                        "test_input": {field: None},
+                    },
+                    "skill",
+                    self.ARTIFACT,
+                )
+                self.assertIsNotNone(scored["composite"])
+                self.assertNotIn("status", scored)
+
+
+class TestScoreErrorIsInconclusive(unittest.TestCase):
+    """An exception inside the scorer measured nothing."""
+
+    def _run(self, tmp: str) -> dict:
+        from score_execution import score_from_results
+
+        results = {
+            "results": [
+                {
+                    "test_id": "good",
+                    "agent_response": "Step 1 done.",
+                    "execution_timeline": [
+                        {"step_type": "tool_use", "tool_name": "Read", "step_index": 0}
+                    ],
+                },
+                # execution_timeline as an object, not a list: crashes the
+                # per-test scorer, which the run-level handler catches.
+                {
+                    "test_id": "boom",
+                    "agent_response": "x",
+                    "execution_timeline": {"oops": 1},
+                },
+            ]
+        }
+        path = os.path.join(tmp, "results.json")
+        with open(path, "w") as handle:
+            json.dump(results, handle)
+        output = score_from_results(path, "skill", "## Step 1: Read\n")
+        with open(os.path.join(tmp, "deterministic_scores.json"), "w") as handle:
+            json.dump(output, handle)
+        return output
+
+    def test_crashed_test_has_no_composite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = self._run(tmp)
+        crashed = next(t for t in output["per_test"] if t["test_id"] == "boom")
+        self.assertIsNone(crashed["composite"])
+        self.assertEqual(crashed["status"], "score_error")
+
+    def test_crashed_test_is_excluded_from_the_run_composite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = self._run(tmp)
+        good = next(t for t in output["per_test"] if t["test_id"] == "good")
+        self.assertEqual(output["composite_score"], good["composite"])
+
+    def test_load_inconclusive_ids_recognises_score_error(self):
+        from hone_common import load_inconclusive_ids
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._run(tmp)
+            ids = load_inconclusive_ids(os.path.join(tmp, "deterministic_scores.json"))
+        self.assertIn("boom", ids)
+
+
+class TestEchoedGateTemplate(unittest.TestCase):
+    """A gate blob quoted in prose is weaker evidence than a state-file write."""
+
+    RESPONSE = (
+        "I would record the gate as "
+        '{"step": "phase1_evaluate", "judge": "self", "result": "pass"} '
+        "in the state file."
+    )
+
+    def test_quoted_gate_does_not_score_one(self):
+        from score_execution import score_gate_compliance
+
+        result = score_gate_compliance([], self.RESPONSE)
+        self.assertLessEqual(result["score"], 0.7)
+
+    def test_written_gate_still_scores_one(self):
+        result = _score_written_gates(
+            [{"step": "phase1_evaluate", "judge": "self", "result": "pass"}]
+        )
+        self.assertEqual(result["score"], 1.0)
+
+    def test_guarded_run_with_no_tool_calls_is_inconclusive(self):
+        from score_execution import _score_single_test
+
+        scored = _score_single_test(
+            {
+                "test_id": "seg",
+                "agent_response": self.RESPONSE,
+                "execution_timeline": [],
+                "test_input": {"test_profile": "side_effect_guarded"},
+            },
+            "skill",
+            "",
+        )
+        self.assertIsNone(scored["composite"])
+        self.assertEqual(scored["status"], "inconclusive")
+
+    def test_failure_mode_run_with_no_tool_calls_is_inconclusive(self):
+        from score_execution import _score_single_test
+
+        scored = _score_single_test(
+            {
+                "test_id": "fm",
+                "agent_response": self.RESPONSE,
+                "execution_timeline": [],
+                "test_input": {"test_profile": "failure_mode"},
+            },
+            "skill",
+            "",
+        )
+        self.assertIsNone(scored["composite"])
+        self.assertEqual(scored["status"], "inconclusive")
+
+
+class TestEarlyTerminationNeedsEvidence(unittest.TestCase):
+    """"Never ran" and "correctly halted" must not score the same."""
+
+    def test_no_tool_calls_is_not_credited_as_a_halt(self):
+        from score_execution import score_early_termination
+
+        result = score_early_termination([])
+        self.assertNotEqual(result["score"], 1.0)
+        self.assertIn("0 tool calls", result["evidence"])
+
+    def test_error_handling_run_with_no_execution_is_inconclusive(self):
+        from score_execution import _score_single_test
+
+        scored = _score_single_test(
+            {
+                "test_id": "eh",
+                "agent_response": (
+                    "I could not find any error in the request so I did "
+                    "nothing at all."
+                ),
+                "execution_timeline": [],
+                "test_input": {"test_profile": "error_handling"},
+            },
+            "skill",
+            "",
+        )
+        self.assertIsNone(scored["composite"])
+        self.assertEqual(scored["status"], "inconclusive")
+
+    def test_real_halt_with_tool_calls_still_scores(self):
+        from score_execution import score_early_termination
+
+        result = score_early_termination(
+            [{"step_type": "tool_use", "tool_name": "Read", "step_index": 0}]
+        )
+        self.assertEqual(result["score"], 1.0)
+
+
+class TestUnscorableFilesAreInconclusive(unittest.TestCase):
+    """Nothing ran, so nothing was measured: null / INCONCLUSIVE, never 0.0/F."""
+
+    def _score(self, payload) -> dict:
+        from score_execution import score_from_results
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            return score_from_results(path, "skill")
+
+    def test_empty_file(self):
+        output = self._score({})
+        self.assertIsNone(output["composite_score"])
+        self.assertEqual(output["grade"], "INCONCLUSIVE")
+        self.assertEqual(output["metadata"]["error"], "empty_file")
+
+    def test_unreadable_file(self):
+        from score_execution import score_from_results
+
+        output = score_from_results("/nonexistent/results.json", "skill")
+        self.assertIsNone(output["composite_score"])
+        self.assertEqual(output["grade"], "INCONCLUSIVE")
 
 
 if __name__ == "__main__":

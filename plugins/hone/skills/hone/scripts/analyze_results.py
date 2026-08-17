@@ -32,6 +32,28 @@ from hone_common import (
 )
 
 
+def _dict_results(results: list) -> list[dict]:
+    """Drop non-dict entries, warning once per entry.
+
+    score_from_results already tolerates a malformed record and keeps going
+    (score_execution.py, the `isinstance(test_result, dict)` guard). Both
+    scripts read the same file through extract_results, so they must agree
+    about malformed entries too: `result.get(...)` on a bare string aborted
+    triage and analyze with an AttributeError on a file score_execution graded
+    without complaint.
+    """
+    kept = []
+    for entry in results:
+        if isinstance(entry, dict):
+            kept.append(entry)
+        else:
+            print(
+                f"WARNING: skipping non-object result entry: {type(entry).__name__}",
+                file=sys.stderr,
+            )
+    return kept
+
+
 def classify_failure(score: float, all_scores: list[float]) -> str:
     """Deterministic failure classification.
 
@@ -86,6 +108,7 @@ def triage(path: str) -> dict:
     # reading only `results` reported a skill-creator-format file as a zero-test
     # run right after score_execution had graded it a D.
     results, _key = extract_results(data)
+    results = _dict_results(results)
     if not results:
         return {
             "classifications": [],
@@ -156,6 +179,7 @@ def analyze(path: str) -> None:
         sys.exit(2)
 
     results, _key = extract_results(data)
+    results = _dict_results(results)
     summary = data.get("summary", {})
     dims = data.get("dimension_aggregation", {})
 

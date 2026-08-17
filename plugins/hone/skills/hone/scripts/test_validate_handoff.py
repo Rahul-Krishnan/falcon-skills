@@ -882,6 +882,18 @@ class TestStructuralAuditScriptOutputValidates(unittest.TestCase):
         self.assertTrue(audit_rows)
         self.assertTrue(audit_rows[0].valid)
 
+    def test_null_structural_score_validates(self) -> None:
+        """A hook/script whose only scoring pillar is security reports null."""
+        from structural_audit import audit
+
+        output = audit("#!/bin/bash\nexit 0\n", "hook", "some-hook", "standard")
+        self.assertIsNone(output["structural_score"])
+        output["artifact_path"] = "/tmp/some-hook.sh"
+        output["artifact_type"] = "hook"
+
+        result = validate_handoff({"structural_audit": output}, "structural_audit")
+        self.assertTrue(result.valid, f"Errors: {[e.message for e in result.errors]}")
+
 
 class TestRunShapeTable(unittest.TestCase):
     """Both --step and --all consult hone_common's run-shape table."""
