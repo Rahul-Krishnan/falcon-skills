@@ -132,6 +132,20 @@ BANNED_PHRASES = re.compile(
 # Code block fence pattern for stripping
 CODE_BLOCK_PATTERN = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 
+# Error-communication detection for score_user_communication. Plain substring
+# membership let "ask" match inside "task"/"flask" and "stop" inside
+# "backstop", turning ordinary completion prose into evidence of a
+# clarification the executor never asked for. The first two carry the verb's
+# own inflections; the indicator list is anchored at the word start only, so
+# "stopped" and "errors" still match but "backstop" no longer does.
+ASK_VERB_PATTERN = re.compile(r"\bask(?:s|ed|ing)?\b")
+USER_NOUN_PATTERN = re.compile(r"\busers?\b")
+ERROR_INDICATOR_PATTERN = re.compile(
+    r"\b(?:file not found|not found|no files|no uncommitted changes|no changes"
+    r"|empty|too complex|stop|error|cannot|requires|verify the path"
+    r"|missing|invalid|failed|arguments)"
+)
+
 # Patterns for content that should be excluded from voice compliance scoring
 # because it's quoted/referenced material, not the executor's own prose
 BLOCKQUOTE_PATTERN = re.compile(r"^\s*>+\s.*$", re.MULTILINE)
@@ -165,6 +179,14 @@ SKILL_WEIGHTS = {
     "research_first": 0.05,
 }
 
+# No voice_compliance and no parallel_efficiency here, for the reason KE drops
+# voice_compliance: the prose scored is the eval runner agent's, not the
+# artifact's. The execution branch now emits exactly the dimensions its active
+# profile weights, so neither is computed for commands at all. Previously both
+# were emitted and then silently dropped by _renormalize_weights, which put two
+# numbers in `dimensions` and `aggregate_dimensions` that read as if they moved
+# the composite when they could not -- and that Phase 3's "a drop > 0.1 in any
+# dimension flags a regression" rule would still auto-revert on.
 COMMAND_WEIGHTS = {
     "workflow_sequence": 0.226,
     "gate_compliance": 0.186,
@@ -1115,21 +1137,28 @@ def score_user_communication(
         # this branch, a correct empty-state clarification scores 0.0 purely
         # because its message ("No uncommitted changes found. Which files should
         # I scan?") contains none of the error keywords below.
-        asks_user = (
-            "askuserquestion" in response_lower
-            or ("ask" in response_lower and "user" in response_lower)
-            or (
-                "?" in agent_response
-                and any(
-                    kw in response_lower
-                    for kw in (
-                        "which file", "which files", "what file",
-                        "would you like", "what would you like",
-                        "please specify", "please provide",
-                        "let me know which", "tell me which", "should i",
-                    )
-                )
+        # `"ask" in response_lower` matched inside "task"/"tasks"/"asked"/
+        # "flask", and "user" appears in almost any completion prose, so
+        # "Task completed. I ran the full workflow ... the user requested"
+        # scored 0.9 with evidence claiming the executor surfaced a
+        # clarification -- on an error-handling test that exists to catch
+        # exactly that run. Word-boundary the verb, and require it to
+        # co-occur with the question mark, so an assertion about the past
+        # cannot pose as a question about the present.
+        clarification_phrase = any(
+            kw in response_lower
+            for kw in (
+                "which file", "which files", "what file",
+                "would you like", "what would you like",
+                "please specify", "please provide",
+                "let me know which", "tell me which", "should i",
             )
+        )
+        asks_the_user = bool(ASK_VERB_PATTERN.search(response_lower)) and bool(
+            USER_NOUN_PATTERN.search(response_lower)
+        )
+        asks_user = "askuserquestion" in response_lower or (
+            "?" in agent_response and (asks_the_user or clarification_phrase)
         )
         if asks_user:
             return {
@@ -1142,13 +1171,7 @@ def score_user_communication(
 
         # Otherwise: any substantive error- or empty-state report scores 0.7.
         # Must contain error-relevant content, not just step narration.
-        error_indicators = [
-            "file not found", "not found", "no files", "no uncommitted changes",
-            "no changes", "empty", "too complex", "stop", "error",
-            "cannot", "requires", "verify the path",
-            "missing", "invalid", "failed", "cannot proceed", "arguments",
-        ]
-        has_error_content = any(ind in response_lower for ind in error_indicators)
+        has_error_content = bool(ERROR_INDICATOR_PATTERN.search(response_lower))
         if has_error_content and len(agent_response.strip()) > 50:
             return {
                 "score": 0.7,
@@ -1522,33 +1545,46 @@ def _score_single_test(
                 partial_scoring = True
                 inconclusive = True
                 active_weights = {}
-        elif timeline:
+        elif _get_tool_uses(timeline):
+            # Gated on tool calls, not on a non-empty timeline. Every dimension
+            # below except voice_compliance is derived from _get_tool_uses, so a
+            # run with one narrating `text` entry and zero tool calls satisfied
+            # `elif timeline:` and scored 0.7569 with workflow_sequence 1.0 read
+            # straight out of "I would run Step 1, then Step 2" -- conditional
+            # narration of a workflow that never ran. Same guard the EH, SEG and
+            # FM profiles above already apply.
+            weights = SKILL_WEIGHTS if artifact_type == "skill" else COMMAND_WEIGHTS
+
             dimensions["workflow_sequence"] = score_workflow_sequence(
                 timeline, artifact_content, agent_response
             )
             dimensions["gate_compliance"] = score_gate_compliance(
                 timeline, agent_response, artifact_content
             )
-            dimensions["parallel_efficiency"] = score_parallel_efficiency(timeline)
             dimensions["state_persistence"] = score_state_persistence(timeline)
             dimensions["output_structure"] = score_output_structure(
                 agent_response, artifact_content
             )
-            dimensions["voice_compliance"] = score_voice_compliance(agent_response)
             dimensions["error_handling"] = score_error_handling(timeline)
             dimensions["quality_checks"] = score_quality_checks(
                 agent_response, timeline, required_present, required_absent
             )
             dimensions["verify_actions"] = score_verify_actions(timeline)
             dimensions["research_first"] = score_research_first(timeline)
+            # Emit only what this profile weights, so `dimensions` and the
+            # composite's inputs are the same set (see COMMAND_WEIGHTS).
+            if "parallel_efficiency" in weights:
+                dimensions["parallel_efficiency"] = score_parallel_efficiency(timeline)
+            if "voice_compliance" in weights:
+                dimensions["voice_compliance"] = score_voice_compliance(agent_response)
 
-            weights = SKILL_WEIGHTS if artifact_type == "skill" else COMMAND_WEIGHTS
             active_weights = _renormalize_weights(weights, dimensions)
         else:
-            # Empty timeline (simulation mode) has no execution evidence:
-            # error_handling([]) is a constant 1.0, which used to yield
-            # composite 1.0 for arbitrarily bad output. Mark inconclusive;
-            # dimensions stay visible but no composite is manufactured.
+            # No tool calls (empty timeline, or narration only) means no
+            # execution evidence: error_handling([]) is a constant 1.0, which
+            # used to yield composite 1.0 for arbitrarily bad output. Mark
+            # inconclusive; dimensions stay visible but no composite is
+            # manufactured.
             partial_scoring = True
             inconclusive = True
             dimensions["voice_compliance"] = score_voice_compliance(agent_response)
@@ -1569,6 +1605,15 @@ def _score_single_test(
         if duration is not None and perf_budget:
             dimensions["performance"] = score_performance(duration, perf_budget)
         active_weights = _renormalize_weights(HOOK_WEIGHTS, dimensions)
+        # Same absence-defaults-high shape as the skill/command profiles:
+        # trigger_accuracy -> 1.0 "No Bash calls to evaluate", output_structure
+        # -> 1.0 "No expected output sections in artifact", error_handling ->
+        # 1.0 "No errors encountered". A hook test with an empty timeline and an
+        # empty response graded A. No execution, no composite.
+        if not _get_tool_uses(timeline):
+            partial_scoring = True
+            inconclusive = True
+            active_weights = {}
 
     elif artifact_type == "script":
         dimensions = {
@@ -1582,13 +1627,24 @@ def _score_single_test(
         if duration is not None and perf_budget:
             dimensions["performance"] = score_performance(duration, perf_budget)
         active_weights = _renormalize_weights(SCRIPT_WEIGHTS, dimensions)
+        # correctness -> 1.0 "No tool calls to evaluate", plus the same two
+        # absent-evidence defaults as the hook profile above.
+        if not _get_tool_uses(timeline):
+            partial_scoring = True
+            inconclusive = True
+            active_weights = {}
 
     else:
+        # An artifact type this scorer has no profile for was never measured.
+        # composite 0.0 published that non-measurement as a total failure --
+        # the mirror image of the fabricated 1.0s above, and just as false.
         return {
             "test_id": test_result.get("test_id", "unknown"),
-            "composite": 0.0,
+            "composite": None,
             "dimensions": {},
             "partial_scoring": True,
+            "status": "inconclusive",
+            "test_type": "unsupported_artifact_type",
         }
 
     scores = {dim: dim_result["score"] for dim, dim_result in dimensions.items()}
@@ -1606,7 +1662,13 @@ def _score_single_test(
     elif scores:
         composite = compute_composite(scores, active_weights, critical_dim)
     else:
-        composite = 0.0
+        # No dimension scored at all. Every profile above populates at least one,
+        # so this is a guard rather than a live path -- but it must fail the same
+        # way they do. A 0.0 here would report "measured, catastrophic" for a test
+        # nothing was measured on.
+        composite = None
+        inconclusive = True
+        partial_scoring = True
 
     if is_ke:
         test_type_label = "knowledge_extraction"

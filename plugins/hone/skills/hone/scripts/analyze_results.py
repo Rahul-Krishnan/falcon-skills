@@ -276,7 +276,7 @@ def analyze(path: str) -> None:
                     print(f'    {p.get("id", "?")}: "{p.get("value", "")}" not found')
 
             # Semantic scores
-            raw = details.get("raw_semantic_scores", {})
+            raw = get(details, "raw_semantic_scores", {}, expected=dict)
             if raw:
                 print("  Semantic scores:")
                 for q, s in raw.items():
@@ -301,7 +301,7 @@ def analyze(path: str) -> None:
     for r in results:
         details = r.get("details", {})
         if isinstance(details, dict):
-            cat = details.get("category", r.get("suite", "unknown"))
+            cat = get(details, "category", r.get("suite", "unknown"), expected=str)
             composite = get(details, "composite_1_5", 0)
             # An inconclusive test was never scored. Printing score_of's 0.0
             # default reported it as `0.000 FAIL`, contradicting the PER-TEST
@@ -320,8 +320,15 @@ def analyze(path: str) -> None:
     for r in results:
         details = r.get("details", {})
         if isinstance(details, dict):
-            raw = details.get("raw_semantic_scores", {})
-            cat = details.get("category", r.get("suite", "unknown"))
+            # typed get, not dict.get: an explicit `"raw_semantic_scores": null`
+            # is a real shape from a judge that returned no per-question scores,
+            # and dict.get hands back that None for a present key. `.items()` on
+            # it aborted analyze() with a traceback here -- after the summary,
+            # per-test breakdown and dimension summary had already printed, so
+            # the operator got a report that looked complete minus its
+            # RECOMMENDED ACTIONS section.
+            raw = get(details, "raw_semantic_scores", {}, expected=dict)
+            cat = get(details, "category", r.get("suite", "unknown"), expected=str)
             for q, s in raw.items():
                 if s <= 3.0:
                     low_dims.append((cat, q, s))

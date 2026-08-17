@@ -1891,5 +1891,147 @@ class TestUnscorableFilesAreInconclusive(unittest.TestCase):
         self.assertEqual(output["grade"], "INCONCLUSIVE")
 
 
+class TestNoExecutionEvidenceIsInconclusive(unittest.TestCase):
+    """No tool calls means nothing was observed, whatever the artifact type.
+
+    Every dimension in the hook and script profiles defaults high when there is
+    nothing to look at (trigger_accuracy "No Bash calls to evaluate",
+    correctness "No tool calls to evaluate", error_handling "No errors
+    encountered"), so a run that recorded nothing used to grade A.
+    """
+
+    EMPTY = {"test_id": "T1", "execution_timeline": [], "agent_response": ""}
+
+    def _score(self, artifact_type: str, test_result: dict | None = None) -> dict:
+        from score_execution import _score_single_test
+
+        return _score_single_test(test_result or self.EMPTY, artifact_type, "")
+
+    def test_every_artifact_type_is_inconclusive_without_tool_calls(self):
+        for artifact_type in ("skill", "command", "hook", "script"):
+            with self.subTest(artifact_type=artifact_type):
+                scored = self._score(artifact_type)
+                self.assertIsNone(scored["composite"])
+                self.assertEqual(scored["status"], "inconclusive")
+                self.assertTrue(scored["partial_scoring"])
+
+    def test_unsupported_artifact_type_is_inconclusive_not_zero(self):
+        """A type with no profile was never measured; 0.0 claimed it failed."""
+        scored = self._score("widget")
+        self.assertIsNone(scored["composite"])
+        self.assertEqual(scored["status"], "inconclusive")
+
+    def test_narrated_workflow_with_no_tool_calls_is_inconclusive(self):
+        """`elif timeline:` let conditional narration stand in for execution."""
+        response = (
+            "I would run Step 1, then Step 2, then Step 3. "
+            "Gate: validate. STOP. rubric checklist."
+        )
+        scored = self._score(
+            "skill",
+            {
+                "test_id": "T1",
+                "execution_timeline": [{"step_type": "text", "content": response}],
+                "agent_response": response,
+            },
+        )
+        self.assertIsNone(scored["composite"])
+        self.assertEqual(scored["status"], "inconclusive")
+        self.assertNotIn("workflow_sequence", scored["dimensions"])
+
+    def test_one_real_tool_call_still_scores(self):
+        scored = self._score(
+            "skill",
+            {
+                "test_id": "T1",
+                "execution_timeline": [{"step_type": "tool_use", "tool_name": "Read"}],
+                "agent_response": "Read the file.",
+            },
+        )
+        self.assertIsNotNone(scored["composite"])
+        self.assertNotIn("status", scored)
+
+
+class TestEmittedDimensionsMatchWeightedDimensions(unittest.TestCase):
+    """An unweighted dimension cannot move the composite but still gets read.
+
+    It lands in the per-test `dimensions` map and in `aggregate_dimensions`,
+    where an operator attributes composite movement to it, and Phase 3's "a
+    drop > 0.1 in any dimension flags a regression" rule can auto-revert on it.
+    """
+
+    TEST_RESULT = {
+        "test_id": "T1",
+        "execution_timeline": [{"step_type": "tool_use", "tool_name": "Read"}],
+        "agent_response": "Done.",
+    }
+
+    def _dimensions(self, artifact_type: str) -> set[str]:
+        from score_execution import _score_single_test
+
+        return set(
+            _score_single_test(self.TEST_RESULT, artifact_type, "")["dimensions"]
+        )
+
+    def test_command_emits_exactly_what_command_weights_scores(self):
+        from score_execution import COMMAND_WEIGHTS
+
+        self.assertTrue(self._dimensions("command") <= set(COMMAND_WEIGHTS))
+
+    def test_command_does_not_emit_voice_or_parallel(self):
+        emitted = self._dimensions("command")
+        self.assertNotIn("voice_compliance", emitted)
+        self.assertNotIn("parallel_efficiency", emitted)
+
+    def test_skill_still_emits_voice_and_parallel(self):
+        emitted = self._dimensions("skill")
+        self.assertIn("voice_compliance", emitted)
+        self.assertIn("parallel_efficiency", emitted)
+
+
+class TestUserCommunicationWordBoundaries(unittest.TestCase):
+    """"ask" is a substring of "task", and "user" appears in ordinary prose."""
+
+    TIMELINE = [{"step_type": "tool_use", "tool_name": "Read"}]
+
+    def _score(self, response: str) -> dict:
+        from score_execution import score_user_communication
+
+        return score_user_communication(self.TIMELINE, response)
+
+    def test_task_completed_prose_is_not_a_clarification(self):
+        result = self._score(
+            "Task completed. I ran the full workflow and produced the "
+            "report the user requested."
+        )
+        self.assertEqual(result["score"], 0.0)
+        self.assertNotIn("AskUserQuestion", result["evidence"])
+
+    def test_genuine_clarification_still_scores(self):
+        result = self._score(
+            "No uncommitted changes found. Which files should I scan?"
+        )
+        self.assertEqual(result["score"], 0.9)
+
+    def test_ask_verb_with_a_question_still_scores(self):
+        result = self._score("I need to ask the user which target to use?")
+        self.assertEqual(result["score"], 0.9)
+
+    def test_asserted_ask_without_a_question_does_not_score(self):
+        """Past-tense narration is not a question posed to the user."""
+        result = self._score(
+            "I asked the user nothing and completed every step of the run "
+            "exactly as written in the skill body."
+        )
+        self.assertLess(result["score"], 0.9)
+
+    def test_error_indicators_are_word_anchored(self):
+        """"stop" used to match inside unrelated words."""
+        from score_execution import ERROR_INDICATOR_PATTERN
+
+        self.assertIsNone(ERROR_INDICATOR_PATTERN.search("the backstop held firm"))
+        self.assertIsNotNone(ERROR_INDICATOR_PATTERN.search("stopped before step 2"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -77,16 +77,36 @@ WARNING_ONLY_PILLARS = {
 # handoffs) applies only to complex/unattended artifacts; old-model
 # failure-mode pillars (anti-laziness, compaction, step numbering) no
 # longer drive improvements at any tier.
+# Widened 2026-08-17: the structural pillars are scored at every tier, not just
+# at "complex". Each audit function already declines on its own evidence -- no
+# step transitions makes progress_gates and handoff_interfaces inapplicable,
+# fewer than two steps makes state_persistence inapplicable, no handoff marker
+# makes schema_validation inapplicable -- so "skip" at the low tiers never
+# suppressed a false penalty. All it did was starve the denominator: below
+# "complex" the scored set was {security, description_guardrails}, security
+# passes for every benign artifact, and structural_score could therefore only
+# ever be 0.5 or 1.0. A two-valued number published as a continuous 0-1
+# measurement is not reporting what it claims. These pillars are LOW, not HIGH,
+# at the low tiers: they count toward the score because the mechanism is either
+# present or absent, but they stay advisory and do not drive Phase 2 work.
 PILLAR_PRIORITY_MATRIX: dict[str, dict[str, str]] = {
     SECURITY: {"lightweight": "HIGH", "standard": "HIGH", "complex": "HIGH"},
-    STATE_PERSISTENCE: {"lightweight": "skip", "standard": "skip", "complex": "HIGH"},
-    DATA_PROVENANCE: {"lightweight": "skip", "standard": "LOW", "complex": "HIGH"},
+    # state_persistence stays skipped at "lightweight": a two-step lightweight
+    # artifact legitimately has nothing to persist, and this is the one pillar
+    # whose absence at that tier is a design choice rather than a gap.
+    STATE_PERSISTENCE: {"lightweight": "skip", "standard": "LOW", "complex": "HIGH"},
+    DATA_PROVENANCE: {"lightweight": "LOW", "standard": "LOW", "complex": "HIGH"},
     ANTI_LAZINESS: {"lightweight": "skip", "standard": "skip", "complex": "skip"},
+    # progress_gates keeps its low-tier skip too, for a different reason:
+    # improvement preference 7 says attended in-session flows need gates only
+    # before irreversible actions, so an ungated lightweight or standard
+    # artifact must not read as a structural gap at all. That is a product
+    # decision about gates, not a side effect of the starved denominator.
     PROGRESS_GATES: {"lightweight": "skip", "standard": "skip", "complex": "LOW"},
-    HANDOFF_INTERFACES: {"lightweight": "skip", "standard": "skip", "complex": "LOW"},
-    SCHEMA_VALIDATION: {"lightweight": "skip", "standard": "skip", "complex": "LOW"},
+    HANDOFF_INTERFACES: {"lightweight": "LOW", "standard": "LOW", "complex": "LOW"},
+    SCHEMA_VALIDATION: {"lightweight": "LOW", "standard": "LOW", "complex": "LOW"},
     RESEARCH_DEPTH: {"lightweight": "skip", "standard": "skip", "complex": "LOW"},
-    COMPLEXITY_AWARE: {"lightweight": "skip", "standard": "skip", "complex": "LOW"},
+    COMPLEXITY_AWARE: {"lightweight": "LOW", "standard": "LOW", "complex": "LOW"},
     DESCRIPTION_GUARDRAILS: {"lightweight": "LOW", "standard": "LOW", "complex": "LOW"},
     SCRIPT_QUALITY: {"lightweight": "skip", "standard": "LOW", "complex": "LOW"},
     COMPACTION_PROTECTION: {"lightweight": "skip", "standard": "skip", "complex": "skip"},
@@ -393,15 +413,37 @@ def audit_step_numbering(content: str, artifact_type: str) -> PillarResult:
 def _count_pattern_matches(
     content: str, patterns: list[re.Pattern]
 ) -> tuple[int, list[str]]:
-    """Count matches and return evidence strings."""
-    count = 0
-    evidence = []
+    """Count matches, de-duplicated by source span, and return evidence.
+
+    Patterns within a family overlap by design: `handoff.*interface` matches
+    everything `\\*\\*Handoff interface` matches, so summing per-pattern counts
+    scored one marker twice. Two genuine `**Handoff interface (...)**` lines
+    were reported as `count_found=4`, which flipped an honest 2-of-8 fail into
+    a 4-of-8 pass against the pillar's `found >= expected * 0.5` bar, printed
+    each marker twice in evidence that then contradicted its own count, and
+    doubled the `handoff_count` denominator that audit_schema_validation
+    divides by. One span in the source is one mechanism, however many patterns
+    recognize it.
+
+    Overlapping spans (not just identical ones) collapse, and the longest match
+    at a given position wins, so the more specific pattern supplies the
+    evidence text.
+    """
+    spans = []
     for pattern in patterns:
         for match in pattern.finditer(content):
-            count += 1
-            text = match.group().strip()[:80]
-            evidence.append(text)
-    return count, evidence
+            spans.append((match.start(), match.end(), match.group()))
+    # Leftmost first; at equal starts the longest span wins.
+    spans.sort(key=lambda span: (span[0], -(span[1] - span[0])))
+
+    kept: list[tuple[int, int]] = []
+    evidence = []
+    for start, end, text in spans:
+        if any(start < kept_end and end > kept_start for kept_start, kept_end in kept):
+            continue
+        kept.append((start, end))
+        evidence.append(text.strip()[:80])
+    return len(kept), evidence
 
 
 def audit_progress_gates(content: str, artifact_type: str) -> PillarResult:

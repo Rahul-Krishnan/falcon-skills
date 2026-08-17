@@ -934,5 +934,137 @@ class TestScoringDenominatorNeverCollapses(unittest.TestCase):
         self.assertIsInstance(result["structural_score"], float)
 
 
+class TestHandoffSpanDeduplication(unittest.TestCase):
+    """`**Handoff interface` is a subset of `handoff.*interface`.
+
+    Summing per-pattern counts scored each genuine marker twice, which flipped
+    the pillar's `found >= expected * 0.5` bar and doubled the denominator
+    audit_schema_validation divides by.
+    """
+
+    CONTENT = "\n".join(f"## Step {i}: do thing {i}" for i in range(1, 10)) + (
+        "\n\n**Handoff interface (Step 1 -> Step 2)**\nfoo\n"
+        "\n**Handoff interface (Step 2 -> Step 3)**\nbar\n"
+    )
+
+    def test_overlapping_patterns_count_one_span_once(self):
+        count, evidence = structural_audit._count_pattern_matches(
+            self.CONTENT, structural_audit.HANDOFF_PATTERNS
+        )
+        self.assertEqual(count, 2)
+        self.assertEqual(len(evidence), 2)
+
+    def test_two_of_eight_handoffs_fails_the_pillar(self):
+        pillar = structural_audit.audit_handoff_interfaces(self.CONTENT, "skill")
+        self.assertEqual(pillar.count_found, 2)
+        self.assertEqual(pillar.count_expected, 8)
+        self.assertFalse(pillar.passed)
+
+    def test_evidence_length_matches_reported_count(self):
+        pillar = structural_audit.audit_handoff_interfaces(self.CONTENT, "skill")
+        markers = [e for e in pillar.evidence if not e.startswith("Missing:")]
+        self.assertEqual(len(markers), pillar.count_found)
+
+    def test_non_overlapping_matches_all_count(self):
+        content = "**Handoff interface (A)**\n\nOutput contract for B.\n"
+        count, _ = structural_audit._count_pattern_matches(
+            content, structural_audit.HANDOFF_PATTERNS
+        )
+        self.assertEqual(count, 2)
+
+
+class TestStructuralScoreIsContinuous(unittest.TestCase):
+    """structural_score must vary with the mechanisms an artifact actually has.
+
+    Before the scoring pillar set was widened, everything below the "complex"
+    tier scored on {security, description_guardrails} alone. Security passes
+    for every benign artifact, so the whole reachable range was {0.5, 1.0} —
+    one bit of information published as a continuous 0-1 measurement.
+    """
+
+    MINIMAL = "---\nname: demo\ndescription: Does a thing.\n---\n# Demo\nRun it.\n"
+
+    PARTIAL = """---
+name: demo
+description: Runs a two-step thing. Do NOT use for unrelated things.
+---
+
+# Demo
+
+## Step 1: Gather
+Read the inputs.
+
+**Handoff interface (Step 1 -> Step 2)**
+```json
+{"files": ["path"]}
+```
+
+## Step 2: Report
+Print the summary.
+"""
+
+    STRUCTURED = """---
+name: demo
+description: Runs a three-step thing. Do NOT use for unrelated things.
+---
+
+# Demo
+
+Write state to `/tmp/workflow-demo-state.json`.
+
+## Step 1: Gather
+Read the inputs.
+
+**Handoff interface (Step 1 -> Step 2)**
+```json
+{"files": ["path"]}
+```
+Validate the shape of that interface before Step 2 runs.
+
+## Step 2: Analyze
+Verify the files field exists and is non-empty.
+
+**Handoff interface (Step 2 -> Step 3)**
+```json
+{"findings": []}
+```
+Check that findings exist and are not malformed.
+
+## Step 3: Report
+Print the summary. Score: 0.9 (source: deterministic).
+"""
+
+    def _score(self, content: str, tier: str) -> float:
+        return structural_audit.audit(content, "skill", "demo", tier)[
+            "structural_score"
+        ]
+
+    def test_three_artifacts_land_on_three_distinct_scores(self):
+        for tier in ("lightweight", "standard"):
+            with self.subTest(tier=tier):
+                minimal = self._score(self.MINIMAL, tier)
+                partial = self._score(self.PARTIAL, tier)
+                structured = self._score(self.STRUCTURED, tier)
+                self.assertEqual(len({minimal, partial, structured}), 3)
+                self.assertLess(minimal, partial)
+                self.assertLess(partial, structured)
+
+    def test_partial_artifact_is_not_pinned_to_a_half_or_a_one(self):
+        for tier in ("lightweight", "standard"):
+            with self.subTest(tier=tier):
+                self.assertNotIn(self._score(self.PARTIAL, tier), (0.5, 1.0))
+
+    def test_widened_denominator_leaves_security_a_minority_of_the_score(self):
+        """Security must no longer be half the numerator for a real artifact."""
+        result = structural_audit.audit(self.PARTIAL, "skill", "demo", "standard")
+        scored = [
+            p
+            for p in result["pillars"]
+            if p["applicable"] and p["name"] not in structural_audit.WARNING_ONLY_PILLARS
+        ]
+        self.assertGreater(len(scored), 2)
+        self.assertIn("security", [p["name"] for p in scored])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -284,6 +284,53 @@ class TestAnalyzeOutput(unittest.TestCase):
         self.assertIn("a", output)
         self.assertNotIn("No test results found", output)
 
+    def test_analyze_tolerates_explicit_null_semantic_scores(self):
+        """`"raw_semantic_scores": null` is a real shape from the judge.
+
+        dict.get hands back that None for a present key, and `.items()` on it
+        aborted analyze() at RECOMMENDED ACTIONS — after the summary, per-test
+        breakdown and dimension summary had already printed, so the operator
+        got a report that looked complete minus its last section.
+        """
+        path = self._write(
+            {
+                "results": [
+                    {
+                        "test_id": "TC-001",
+                        "score": 0.9,
+                        "suite": "exec",
+                        "details": {
+                            "category": "exec",
+                            "composite_1_5": 4.5,
+                            "raw_semantic_scores": None,
+                            "overall_feedback": "ok",
+                        },
+                    }
+                ]
+            },
+            {"per_test": [{"test_id": "TC-001", "composite": 0.9}]},
+        )
+        output = self._run(path)
+        self.assertIn("RECOMMENDED ACTIONS", output)
+
+    def test_analyze_tolerates_explicit_null_category(self):
+        """A null category reached an f-string format spec and raised."""
+        path = self._write(
+            {
+                "results": [
+                    {
+                        "test_id": "TC-002",
+                        "suite": "exec",
+                        "details": {"category": None, "composite_1_5": 4.0},
+                    }
+                ]
+            },
+            {"per_test": [{"test_id": "TC-002", "composite": 0.9}]},
+        )
+        output = self._run(path)
+        self.assertIn("RECOMMENDED ACTIONS", output)
+        self.assertIn("exec", output)
+
     def test_analyze_reads_test_results_alias(self):
         path = self._write(
             {"test_results": [{"test_id": "t1", "details": {"category": "exec"}}]},

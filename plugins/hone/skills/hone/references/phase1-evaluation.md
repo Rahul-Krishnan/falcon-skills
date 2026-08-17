@@ -463,7 +463,7 @@ Spawn one subagent per test case in the eval criteria (parallel, up to `{workers
 
 Collect all subagent results. Write a merged `$OUTPUT_DIR/results.json` in the standard format: `{"results": [{test_id, score, agent_response, execution_timeline, ...}]}`.
 
-**`execution_timeline` is mandatory for deterministic scoring.** `score_execution.py` derives every conclusive skill/command dimension (workflow_sequence, gate_compliance, parallel_efficiency, state_persistence, error_handling, verify_actions, research_first) from this array; a test whose timeline is empty or missing is marked `status: "inconclusive"` with `composite: null`, so omitting it silences the deterministic half of the pipeline. Instruct each subagent to record, in order, one entry per step it takes and include the array in its `tc-{test_id}.json` output:
+**`execution_timeline` is mandatory for deterministic scoring.** `score_execution.py` derives every conclusive skill/command dimension (workflow_sequence, gate_compliance, parallel_efficiency, state_persistence, error_handling, verify_actions, research_first) from this array; a test whose timeline is empty, missing, or made up entirely of `text` entries is marked `status: "inconclusive"` with `composite: null`, so omitting it silences the deterministic half of the pipeline. The bar is **recorded tool calls**, not a non-empty array, and it applies to hooks and scripts on the same terms: narrating "I would run Step 1, then Step 2" is not evidence that Step 1 ran, and every dimension in every profile defaults high when there is nothing to look at. Instruct each subagent to record, in order, one entry per step it takes and include the array in its `tc-{test_id}.json` output:
 
 ```
 execution_timeline: [{
