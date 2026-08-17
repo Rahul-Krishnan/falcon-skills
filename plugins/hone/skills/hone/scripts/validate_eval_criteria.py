@@ -140,9 +140,15 @@ def _get_runner_context(tc: dict) -> str:
     return get(tc, "runner_context", "", expected=str).strip()
 
 
-def _get_allowed_tools(tc: dict) -> list:
-    """Get allowed_tools from test case."""
-    return get(tc, "allowed_tools", [], expected=list)
+def _get_allowed_tools(tc: dict) -> list[str]:
+    """Get allowed_tools from test case (string items only).
+
+    _string_items matters here as much as for required_present/absent: a
+    mixed-type list would otherwise propagate non-string junk into
+    suggested_fix, and the auto-repair would write a file that still fails
+    the pre-launch schema gate, burning the repair pass.
+    """
+    return _string_items(get(tc, "allowed_tools", [], expected=list))
 
 
 def _get_target_skills(tc: dict) -> list:
@@ -155,9 +161,21 @@ def _get_prompt(tc: dict) -> str:
     return get(tc, "prompt", "", expected=str)
 
 
+def _get_id(tc: dict) -> str:
+    """Get the test case id, always as a string.
+
+    `id` is the one field used as a set member and sort key: a non-string
+    id (int, list, dict) crashed `sorted(unfixable_test_ids)` /
+    `unfixable_test_ids.add()` with a traceback and no JSON on stdout for
+    the criteria-audit consumer. expected=str maps any such id to
+    "unknown", same as an absent one.
+    """
+    return get(tc, "id", "unknown", expected=str)
+
+
 def check_unsimulatable_pipeline(tc: dict) -> str | None:
     """Check if a test case invokes a pipeline command and expects full execution."""
-    tc_id = get(tc, "id", "unknown")
+    tc_id = _get_id(tc)
     prompt = _get_prompt(tc)
 
     invoked_command = None
@@ -192,7 +210,7 @@ def check_unsimulatable_pipeline(tc: dict) -> str | None:
 
 def check_tool_call_string_matching(tc: dict) -> list[str]:
     """Check if required_present contains tool-call artifacts."""
-    tc_id = get(tc, "id", "unknown")
+    tc_id = _get_id(tc)
     results = []
 
     for val in _get_required_present(tc):
@@ -237,7 +255,7 @@ def is_brittle_present(value: str) -> tuple[bool, str]:
 
 def check_runner_context_present(tc: dict) -> dict | None:
     """Flag test cases missing runner_context."""
-    tc_id = get(tc, "id", "unknown")
+    tc_id = _get_id(tc)
     if not _get_runner_context(tc):
         return {
             "test_id": tc_id,
@@ -278,7 +296,7 @@ def check_runner_context_hygiene(tc: dict) -> list[dict]:
          so the executor knows not to issue real tool calls.
     """
     findings: list[dict] = []
-    tc_id = get(tc, "id", "unknown")
+    tc_id = _get_id(tc)
     rc = _get_runner_context(tc)
     if not rc:
         return findings
@@ -318,7 +336,7 @@ def check_runner_context_hygiene(tc: dict) -> list[dict]:
 
 def check_allowed_tools_audit(tc: dict) -> dict | None:
     """Flag test cases with missing or incomplete allowed_tools."""
-    tc_id = get(tc, "id", "unknown")
+    tc_id = _get_id(tc)
     tools = _get_allowed_tools(tc)
     prompt = _get_prompt(tc)
 
@@ -353,7 +371,7 @@ def check_allowed_tools_audit(tc: dict) -> dict | None:
 
 def check_target_skills_audit(tc: dict, artifact_path: str | None) -> dict | None:
     """Flag test cases missing target_skills."""
-    tc_id = get(tc, "id", "unknown")
+    tc_id = _get_id(tc)
     targets = _get_target_skills(tc)
 
     if not targets and artifact_path:
@@ -373,7 +391,7 @@ def check_target_skills_audit(tc: dict, artifact_path: str | None) -> dict | Non
 
 def check_semantic_check_quality(tc: dict) -> list[dict]:
     """Heuristically detect keyword-only semantic checks."""
-    tc_id = get(tc, "id", "unknown")
+    tc_id = _get_id(tc)
     findings = []
     checks = _get_checks(tc)
 
@@ -467,7 +485,7 @@ def validate(path: str, output_stream=None) -> int:
     errors = []
 
     for tc in test_cases:
-        tc_id = get(tc, "id", "unknown")
+        tc_id = _get_id(tc)
 
         required_present = _get_required_present(tc)
         required_absent = _get_required_absent(tc)

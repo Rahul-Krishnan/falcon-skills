@@ -224,6 +224,8 @@ python3 <skill-dir>/scripts/validate_handoff.py \
 
 If validation fails: fix the state file, re-validate. Do not proceed with invalid handoff data.
 
+`--step` mode on a skipped step checks a required input only when its producing step actually ran, so run shapes that legitimately skip producers (`--fix-only`, no-improvement) validate cleanly without fabricated handoff blocks. The contract is stated once, in `scripts/validate_handoff.py` (`_skipped_step_input_expected`); do not restate it here.
+
 Every validation attempt emits an event to `gates[]`, appended not replaced:
 
 ```json

@@ -88,12 +88,22 @@ def _raw_llm_score(result: dict):
     null `score` never consulted `final_score`. The alias applies only when
     the `score` key is absent entirely (skill-creator runners emit
     `final_score` instead of `score`).
+
+    Non-numeric values (a stringified "0.85", a bool, a list) are treated
+    exactly like null: returned as None so resolve_score falls through to
+    the deterministic composite/default, mirroring the sibling loaders'
+    `isinstance(..., (int, float))` filter. Passing them through crashed
+    numeric consumers (`round(score, 4)`, threshold comparisons).
     """
     if not isinstance(result, dict):
         return None
     if "score" in result:
-        return result["score"]
-    return result.get("final_score")
+        value = result["score"]
+    else:
+        value = result.get("final_score")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
 
 
 def resolve_score(
@@ -251,7 +261,11 @@ BASH_SIDE_EFFECT_PATTERNS: list[tuple[str, str]] = (
 # closing delimiter must be a bare --- line (trailing whitespace ok) or the
 # delimiter at EOF — a file ending exactly at `---` previously failed to
 # parse in side_effect_guard, silently disabling the allowed-tools filter.
-_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
+# \r? before each \n accepts CRLF line endings; without it a well-formed
+# CRLF document failed to parse, with the same silent-disable consequence.
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL
+)
 
 _BLOCK_SCALAR_INDICATOR_RE = re.compile(r"[|>][+-]?\d*\Z")
 

@@ -124,6 +124,26 @@ class TestResolveScore(unittest.TestCase):
         result = {"test_id": "T1", "score": 0.9}
         self.assertEqual(resolve_score(result, {"T1": 0.0}), 0.0)
 
+    def test_non_numeric_score_falls_through_like_null(self):
+        # A stringified score ("0.85") passed straight through crashed
+        # analyze_results on round(score, 4) / threshold comparisons; it
+        # must fall through to the deterministic composite/default exactly
+        # as an explicit null does.
+        self.assertEqual(resolve_score({"test_id": "T1", "score": "0.85"}, {}), 0.0)
+        self.assertEqual(
+            resolve_score(
+                {"test_id": "T1", "score": "0.85"},
+                {"T1": 0.4},
+                prefer_deterministic=False,
+            ),
+            0.4,
+        )
+
+    def test_bool_and_list_scores_fall_through(self):
+        # bool is an int subclass but a JSON boolean is not a number.
+        self.assertEqual(resolve_score({"test_id": "T1", "score": True}, {}), 0.0)
+        self.assertEqual(resolve_score({"test_id": "T1", "final_score": [1]}, {}), 0.0)
+
 
 class TestDeterministicLoaders(unittest.TestCase):
     def _write(self, det_data) -> str:
@@ -236,6 +256,24 @@ class TestFrontmatterExtraction(unittest.TestCase):
 
     def test_delimiter_inside_body_not_matched(self):
         self.assertIsNone(split_frontmatter("Intro\n---\nname: x\n---\n"))
+
+    def test_crlf_frontmatter_parses(self):
+        # CRLF line endings previously failed to parse entirely, silently
+        # disabling side_effect_guard's allowed-tools filter and dropping
+        # every frontmatter field in structural_audit.
+        fm = split_frontmatter("---\r\nname: foo\r\n---\r\nbody\r\n")
+        self.assertEqual(fm, "name: foo")
+        self.assertEqual(frontmatter_field(fm, "name"), "foo")
+
+    def test_crlf_frontmatter_closed_at_eof(self):
+        self.assertEqual(split_frontmatter("---\r\nname: x\r\n---"), "name: x")
+
+    def test_crlf_multi_field_extraction(self):
+        fm = split_frontmatter(
+            "---\r\nname: foo\r\ndescription: hi there\r\n---\r\nBody"
+        )
+        self.assertIsNotNone(fm)
+        self.assertEqual(frontmatter_field(fm, "description"), "hi there")
 
     def test_match_frontmatter_end_is_body_offset(self):
         content = "---\nname: x\n---\nBody line"

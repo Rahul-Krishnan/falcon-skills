@@ -140,8 +140,11 @@ def validate_criteria(
     try:
         with open(path) as file_handle:
             data = json.load(file_handle)
-    except json.JSONDecodeError as parse_error:
-        msg = f"Invalid JSON in {criteria_path}: {parse_error}"
+    except (json.JSONDecodeError, OSError) as parse_error:
+        # OSError too (IsADirectoryError, PermissionError): the documented
+        # contract is exit 2 for unreadable input, not a raw traceback
+        # that leaves --json consumers with zero parseable bytes.
+        msg = f"Cannot read or parse {criteria_path}: {parse_error}"
         if json_output:
             json.dump({"valid": False, "error": msg, "errors": []}, sys.stdout, indent=2)
             print()
@@ -171,7 +174,12 @@ def validate_criteria(
     for idx, test_case in enumerate(test_cases):
         if not isinstance(test_case, dict):
             continue
-        test_id = test_case.get("id", "")
+        # expected=str: a null id must not put None in seen_ids, and an
+        # unhashable id (list/dict) must not TypeError the set membership
+        # check — that traceback killed both validate mode and --audit
+        # (which calls validate_schema first) with empty stdout. The
+        # schema pass above already records the type error for such ids.
+        test_id = null_safe_get(test_case, "id", "", expected=str)
         if test_id in seen_ids:
             errors.append(ValidationError(
                 f"test_cases[{idx}].id",

@@ -79,6 +79,48 @@ class TestSchema(unittest.TestCase):
         report = validate_gates("nope", "normal")
         self.assertFalse(report["valid"])
 
+    def test_non_string_step_is_error_not_crash(self):
+        # An unhashable step value crashed the emitted-set build with
+        # TypeError instead of reporting a schema error.
+        gates = NORMAL_RUN + [dict(gate("x"), step=["x"])]
+        report = validate_gates(gates, "normal")
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("step must be a string" in e for e in report["errors"]))
+
+    def test_schema_declared_types_are_enforced(self):
+        # null step / numeric ts / dict findings / numeric rubric item were
+        # all blessed as VALID despite the published schema's declarations.
+        bad = {
+            "step": None,
+            "judge": "self-check",
+            "result": "pass",
+            "ts": 12345,
+            "findings": {"oops": 1},
+            "rubric": [{"severity": "HIGH", "item": 42, "result": "pass"}],
+        }
+        report = validate_gates(NORMAL_RUN + [bad], "normal")
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("step must be a string" in e for e in report["errors"]))
+        self.assertTrue(any("ts must be a string" in e for e in report["errors"]))
+        self.assertTrue(any("findings is not an array" in e for e in report["errors"]))
+        self.assertTrue(any("item must be a string" in e for e in report["errors"]))
+
+    def test_non_string_finding_items_are_errors(self):
+        gates = NORMAL_RUN + [dict(gate("extra"), findings=["ok", 3])]
+        report = validate_gates(gates, "normal")
+        self.assertFalse(report["valid"])
+        self.assertTrue(
+            any("findings[1] is not a string" in e for e in report["errors"])
+        )
+
+    def test_null_ts_and_null_findings_tolerated(self):
+        # Optional fields follow the rubric precedent: explicit null reads
+        # as absent, only a wrong non-null type is a schema error.
+        gates = NORMAL_RUN[:-1] + [
+            dict(gate("workflow_exit"), ts=None, findings=None)
+        ]
+        self.assertTrue(validate_gates(gates, "normal")["valid"])
+
 
 class TestCompleteness(unittest.TestCase):
     def test_missing_step_reported(self):
@@ -139,6 +181,39 @@ class TestFailSemantics(unittest.TestCase):
         ]
         report = validate_gates(gates, "normal")
         self.assertTrue(any("continued" in w for w in report["warnings"]))
+
+
+class TestCliStateFileGuards(unittest.TestCase):
+    def _run(self, content: str):
+        import subprocess
+        import sys as _sys
+        import tempfile
+        from pathlib import Path
+
+        script = str(Path(__file__).parent / "validate_gates.py")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as handle:
+            handle.write(content)
+            tmp_path = handle.name
+        return subprocess.run(
+            [_sys.executable, script, tmp_path, "--json"],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_null_root_is_usage_error_not_traceback(self):
+        # A null/array root (truncation, bad repair) crashed with
+        # AttributeError and exit 1, masquerading as "gates invalid".
+        result = self._run("null")
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("must be a JSON object", result.stderr)
+
+    def test_array_root_is_usage_error(self):
+        result = self._run("[]")
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 if __name__ == "__main__":

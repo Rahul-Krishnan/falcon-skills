@@ -264,6 +264,44 @@ class TestAuditMode(unittest.TestCase):
         self.assertIn("missing_runner_context", issues)
         self.assertIn("missing_allowed_tools", issues)
 
+    def test_audit_mixed_type_ids_do_not_crash(self):
+        """Two warning-drawing test cases whose ids are an int and a str
+        crashed sorted(unfixable_test_ids) with TypeError (int < str),
+        exit 1 and no JSON on stdout for the criteria-audit consumer."""
+        tc_int = _make_tc(tc_id=2)
+        del tc_int["runner_context"]
+        tc_str = _make_tc(tc_id="b")
+        del tc_str["runner_context"]
+        returncode, payload = self._audit({"test_cases": [tc_int, tc_str]})
+        self.assertEqual(returncode, EXIT_CLEAN)
+        self.assertIn("b", payload["unfixable_test_ids"])
+        # The non-string id degrades to "unknown", same as an absent one.
+        self.assertIn("unknown", payload["unfixable_test_ids"])
+
+    def test_audit_unhashable_id_does_not_crash(self):
+        """A list/dict id crashed unfixable_test_ids.add()."""
+        tc = _make_tc(tc_id=["not", "hashable"])
+        del tc["runner_context"]
+        returncode, payload = self._audit({"test_cases": [tc]})
+        self.assertEqual(returncode, EXIT_CLEAN)
+        issues = [f["issue"] for f in payload["findings"]]
+        self.assertIn("missing_runner_context", issues)
+
+    def test_audit_mixed_allowed_tools_suggests_strings_only(self):
+        """A mixed-type allowed_tools list propagated non-string junk into
+        suggested_fix; the auto-repair then wrote a file that still failed
+        the pre-launch schema gate (allowed_tools[0]: expected string)."""
+        tc = _make_tc(
+            prompt="Run /my-skill now.", allowed_tools=[123, "Read"]
+        )
+        _, payload = self._audit({"test_cases": [tc]})
+        fixes = [
+            f["suggested_fix"]["value"]
+            for f in payload["findings"]
+            if f.get("issue") == "missing_skill_tool"
+        ]
+        self.assertEqual(fixes, [["Read", "Skill"]])
+
     def test_audit_null_test_cases_returns_error_key(self):
         _, payload = self._audit({"test_cases": None})
         self.assertIn("error", payload)

@@ -55,6 +55,26 @@ class TestValidateValue(unittest.TestCase):
         validate_value(5, {"type": "number"}, "test", errors)
         self.assertEqual(len(errors), 0)
 
+    def test_nan_rejected(self) -> None:
+        # json.loads parses the nonstandard NaN literal by default, and
+        # NaN < min / NaN > max are both False, so a bounded _num spec
+        # silently blessed it (letting eg a Phase 3 regression check pass
+        # on all-False comparisons).
+        errors: list[ValidationError] = []
+        validate_value(
+            float("nan"),
+            {"type": "number", "min_value": 0.0, "max_value": 1.0},
+            "test",
+            errors,
+        )
+        self.assertEqual(len(errors), 1)
+        self.assertIn("NaN", errors[0].message)
+
+    def test_nan_rejected_without_bounds(self) -> None:
+        errors: list[ValidationError] = []
+        validate_value(float("nan"), {"type": "number"}, "test", errors)
+        self.assertEqual(len(errors), 1)
+
     def test_number_wrong_type(self) -> None:
         errors: list[ValidationError] = []
         validate_value("5", {"type": "number"}, "test", errors)
@@ -447,6 +467,79 @@ class TestValidateStep(unittest.TestCase):
         results = validate_step(state, "phase1_evaluate")
         self.assertTrue(all(r.valid for r in results))
 
+    def test_no_improvement_run_shape_passes(self) -> None:
+        # SKILL.md-sanctioned shape: Phase 1 found nothing to improve, so
+        # phase2_improve and phase3_reevaluate are skipped and applied_edits
+        # is never produced. Requiring it unconditionally forced the
+        # executor to fabricate an applied_edits block.
+        state = {
+            "steps": {
+                "phase1_evaluate": "done",
+                "phase2_improve": "skipped",
+                "phase3_reevaluate": "skipped",
+            },
+            "eval_results": {
+                "composite_score": 0.9,
+                "grade": "A",
+                "per_test": [{"test_id": "t", "score": 0.9, "status": "pass"}],
+                "actionable_failures": 0,
+            },
+        }
+        results = validate_step(state, "phase3_reevaluate")
+        self.assertTrue(
+            all(r.valid for r in results),
+            [e.message for r in results for e in r.errors],
+        )
+
+    def test_no_improvement_run_still_requires_eval_results(self) -> None:
+        # phase1_evaluate ran, so its output is a required input of the
+        # skipped phase3_reevaluate and its absence is a real error.
+        state = {
+            "steps": {
+                "phase1_evaluate": "done",
+                "phase2_improve": "skipped",
+                "phase3_reevaluate": "skipped",
+            },
+        }
+        results = validate_step(state, "phase3_reevaluate")
+        self.assertFalse(all(r.valid for r in results))
+
+    def test_fix_only_run_shape_passes(self) -> None:
+        # SKILL.md-sanctioned shape: --fix-only marks every Phase 1 step
+        # "skipped", so artifact_context / routing_decision / eval_results
+        # never exist. That absence is legal for the skipped steps.
+        steps = {
+            "phase1_structural_audit": "skipped",
+            "phase1_criteria_audit": "skipped",
+            "phase1_evaluate": "skipped",
+            "phase1_spec_artifacts": "skipped",
+            "phase1_reference_validation": "skipped",
+        }
+        state = {"steps": steps}
+        for step_name in (
+            "phase1_structural_audit",
+            "phase1_criteria_audit",
+            "phase1_reference_validation",
+        ):
+            results = validate_step(state, step_name)
+            self.assertTrue(
+                all(r.valid for r in results),
+                (step_name, [e.message for r in results for e in r.errors]),
+            )
+
+    def test_skipped_step_with_invalid_present_input_fails(self) -> None:
+        # An input that IS present must still validate, run shape aside.
+        state = {
+            "steps": {
+                "phase1_evaluate": "skipped",
+                "phase2_improve": "skipped",
+                "phase3_reevaluate": "skipped",
+            },
+            "eval_results": {"grade": "Z"},
+        }
+        results = validate_step(state, "phase3_reevaluate")
+        self.assertFalse(all(r.valid for r in results))
+
     def test_null_steps_reports_cleanly(self) -> None:
         # {"steps": null} is the present-but-null pitfall; --step mode must
         # emit the clean "step status is None" error, not an AttributeError.
@@ -716,6 +809,28 @@ class TestStructuralAuditScriptOutputValidates(unittest.TestCase):
         )
         results = validate_all(state)
         self.assertTrue(all(r.valid for r in results))
+
+
+class TestCliReadErrors(unittest.TestCase):
+    """OSError at the CLI entry point must be the exit-2 usage error."""
+
+    def test_directory_path_is_usage_error_not_traceback(self) -> None:
+        # IsADirectoryError escaped the JSONDecodeError-only catch as a raw
+        # traceback with exit 1, leaving --json consumers with zero
+        # parseable bytes.
+        import subprocess
+        import tempfile
+
+        script = str(Path(__file__).parent / "validate_handoff.py")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = subprocess.run(
+                [sys.executable, script, tmp_dir, "--all", "--json"],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("cannot read state file", result.stderr)
 
 
 if __name__ == "__main__":

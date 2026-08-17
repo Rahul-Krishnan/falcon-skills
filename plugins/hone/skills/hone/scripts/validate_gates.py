@@ -9,8 +9,10 @@ table) all describe constraints this script enforces mechanically.
 What it checks:
   1. Schema: every event has step, judge, result; judge is in the
      references/gate-event-schema.json enum; result is exactly "pass" or
-     "fail"; rubric items (when present) carry severity/item/result with
-     the schema's enums. Violations of the published schema are errors —
+     "fail"; step/ts are strings and findings is an array of strings, as
+     the schema declares; rubric items (when present) carry
+     severity/item/result with the schema's enums and a string item.
+     Violations of the published schema are errors —
      this script is the deterministic compliance check the schema promises,
      so it must not bless a state file the schema rejects.
   2. Completeness: the expected event set for the run mode is present.
@@ -107,6 +109,11 @@ def _rubric_errors(index: int, rubric: object) -> list[str]:
         for key in ("severity", "item", "result"):
             if key not in item:
                 errors.append(f"{label} missing required key '{key}'")
+        if "item" in item and not isinstance(item["item"], str):
+            errors.append(
+                f"{label} item must be a string, got "
+                f"{type(item['item']).__name__}"
+            )
         if "severity" in item and item["severity"] not in RUBRIC_SEVERITIES:
             errors.append(
                 f"{label} severity {item['severity']!r} is not one of "
@@ -142,6 +149,34 @@ def validate_gates(gates: list, mode: str) -> dict:
         for key in ("step", "judge", "result"):
             if key not in gate:
                 errors.append(f"gates[{index}] missing required key '{key}'")
+        # Enforce the types gate-event-schema.json declares, not just key
+        # presence and enum membership: a list-valued step crashed the
+        # emitted-set build below, and null step / numeric ts / dict
+        # findings were blessed as VALID against the published schema.
+        # (judge and result need no separate check — enum membership
+        # already rejects any non-string.)
+        step = gate.get("step")
+        if "step" in gate and not isinstance(step, str):
+            errors.append(
+                f"gates[{index}] step must be a string, got "
+                f"{type(step).__name__}"
+            )
+        ts = gate.get("ts")
+        if ts is not None and not isinstance(ts, str):
+            errors.append(
+                f"gates[{index}] ts must be a string, got {type(ts).__name__}"
+            )
+        findings = gate.get("findings")
+        if findings is not None:
+            if not isinstance(findings, list):
+                errors.append(f"gates[{index}] findings is not an array")
+            else:
+                for finding_index, finding in enumerate(findings):
+                    if not isinstance(finding, str):
+                        errors.append(
+                            f"gates[{index}] findings[{finding_index}] is "
+                            f"not a string"
+                        )
         result = gate.get("result")
         if "result" in gate and result not in VALID_RESULTS:
             errors.append(
@@ -175,7 +210,13 @@ def validate_gates(gates: list, mode: str) -> dict:
                 "continued and no later 'pass' for that step was recorded"
             )
 
-    emitted = {g.get("step") for g in gates if isinstance(g, dict)}
+    # Non-string steps already drew a schema error above; keep them out of
+    # the set (an unhashable list step would crash the build).
+    emitted = {
+        g.get("step")
+        for g in gates
+        if isinstance(g, dict) and isinstance(g.get("step"), str)
+    }
     missing = [step for step in REQUIRED_STEPS.get(mode, ()) if step not in emitted]
     for step in missing:
         errors.append(f"missing required gate event '{step}' for mode '{mode}'")
@@ -215,6 +256,14 @@ def main() -> None:
         sys.exit(2)
     except OSError as exc:
         print(f"ERROR: cannot read state file: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    if not isinstance(state, dict):
+        # Same guard as validate_handoff.main: a null/array root (truncation,
+        # bad repair) is a usage error, not an AttributeError traceback that
+        # masquerades as "gates invalid" with no JSON for the Mechanical
+        # Exit Gate consumer.
+        print("ERROR: state file root must be a JSON object", file=sys.stderr)
         sys.exit(2)
 
     report = validate_gates(state.get("gates", []), args.mode)

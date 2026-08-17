@@ -110,6 +110,24 @@ class TestInvalidCriteria(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_unhashable_id_reports_cleanly(self):
+        # An unhashable id (dict/list) raised TypeError at the seen_ids
+        # membership check, tracebacking both validate mode and --audit
+        # (which runs validate_schema first) with empty stdout.
+        data = {"test_cases": [dict(VALID_CRITERIA["test_cases"][0], id={"k": 1})]}
+        result = run_validate(data, ["--json"])
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["valid"])
+
+    def test_null_id_reports_cleanly(self):
+        # {"id": null} bypassed the "" default and put None in seen_ids.
+        data = {"test_cases": [dict(VALID_CRITERIA["test_cases"][0], id=None)]}
+        result = run_validate(data)
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_missing_required_field_is_error(self):
         data = {
             "test_cases": [
@@ -267,6 +285,18 @@ class TestFileErrors(unittest.TestCase):
     def test_non_object_root_exits_2(self):
         result = run_validate("[1, 2, 3]")
         self.assertEqual(result.returncode, 2)
+
+    def test_directory_path_exits_2_not_traceback(self):
+        # IsADirectoryError escaped the JSONDecodeError-only catch as a raw
+        # traceback with exit 1, violating the exit-2 usage-error contract
+        # and leaving --json consumers with zero parseable bytes.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cmd = [sys.executable, SCRIPT, tmp_dir, "--json"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["valid"])
 
 
 class TestOptionalFields(unittest.TestCase):

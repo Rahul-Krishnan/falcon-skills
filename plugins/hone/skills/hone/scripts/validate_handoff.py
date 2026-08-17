@@ -562,6 +562,48 @@ STEP_CONTRACTS: dict[str, dict[str, list[str]]] = {
     },
 }
 
+# Reverse map: handoff name -> the tracked step that produces it (from
+# STEP_CONTRACTS "produces"). Handoffs absent here (artifact_context,
+# routing_decision) are produced by untracked steps (Step 1 Discover,
+# Step 3 criteria routing) that run whenever Phase 1 runs at all.
+HANDOFF_PRODUCERS: dict[str, str] = {
+    handoff: step
+    for step, contract in STEP_CONTRACTS.items()
+    for handoff in contract["produces"]
+}
+
+
+def _skipped_step_input_expected(steps: dict, handoff_name: str) -> bool:
+    """Whether a skipped step's required input handoff must exist.
+
+    CONTRACT (single statement — SKILL.md's run shapes defer to this): a
+    skipped step's required input must exist exactly when the step that
+    produces it actually ran. SKILL.md documents two run shapes where a
+    skipped step's inputs are legitimately absent:
+
+      - `--fix-only` marks every Phase 1 step "skipped", so
+        artifact_context / routing_decision / eval_results are never
+        produced;
+      - a no-improvement run skips phase3_reevaluate after Phase 2 was
+        skipped, so applied_edits is never produced (validate_gates even
+        has a dedicated `--mode no-improvement` for this shape).
+
+    Requiring such inputs unconditionally forces the executor to fabricate
+    handoff blocks; requiring only present keys lets a corrupt state file
+    (no artifact_context, hence no original_backup_path for Phase 3
+    auto-revert) sail through as a vacuous ALL PASS. The producer check
+    threads between the two. For handoffs produced by a tracked step
+    (HANDOFF_PRODUCERS), the producer must be "done". For the untracked
+    producers (artifact_context, routing_decision, from Phase 1's Discover
+    and routing steps), the fix-only marker is phase1_evaluate == "skipped"
+    — the SKILL.md fix-only entry protocol marks all Phase 1 steps skipped
+    in one write, and no other documented shape skips phase1_evaluate.
+    """
+    producer = HANDOFF_PRODUCERS.get(handoff_name)
+    if producer is not None:
+        return null_safe_get(steps, producer) == "done"
+    return null_safe_get(steps, "phase1_evaluate") != "skipped"
+
 
 # ---------------------------------------------------------------------------
 # Validation engine
@@ -628,6 +670,12 @@ def validate_value(
                     f"expected number, got {type(value).__name__}",
                 )
             )
+        elif value != value:
+            # NaN (json.loads parses the nonstandard NaN literal by default).
+            # Every comparison on NaN is False, so the min/max bounds below
+            # cannot reject it and downstream range/regression checks would
+            # silently bless it.
+            errors.append(ValidationError(path, "NaN is not a valid number"))
         else:
             if "min_value" in spec and value < spec["min_value"]:
                 errors.append(
@@ -831,15 +879,19 @@ def validate_step(
     # SKILL.md's Mechanical Exit Gate and reuse path both write "skipped";
     # this is the canonical spelling for a skipped step status.
     if step_status == "skipped":
-        # Skipped steps don't need output validation, but every required
-        # input must exist and validate. Checking only present keys let a
-        # state file with no artifact_context at all (and therefore no
-        # original_backup_path for Phase 3 auto-revert) sail through as a
-        # vacuous ALL PASS.
+        # Skipped steps don't need output validation. Required inputs are
+        # validated when present, and their absence is an error only when
+        # the producing step actually ran — see _skipped_step_input_expected
+        # for the contract and the SKILL.md run shapes (fix-only,
+        # no-improvement) that legitimately leave inputs absent.
         for handoff_name in contract["requires"]:
-            results.append(validate_handoff(state, handoff_name))
+            if handoff_name in state or _skipped_step_input_expected(
+                steps, handoff_name
+            ):
+                results.append(validate_handoff(state, handoff_name))
         if not results:
-            # Step has no required inputs; record an explicit pass.
+            # Step has no required inputs (or none expected in this run
+            # shape); record an explicit pass.
             results.append(
                 ValidationResult(
                     handoff=f"{step_name}(skipped)",
@@ -998,6 +1050,11 @@ def main() -> int:
         state = json.loads(state_path.read_text())
     except json.JSONDecodeError as exc:
         print(f"Error: invalid JSON in state file: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        # IsADirectoryError/PermissionError are usage errors (exit 2), not
+        # raw tracebacks that leave --json consumers with unparseable output.
+        print(f"Error: cannot read state file: {exc}", file=sys.stderr)
         return 2
 
     if not isinstance(state, dict):
