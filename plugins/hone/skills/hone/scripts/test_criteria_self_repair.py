@@ -49,7 +49,7 @@ class TestRecursiveTimeoutPattern(unittest.TestCase):
                 {
                     "test_id": test_id,
                     "score": score,
-                    "duration": duration,
+                    "duration_seconds": duration,
                     "details": {"timeout_analysis": timeout_analysis},
                 }
             ]
@@ -514,7 +514,7 @@ class TestSummaryAndMultipleResults(unittest.TestCase):
                 {
                     "test_id": "TC-060",
                     "score": 0.0,
-                    "duration": 700,
+                    "duration_seconds": 700,
                     "agent_response": "x",
                     "details": {"timeout_analysis": "run_eval. Duration: 1200s"},
                 },
@@ -582,7 +582,7 @@ class TestSummaryAndMultipleResults(unittest.TestCase):
                 {
                     "test_id": "TC-080",
                     "score": 0.0,
-                    "duration": 700,
+                    "duration_seconds": 700,
                     # empty response AND recursive timeout signals
                     "agent_response": "",
                     "details": {"timeout_analysis": "run_eval. Duration: 1200s"},

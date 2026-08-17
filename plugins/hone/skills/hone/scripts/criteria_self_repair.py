@@ -54,7 +54,7 @@ def _check_recursive_timeout(test_result: dict) -> bool:
     """Test timed out because it launched a recursive evaluation run."""
     details = test_result.get("details", {})
     timeout_analysis = details.get("timeout_analysis", "")
-    duration = test_result.get("duration", 0)
+    duration = test_result.get("duration_seconds", 0)
     score = test_result.get("score", 1.0)
 
     if score > 0.0:

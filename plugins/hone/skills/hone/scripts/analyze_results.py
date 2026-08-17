@@ -226,7 +226,7 @@ def analyze(path: str) -> None:
             if failed_prog:
                 print("  FAILED programmatic checks:")
                 for p in failed_prog:
-                    print(f'    {p["id"]}: "{p.get("value", "")}" not found')
+                    print(f'    {p.get("id", "?")}: "{p.get("value", "")}" not found')
 
             # Semantic scores
             raw = details.get("raw_semantic_scores", {})

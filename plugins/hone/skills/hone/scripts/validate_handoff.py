@@ -62,8 +62,15 @@ def _bool(required: bool = True) -> dict:
     return {"type": "boolean", "required": required}
 
 
-def _enum(values: list[str], required: bool = True) -> dict:
-    return {"type": "enum", "required": required, "values": values}
+def _enum(
+    values: list[str], required: bool = True, allow_null: bool = False
+) -> dict:
+    return {
+        "type": "enum",
+        "required": required,
+        "values": values,
+        "allow_null": allow_null,
+    }
 
 
 def _obj(fields: dict, required: bool = True) -> dict:
@@ -383,6 +390,9 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
                                 "contradiction",
                             ],
                             required=False,
+                            # phase2-improvement.md documents `agreement: null`
+                            # (eg when fresh-eyes review is skipped).
+                            allow_null=True,
                         ),
                     },
                 },
@@ -601,7 +611,9 @@ def validate_value(
     elif field_type == "enum":
         checked += 1
         allowed = spec.get("values", [])
-        if value not in allowed:
+        if value is None and spec.get("allow_null"):
+            pass
+        elif value not in allowed:
             errors.append(
                 ValidationError(
                     path,
@@ -943,6 +955,15 @@ def main() -> int:
         results = validate_step(state, args.step)
     elif args.all:
         results = validate_all(state)
+        if not results:
+            # An empty/truncated/corrupt state file has no known handoffs;
+            # `all()` over an empty list would report a vacuous ALL PASS.
+            print(
+                "Error: no known handoffs found in state file; "
+                "nothing to validate",
+                file=sys.stderr,
+            )
+            return 2
     else:
         parser.print_help()
         return 2

@@ -105,8 +105,17 @@ CRITERIA_SCHEMA = {
 }
 
 
-def validate_criteria(criteria_path: str, json_output: bool = False) -> int:
-    """Validate an eval_criteria.json file. Returns exit code."""
+def validate_criteria(
+    criteria_path: str, json_output: bool = False, output_stream=None
+) -> int:
+    """Validate an eval_criteria.json file. Returns exit code.
+
+    output_stream: stream for the human-readable VALID/INVALID summary
+    (defaults to stdout). Callers with a JSON-on-stdout contract (eg the
+    --audit mode of validate_eval_criteria.py) pass sys.stderr so the
+    summary cannot corrupt their stdout payload.
+    """
+    out = output_stream or sys.stdout
     path = Path(criteria_path)
     if not path.exists():
         msg = f"File not found: {criteria_path}"
@@ -174,12 +183,13 @@ def validate_criteria(criteria_path: str, json_output: bool = False) -> int:
         if is_valid:
             print(
                 f"VALID: {len(test_cases)} test cases, "
-                f"{fields_checked} fields checked"
+                f"{fields_checked} fields checked",
+                file=out,
             )
         else:
-            print(f"INVALID: {len(errors)} error(s)")
+            print(f"INVALID: {len(errors)} error(s)", file=out)
             for err in errors:
-                print(f"  {err.path}: {err.message}")
+                print(f"  {err.path}: {err.message}", file=out)
 
     return 0 if is_valid else 1
 

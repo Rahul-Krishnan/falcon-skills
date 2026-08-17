@@ -145,15 +145,15 @@ Look for `eval_criteria.json` using the resolution order in the artifact profile
 
 **If more than one candidate exists**, report every path found with its test-case count and test IDs, then use the canonical-for-writes path. Do not silently pick the first hit: divergent suites accumulate at these paths (a stale suite may not contain the failure-mode tests at all), and scoring against the wrong one produces a grade for tests the artifact was never evaluated on. Cleaning up the surplus files is a separate manual action, and per the file-safety rule that means `trash`, never `rm`.
 
-- **If `--reuse-criteria` AND criteria exist:** Proceed to Step 4 (Criteria Audit), then Step 8.
+- **If `--reuse-criteria` AND criteria exist:** Proceed to Step 4 (Criteria Audit), then Step 6 -> Step 7 -> Step 8. The Side-Effect Guard (Step 7) is NOT skippable on the reuse route: reused criteria only carry SAFETY SANDBOX blocks for side effects that existed when they were generated, so an artifact that gained dangerous commands since then would otherwise run an unattended eval unsandboxed.
 - **If `--fix-only`:** Skip to Phase 2.
-- **If criteria exist AND `--auto`:** Proceed to Step 4 (Criteria Audit), then Step 8.
+- **If criteria exist AND `--auto`:** Proceed to Step 4 (Criteria Audit), then Step 6 -> Step 7 -> Step 8 (same reuse route, same non-skippable Step 7).
 - **If criteria exist AND `--confirm`:** Ask whether to reuse or regenerate. If reuse: proceed to Step 4.
 - **If no criteria exist:** Proceed to Step 5 (skip Step 4, nothing to audit).
 
 **Gate: Step 3 → Step 4 or Step 5 (checklist)**
 - [ ] Eval criteria path was checked on disk
-- [ ] Routing decision is one of: reuse (Step 4 -> Step 6 -> Step 8), regenerate (Step 5 -> Step 6 -> Step 8), fix-only (Phase 2)
+- [ ] Routing decision is one of: reuse (Step 4 -> Step 6 -> Step 7 -> Step 8), regenerate (Step 5 -> Step 6 -> Step 7 -> Step 8), fix-only (Phase 2)
 - [ ] If reusing: file is non-empty and contains at least 3 test cases (quick line count check)
 - [ ] If criteria file exists but is empty or corrupt: treat as "no criteria exist", proceed to Step 5
 
@@ -185,7 +185,7 @@ This step audits existing eval criteria for common setup and effectiveness issue
 
 2. **Run deterministic audit:**
    ```bash
-   python3 {validate_script_path} --audit {criteria_path} --artifact-path {artifact_path}
+   python3 <skill-dir>/scripts/validate_eval_criteria.py --audit {criteria_path} --artifact-path {artifact_path}
    ```
    Parse JSON output from stdout. The script checks: missing runner_context, missing/incomplete allowed_tools, missing target_skills, keyword-only semantic checks (heuristic), minimum test count.
 
@@ -701,10 +701,10 @@ Generate report. If `--no-visualize` not set, generate HTML visualization.
 
 **Gate: Phase 1 → Phase 2 (checklist)**
 - [ ] At least one test case scored below 0.8 (improvement is warranted)
-- [ ] If all scores >= 0.8: report grade, skip Phase 2, go to Final Output. No improvement needed.
+- [ ] If all scores >= 0.8: report grade, skip Phase 2, go to Final Output. No improvement needed. Before leaving for Final Output, still append the `phase1_to_phase2` gate event below with `result: "pass"` to `gates[]` — `validate_gates.py --mode no-improvement` requires that event and hard-errors on a run that never emitted it.
 - [ ] Failure triage classification is complete (all 0.00 = criteria bug, single 0.00 = variance, low semantic = real opportunity)
 
-**Gate event (write to `gates[]` in workflow state before entering Phase 2):**
+**Gate event (write to `gates[]` in workflow state before entering Phase 2 — or, on the skip-Phase-2 branch, before going to Final Output):**
 ```json
 {"step": "phase1_to_phase2", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
 ```

@@ -397,7 +397,7 @@ def validate(path: str, output_stream=None) -> int:
     out = output_stream or sys.stdout
 
     # Run schema validation first
-    schema_rc = validate_schema(path)
+    schema_rc = validate_schema(path, output_stream=out)
     if schema_rc != 0:
         print(f"ERROR: Schema validation failed for {path}", file=out)
         return 2
@@ -484,8 +484,9 @@ def audit(criteria_path: str, artifact_path: str | None) -> dict:
     Does NOT modify the criteria file. Returns findings for the caller
     (hone main thread) to apply via Edit tool, preserving JSON formatting.
     """
-    # Run schema validation first
-    schema_rc = validate_schema(criteria_path)
+    # Run schema validation first.
+    # Route its summary to stderr: audit mode's contract is JSON on stdout.
+    schema_rc = validate_schema(criteria_path, output_stream=sys.stderr)
     if schema_rc != 0:
         return {
             "error": f"Schema validation failed for {criteria_path}",
