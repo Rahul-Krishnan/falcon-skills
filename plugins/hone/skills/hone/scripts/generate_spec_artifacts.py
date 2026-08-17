@@ -165,9 +165,13 @@ def generate_benchmark(results, det_scores, baseline_results, baseline_det):
             return None
         results_list = res.get("results", [])
         scores = [r.get("score", 0) for r in results_list if r.get("score") is not None]
-        det_composite = det.get("composite_score", 0) if det else 0
+        # A deterministic composite of 0.0 is a real (failing) score, not a
+        # missing one — only fall back to the LLM average when it is absent.
+        det_composite = det.get("composite_score") if det else None
         return {
-            "composite": det_composite or (sum(scores) / len(scores) if scores else 0),
+            "composite": det_composite
+            if det_composite is not None
+            else (sum(scores) / len(scores) if scores else 0),
             "test_count": len(results_list),
             "pass_count": sum(1 for s in scores if s >= 0.8),
             "avg_score": round(sum(scores) / len(scores), 4) if scores else 0,

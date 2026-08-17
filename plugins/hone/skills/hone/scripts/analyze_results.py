@@ -255,7 +255,7 @@ def analyze(path: str) -> None:
         details = r.get("details", {})
         if isinstance(details, dict):
             cat = details.get("category", r.get("suite", "unknown"))
-            score = r.get("score", 0)
+            score = score_of(r)
             composite = details.get("composite_1_5", 0)
             status = "PASS" if score > 0.5 else "FAIL"
             print(f"{cat:<20} {score:>6.3f} {composite:>5.1f} {status:>8}")

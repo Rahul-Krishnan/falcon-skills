@@ -23,7 +23,8 @@ import re
 import sys
 from pathlib import Path
 
-
+# Canonical skill list shared with validate_eval_criteria.py; add names there.
+from pipeline_skills import SIDE_EFFECTING_SKILLS
 
 # Bash command patterns that cause real-world side effects.
 # Each tuple: (regex_pattern, human_label, simulated_response)
@@ -49,18 +50,6 @@ MCP_TOOL_BLOCKLIST = [
     "send_message",
     "send_message_as_user",
 ]
-
-# Skills known to have side effects. If an artifact invokes one of these, it
-# inherits their side effects and the eval must sandbox them. These are common
-# names from a publish/ship style pipeline; add your own here, since the guard
-# can only sandbox a delegated skill whose name it recognizes.
-SIDE_EFFECTING_SKILLS = {
-    "present",
-    "ship",
-    "forge",
-    "quench",
-    "quick-fix",
-}
 
 # Runner context block prepended to each test case when side effects are detected.
 SANDBOX_HEADER = "SAFETY SANDBOX — side-effect simulation mode"

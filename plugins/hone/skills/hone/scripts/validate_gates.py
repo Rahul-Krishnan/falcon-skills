@@ -24,9 +24,47 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 
 VALID_RESULTS = ("pass", "fail")
-VALID_JUDGES = ("self-check", "automated", "llm-judge")
+
+
+def _load_valid_judges() -> tuple[str, ...]:
+    """Load the judge enum from references/gate-event-schema.json.
+
+    The schema is the single source of truth for judge names. The tuple below
+    is a fallback copy of that enum for when the schema file is missing or
+    malformed (e.g. the script is vendored without its references directory).
+    """
+    fallback = (
+        "automated",
+        "self-check",
+        "fresh-subagent",
+        "model-judge",
+        "opus-judge",
+        "crucible-judge",
+        "human",
+    )
+    schema_path = (
+        Path(__file__).resolve().parent.parent
+        / "references"
+        / "gate-event-schema.json"
+    )
+    try:
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        enum = schema["properties"]["judge"]["enum"]
+        if (
+            isinstance(enum, list)
+            and enum
+            and all(isinstance(judge, str) for judge in enum)
+        ):
+            return tuple(enum)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return fallback
+
+
+VALID_JUDGES = _load_valid_judges()
 
 # Events required for each run mode. Handoff events (handoff_<name>) are
 # emitted per validation attempt and are not part of a fixed expected set.

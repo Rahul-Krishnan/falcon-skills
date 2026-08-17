@@ -472,8 +472,12 @@ def _extract_gate_events(
     # Captures simulation mode where executors describe but don't write state files.
     if agent_response:
         candidates: list[dict] = []
-        # Find all {...} blobs that look like gate events
-        for match in re.finditer(r'\{[^{}]*"step"[^{}]*"judge"[^{}]*"result"[^{}]*\}', agent_response, re.DOTALL):
+        # Lookaheads make the key match order-independent: any ordering of
+        # step/judge/result inside the {...} blob is accepted.
+        for match in re.finditer(
+            r'\{(?=[^{}]*"step")(?=[^{}]*"judge")(?=[^{}]*"result")[^{}]*\}',
+            agent_response,
+        ):
             try:
                 obj = json.loads(match.group())
                 if "step" in obj and "judge" in obj and "result" in obj:
@@ -1123,7 +1127,16 @@ def _is_write_entry(entry: dict) -> bool:
 
 
 def _is_artifact_write_entry(entry: dict) -> bool:
-    """Write to an artifact — excludes temp/state-file initialization."""
+    """Write to an artifact — excludes temp/state-file initialization.
+
+    Real tool_use entries carry their path in tool_input["file_path"];
+    simulation-mode entries describe the write in prose under "content".
+    Check both so state-file writes are excluded in either shape.
+    """
+    tool_input = entry.get("tool_input") or {}
+    file_path = tool_input.get("file_path", "") if isinstance(tool_input, dict) else ""
+    if file_path and _TEMP_PATH_RE.search(file_path):
+        return False
     content = entry.get("content", "")
     if _TEMP_PATH_RE.search(content):
         return False
@@ -1235,6 +1248,17 @@ def _resolve_test_profile(
     return None
 
 
+def _renormalize_weights(
+    weights: dict[str, float], dimensions: dict
+) -> dict[str, float]:
+    """Restrict weights to the scored dimensions and rescale them to sum to 1."""
+    active = {dim: weights[dim] for dim in dimensions if dim in weights}
+    total = sum(active.values())
+    if total > 0 and abs(total - 1.0) > 1e-9:
+        active = {dim: weight / total for dim, weight in active.items()}
+    return active
+
+
 def _score_single_test(
     test_result: dict,
     artifact_type: str,
@@ -1245,7 +1269,9 @@ def _score_single_test(
     timeline = test_result.get("execution_timeline") or []
     agent_response = test_result.get("agent_response", "")
     test_input = _test_input_dict(test_result)
-    duration = test_result.get("duration_seconds", 0.0)
+    # None (not 0.0) when timing is absent: a missing duration must score as
+    # unknown, not as an instantaneous run that aces the performance budget.
+    duration = test_result.get("duration_seconds")
     partial_scoring = False
 
     # Resolve test profile: explicit field → criteria_index → heuristics
@@ -1331,12 +1357,7 @@ def _score_single_test(
             dimensions["research_first"] = score_research_first(timeline)
 
             weights = SKILL_WEIGHTS if artifact_type == "skill" else COMMAND_WEIGHTS
-            active_weights = {dim: weights[dim] for dim in dimensions if dim in weights}
-            total_weight = sum(active_weights.values())
-            if total_weight > 0 and abs(total_weight - 1.0) > 1e-9:
-                active_weights = {
-                    dim: weight / total_weight for dim, weight in active_weights.items()
-                }
+            active_weights = _renormalize_weights(weights, dimensions)
         else:
             partial_scoring = True
             dimensions["voice_compliance"] = score_voice_compliance(agent_response)
@@ -1347,25 +1368,29 @@ def _score_single_test(
         dimensions = {
             "trigger_accuracy": score_trigger_accuracy(timeline, test_input),
             "false_positive_rate": score_false_positive_rate(timeline, test_input),
-            "performance": score_performance(duration),
             "output_structure": score_output_structure(
                 agent_response, artifact_content
             ),
             "error_handling": score_error_handling(timeline),
         }
-        active_weights = HOOK_WEIGHTS
+        # Untimed results (no duration_seconds key) skip the performance
+        # dimension entirely; the remaining weights are renormalized below.
+        if duration is not None:
+            dimensions["performance"] = score_performance(duration)
+        active_weights = _renormalize_weights(HOOK_WEIGHTS, dimensions)
 
     elif artifact_type == "script":
         dimensions = {
             "correctness": score_correctness(timeline),
             "output_format": score_output_format(agent_response),
-            "performance": score_performance(duration),
             "output_structure": score_output_structure(
                 agent_response, artifact_content
             ),
             "error_handling": score_error_handling(timeline),
         }
-        active_weights = SCRIPT_WEIGHTS
+        if duration is not None:
+            dimensions["performance"] = score_performance(duration)
+        active_weights = _renormalize_weights(SCRIPT_WEIGHTS, dimensions)
 
     else:
         return {

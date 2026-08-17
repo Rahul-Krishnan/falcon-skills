@@ -199,8 +199,10 @@ and then halt with an error message including the file path. Do not proceed with
 Then run the deterministic gate check as the last action before stopping:
 
 ```bash
-python3 <skill-dir>/scripts/validate_gates.py /tmp/workflow-${RUN_ID}.json --mode <normal|fix-only|error-halt> --json
+python3 <skill-dir>/scripts/validate_gates.py /tmp/workflow-${RUN_ID}.json --mode <normal|fix-only|error-halt|no-improvement> --json
 ```
+
+Use `--mode no-improvement` when Phase 1 found nothing to improve and Phases 2 and 3 were skipped: it requires only the `phase1_to_phase2` and `workflow_exit` events, so a legitimate skip-Phase-2 run is not flagged for transitions that never fired.
 
 If it exits non-zero, emit the missing or malformed events before stopping. This compiles the gate-emission constraint into a check rather than relying on the executor remembering four separate prose warnings.
 

@@ -31,6 +31,8 @@ import re
 import sys
 from pathlib import Path
 
+# Canonical pipeline-command list shared with side_effect_guard.py; add names there.
+from pipeline_skills import PIPELINE_COMMANDS
 from validate_criteria_schema import validate_criteria as validate_schema
 
 # Words that legitimately appear in technical output and should NOT be in required_absent
@@ -48,19 +50,6 @@ DANGEROUS_ABSENT_WORDS = {
     "stack",
     "crash",
     "retry",
-}
-
-
-# Multi-step pipeline slash commands that require real state to execute fully
-PIPELINE_COMMANDS = {
-    "forge",
-    "smelt",
-    "temper-code",
-    "temper-plan",
-    "smithy",
-    "ship",
-    "present",
-    "quench",
 }
 
 # Words in semantic checks that suggest the test expects full pipeline execution
