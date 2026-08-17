@@ -20,6 +20,10 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+# Shared YAML frontmatter splitting + field extraction (also used by
+# side_effect_guard.py); handles inline values and block scalars.
+from hone_common import frontmatter_field, match_frontmatter, split_frontmatter
+
 # Pillar names
 PROGRESS_GATES = "progress_gates"
 HANDOFF_INTERFACES = "handoff_interfaces"
@@ -234,17 +238,10 @@ VERIFIED_SOURCE_PATTERNS = [
     re.compile(r"state file", re.IGNORECASE),
 ]
 
-# Description extraction: YAML frontmatter between --- delimiters
-# \A anchors to absolute start of file (not just line start) to avoid matching
-# horizontal rules or --- inside code blocks mid-document
-FRONTMATTER_PATTERN = re.compile(r"\A---\s*\n(.*?)\n---", re.DOTALL)
-DESCRIPTION_FIELD_PATTERN = re.compile(
-    r"^description:\s*(.+?)$", re.MULTILINE | re.IGNORECASE
-)
-# Multi-line description: description: | or description: > followed by indented lines
-DESCRIPTION_BLOCK_PATTERN = re.compile(
-    r"^description:\s*[|>]\s*\n((?:\s+.+\n?)+)", re.MULTILINE | re.IGNORECASE
-)
+# Description extraction: frontmatter splitting and field lookup live in
+# hone_common (match_frontmatter / split_frontmatter / frontmatter_field),
+# shared with side_effect_guard.py. Both inline and block-scalar
+# (description: | / description: >) forms are handled there.
 
 # Anti-pattern / "when NOT to use" guidance patterns in descriptions
 ANTI_PATTERN_INDICATORS = [
@@ -683,18 +680,13 @@ def _extract_description(content: str) -> str:
     For skills: extracts the `description:` field from YAML frontmatter.
     For commands: extracts the `description:` field or falls back to first 500 chars.
     """
-    # Try YAML frontmatter first
-    fm_match = FRONTMATTER_PATTERN.search(content)
-    if fm_match:
-        frontmatter = fm_match.group(1)
-        # Try multi-line description (description: | or description: >)
-        block_match = DESCRIPTION_BLOCK_PATTERN.search(frontmatter)
-        if block_match:
-            return block_match.group(1).strip()
-        # Try single-line description
-        field_match = DESCRIPTION_FIELD_PATTERN.search(frontmatter)
-        if field_match:
-            return field_match.group(1).strip()
+    # Try YAML frontmatter first (inline and block-scalar forms both handled
+    # by the shared extractor)
+    frontmatter = split_frontmatter(content)
+    if frontmatter is not None:
+        value = frontmatter_field(frontmatter, "description")
+        if value is not None:
+            return value.strip()
 
     # Fallback: first 500 chars (for commands without frontmatter)
     return content[:500]
@@ -1231,7 +1223,7 @@ def audit_spec_compliance(content: str, artifact_type: str) -> PillarResult:
 
     # Check 2: Body line count < 500
     body = content
-    fm_match = FRONTMATTER_PATTERN.search(content)
+    fm_match = match_frontmatter(content)
     if fm_match:
         body = content[fm_match.end():]
     body_lines = len(body.splitlines())

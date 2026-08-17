@@ -720,7 +720,7 @@ This information is surfaced to the user in the Step 12 Report so they know whic
 Generate report. If `--no-visualize` not set, generate HTML visualization.
 
 **Gate: Phase 1 → Phase 2 (checklist)**
-- [ ] At least one test case scored below 0.8 (improvement is warranted)
+- [ ] At least one test case scored below 0.8 (improvement is warranted; the 0.8 bar mirrors `ACTIONABLE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative)
 - [ ] If all scores >= 0.8: report grade, skip Phase 2, go to Final Output. No improvement needed. Before leaving for Final Output, still append the `phase1_to_phase2` gate event below with `result: "pass"` to `gates[]` — `validate_gates.py --mode no-improvement` requires that event and hard-errors on a run that never emitted it.
 - [ ] Failure triage classification is complete (all 0.00 = criteria bug, single 0.00 = variance, low semantic = real opportunity)
 

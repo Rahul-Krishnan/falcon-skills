@@ -68,7 +68,7 @@ This step applies deterministic fixes to eval criteria when tests fail due to te
    If validation fails, revert the criteria file from backup and skip this step.
 
 4. **Post-fix verification (per-test):** Re-run eval runner on ONLY the repaired tests. To isolate specific tests, create a temporary criteria file containing just the repaired test cases (a JSON object with only the target test entries), run eval runner against it, then delete the temp file. Use the same `--workers` and `--judge-rounds` settings.
-   - If score >= 0.65: fix accepted. Update the test's triage classification from `criteria_bug` to `pass`.
+   - If score >= 0.65: fix accepted. Update the test's triage classification from `criteria_bug` to `pass`. (The 0.65 bar mirrors `ACCEPTANCE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative.)
    - If score < 0.65: revert that test's criteria changes. Reclassify as `real_issue` (the pattern table was wrong; this is a skill problem, not a test problem). Log: "Pattern {pattern_name} did not fix {test_id} (post-fix score: {score}). Reclassified as real_issue."
 
 5. **Log unmatched failures:** For any `criteria_bug` tests that didn't match a pattern, log to workflow state as `unmatched_criteria_bugs`. These go to a human review queue (reported in Final Output). Do NOT attempt LLM-based fixes in V1.
@@ -87,7 +87,7 @@ This step applies deterministic fixes to eval criteria when tests fail due to te
 - [ ] All matched fixes were applied via Edit tool
 - [ ] Repaired criteria passed validation
 - [ ] Post-fix verification ran for each repaired test
-- [ ] Tests with score >= 0.65 accepted; tests < 0.65 reverted and reclassified
+- [ ] Tests with score >= 0.65 accepted; tests < 0.65 reverted and reclassified (0.65 mirrors `ACCEPTANCE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative)
 - [ ] Unmatched criteria bugs logged for human review
 - [ ] Triage results updated with new classifications
 
@@ -95,7 +95,7 @@ This step applies deterministic fixes to eval criteria when tests fail due to te
 ```
 criteria_repair: {
   pattern_matched: number,              // tests fixed by pattern table
-  pattern_verified: number,             // fixes that passed post-fix threshold (0.65)
+  pattern_verified: number,             // fixes that passed post-fix threshold (0.65; mirrors ACCEPTANCE_THRESHOLD in scripts/hone_common.py)
   pattern_reverted: number,             // fixes that failed verification, reclassified
   unmatched: number,                    // criteria bugs with no matching pattern
   unmatched_test_ids: string[],         // for human review queue

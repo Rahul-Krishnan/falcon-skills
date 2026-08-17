@@ -31,6 +31,10 @@ import re
 import sys
 from pathlib import Path
 
+# Shared filesystem-mutation regexes (also used by side_effect_guard.py for
+# sandboxing); pattern edits belong in hone_common, not here.
+from hone_common import FS_MUTATING_BASH_PATTERNS
+
 # Canonical pipeline-command list shared with side_effect_guard.py; add names there.
 from pipeline_skills import PIPELINE_COMMANDS
 from validate_criteria_schema import validate_criteria as validate_schema
@@ -224,11 +228,12 @@ def check_runner_context_present(tc: dict) -> dict | None:
 # Filesystem-mutating bash patterns that must not appear in runner_context.
 # These cause real side effects during eval runs (created scripts, written
 # files) and break test isolation — especially on unattended runs.
+# The regexes are shared with side_effect_guard.py via hone_common (this list
+# was previously a local fork and drifted); the SETUP: block pattern is
+# validator-specific hygiene layered on top.
 _FS_MUTATING_PATTERNS = [
-    (re.compile(r"\bmkdir\s+(-p\s+)?[^\s]+"), "mkdir"),
-    (re.compile(r"\bprintf\s+[^|]*>[>\s]*[^\s]+"), "printf > file"),
-    (re.compile(r"\becho\s+[^|]*>[>\s]*[^\s]+"), "echo > file"),
-    (re.compile(r"\bcp\s+[^\s]+\s+[^\s]+"), "cp"),
+    (re.compile(pattern), label) for pattern, label in FS_MUTATING_BASH_PATTERNS
+] + [
     (re.compile(r"^\s*SETUP:", re.MULTILINE), "SETUP: block"),
 ]
 

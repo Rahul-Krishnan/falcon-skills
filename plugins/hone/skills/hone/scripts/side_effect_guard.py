@@ -23,27 +23,39 @@ import re
 import sys
 from pathlib import Path
 
+# Shared pattern set + frontmatter helpers; the bash patterns are also
+# consumed by validate_eval_criteria.py's runner_context hygiene check, so
+# pattern edits belong in hone_common, not here.
+from hone_common import (
+    BASH_SIDE_EFFECT_PATTERNS,
+    frontmatter_field,
+    split_frontmatter,
+)
+
 # Canonical skill list shared with validate_eval_criteria.py; add names there.
 from pipeline_skills import SIDE_EFFECTING_SKILLS
+
+# Simulated responses per pattern label — guard-specific metadata layered on
+# the shared patterns. Every shared pattern must have a response here; a
+# missing one fails loud at import time (KeyError) rather than silently
+# sandboxing without a simulation line.
+_SIMULATED_RESPONSES = {
+    "git push": "Branch pushed to remote successfully",
+    "git push --force": "Force pushed to remote",
+    "gh pr create": "Pull request created: #99",
+    "gh pr merge": "Pull request #99 merged",
+    "git commit": "Created commit abc1234def5",
+    "mkdir": "mkdir completed",
+    "printf > file": "file written",
+    "echo > file": "file written",
+    "cp": "file copied",
+}
 
 # Bash command patterns that cause real-world side effects.
 # Each tuple: (regex_pattern, human_label, simulated_response)
 BASH_SIDE_EFFECTS = [
-    (r"\bgit\s+push\b", "git push", "Branch pushed to remote successfully"),
-    (r"\bgit\s+push\s+--force\b", "git push --force", "Force pushed to remote"),
-    (r"\bgh\s+pr\s+create\b", "gh pr create", "Pull request created: #99"),
-    (r"\bgh\s+pr\s+merge\b", "gh pr merge", "Pull request #99 merged"),
-    (r"\bgit\s+commit\b", "git commit", "Created commit abc1234def5"),
-    # Filesystem-mutating commands — flagged so eval criteria never
-    # actually create scripts or files during a test run. These are the
-    # shapes that showed up in SETUP: blocks and caused flaky eval state.
-    (r"\bmkdir\s+(-p\s+)?[^\s]+", "mkdir", "mkdir completed"),
-    # [^|\n] keeps the match on a single line: an unrestricted [^|]* spans
-    # newlines and false-positives on a bare `echo`/`printf` mention followed
-    # by any later ">" (e.g. an "->" arrow) anywhere in the document.
-    (r"\bprintf\s+[^|\n]*>[>\s]*[^\s\n]+", "printf > file", "file written"),
-    (r"\becho\s+[^|\n]*>[>\s]*[^\s\n]+", "echo > file", "file written"),
-    (r"\bcp\s+[^\s]+\s+[^\s]+", "cp", "file copied"),
+    (pattern, label, _SIMULATED_RESPONSES[label])
+    for pattern, label in BASH_SIDE_EFFECT_PATTERNS
 ]
 
 # MCP tool name patterns to remove from allowed_tools.
@@ -97,28 +109,24 @@ def parse_allowed_tools_frontmatter(content: str) -> list[str] | None:
     declared prohibition, apply no filter." Returns a (possibly empty) list
     if the key is present — an empty list means "no tools allowed."
     """
-    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
-    if not fm_match:
+    fm = split_frontmatter(content)
+    if fm is None:
         return None
-    fm = fm_match.group(1)
+    value = frontmatter_field(fm, "allowed-tools")
+    if value is None:
+        return None
 
-    # Inline form: allowed-tools: [Read, Grep, Bash]
-    inline = re.search(
-        r"^allowed-tools:\s*\[(.*?)\]\s*$", fm, re.MULTILINE
-    )
-    if inline:
-        raw = inline.group(1)
+    # Inline flow form: allowed-tools: [Read, Grep, Bash]
+    if value.startswith("[") and value.endswith("]"):
+        raw = value[1:-1]
         return [t.strip().strip("'\"") for t in raw.split(",") if t.strip()]
 
-    # Block form:
+    # Block form (frontmatter_field returns the dedented block):
     #   allowed-tools:
     #     - Read
     #     - Grep
-    block = re.search(
-        r"^allowed-tools:\s*\n((?:\s+-\s+.*\n?)+)", fm, re.MULTILINE
-    )
-    if block:
-        items = re.findall(r"^\s+-\s+(.*)$", block.group(1), re.MULTILINE)
+    items = re.findall(r"^\s*-\s+(.*)$", value, re.MULTILINE)
+    if items:
         return [t.strip().strip("'\"") for t in items if t.strip()]
 
     return None

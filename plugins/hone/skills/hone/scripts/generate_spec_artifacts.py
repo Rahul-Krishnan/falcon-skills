@@ -26,6 +26,10 @@ import json
 import os
 import sys
 
+# Shared null-tolerant getter and the authoritative pass threshold (Phase 1
+# exit gate; see hone_common.py).
+from hone_common import ACTIONABLE_THRESHOLD, get
+
 
 def load_json(path):
     """Load a JSON file, return None on error."""
@@ -117,8 +121,9 @@ def generate_grading(results, det_scores):
             det_composite = None
 
         # Same location as generate_evals: details.raw_semantic_scores dict.
-        details = result.get("details", {})
-        raw_scores = details.get("raw_semantic_scores", {}) if isinstance(details, dict) else {}
+        # get() tolerates explicit nulls for both details and the scores dict.
+        details = get(result, "details", {})
+        raw_scores = get(details, "raw_semantic_scores", {})
         for i, (check, sc_score) in enumerate(raw_scores.items()):
             assertion_results.append(
                 {
@@ -138,7 +143,7 @@ def generate_grading(results, det_scores):
                 {
                     "eval_id": tc_id,
                     "assertion_id": f"{tc_id}-composite",
-                    "passed": det_composite >= 0.8,
+                    "passed": det_composite >= ACTIONABLE_THRESHOLD,
                     "score": det_composite,
                     "max_score": 1.0,
                     "evidence": f"LLM judge: {score}, deterministic: {det_composite}",
@@ -201,7 +206,7 @@ def generate_benchmark(results, det_scores, baseline_results, baseline_det):
             "composite": composite,
             "composite_metric": metric,
             "test_count": len(results_list),
-            "pass_count": sum(1 for s in scores if s >= 0.8),
+            "pass_count": sum(1 for s in scores if s >= ACTIONABLE_THRESHOLD),
             "avg_score": avg_score,
         }
 

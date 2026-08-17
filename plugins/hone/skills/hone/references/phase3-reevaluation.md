@@ -74,13 +74,13 @@ The prior approach was an LLM-evaluated checklist: the improving agent would ask
 
 The state file decides when to exit. The LLM cannot override these checks. Re-read `/tmp/workflow-${RUN_ID}.json` and evaluate each condition:
 
-**PRECEDENCE: BLOCKED conditions are checked FIRST. If ANY BLOCKED condition is true, do NOT exit, regardless of ALLOWED conditions.** This prevents the failure mode where "all individual test scores >= 0.8" triggers exit while momentum exists and rounds remain.
+**PRECEDENCE: BLOCKED conditions are checked FIRST. If ANY BLOCKED condition is true, do NOT exit, regardless of ALLOWED conditions.** This prevents the failure mode where "all individual test scores >= 0.8" triggers exit while momentum exists and rounds remain. (The 0.8 per-test bar mirrors `ACTIONABLE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative.)
 
 **Exit BLOCKED (keep going) when ANY are true** (checked FIRST):
 - [ ] Any step is `"pending"` or `"in_progress"` in the state file
 - [ ] `open_questions` is non-empty
 - [ ] `iteration.current < iteration.target` AND score improved this round by >= 0.02 AND composite < 0.9 AND (`{target_score}` is unset OR composite < `{target_score}`) (momentum, not plateau — but grade A artifacts or target-met artifacts are allowed to exit early)
-- [ ] Any test has score < 0.5 AND `iteration.current < iteration.target` (significant failure with rounds remaining)
+- [ ] Any test has score < 0.5 AND `iteration.current < iteration.target` (significant failure with rounds remaining; the 0.5 bar mirrors `CRITERIA_BUG_THRESHOLD` in `scripts/hone_common.py`, which is authoritative)
 
 **Exit ALLOWED when ALL are true** (checked ONLY if no BLOCKED conditions matched):
 - [ ] All steps in `steps` object are `"done"` (no `"pending"` or `"in_progress"`)
@@ -93,7 +93,7 @@ The state file decides when to exit. The LLM cannot override these checks. Re-re
   - Score delta between last two rounds < 0.02 AND zero actionable failures remain (genuine plateau)
 
 **Forced exit with human gate (--confirm mode only):**
-- If rounds exhausted but tests with score < 0.5 remain: present the failures to the user and ask whether to add more rounds or accept the current state. In `--auto` mode: log `"exit_with_low_scores": true` and the test IDs in the state file, but do exit (the round budget is a hard cap in --auto to prevent infinite overnight loops).
+- If rounds exhausted but tests with score < 0.5 remain (0.5 mirrors `CRITERIA_BUG_THRESHOLD` in `scripts/hone_common.py`, which is authoritative): present the failures to the user and ask whether to add more rounds or accept the current state. In `--auto` mode: log `"exit_with_low_scores": true` and the test IDs in the state file, but do exit (the round budget is a hard cap in --auto to prevent infinite overnight loops).
 
 **Anti-gaming note:** `open_questions` is auto-populated from structural data (eval scores in 0.4-0.7, failed structural pillars, fresh-eyes disagreements) BEFORE the main thread touches the array. Auto-generated questions are tagged `"source": "auto"` and cannot be removed by the LLM. The main thread can add `"source": "manual"` questions but cannot delete auto-generated ones. The remaining trust surface is limited to: the LLM choosing not to add manual questions it should have. This is a narrower gap than the original (LLM populating the entire array), and is partially covered by fresh-eyes reconciliation surfacing findings the main thread missed.
 

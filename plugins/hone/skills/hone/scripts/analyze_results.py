@@ -14,85 +14,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
-
-# Below this, a test is an actionable quality gap. Mirrors SKILL.md's Phase 1
-# exit gate ("any test scored below 0.8").
-ACTIONABLE_THRESHOLD = 0.8
-
-# Below this across the whole run, the criteria are suspect rather than the artifact.
-CRITERIA_BUG_THRESHOLD = 0.5
-
-
-def load_deterministic_scores(results_path: str) -> dict[str, float]:
-    """Map test_id -> deterministic composite from deterministic_scores.json.
-
-    results.json carries a per-test `score` only when an LLM judge ran. On a
-    deterministic-only run those fields are absent, so every consumer that reads
-    `score` directly sees 0.0 for every test. Both the triage path and the
-    human-readable summary must use this map first.
-
-    Returns an empty dict when the file is missing or unreadable.
-    """
-    det_scores_path = Path(results_path).parent / "deterministic_scores.json"
-    if not det_scores_path.exists():
-        return {}
-    try:
-        with open(det_scores_path) as f:
-            det_data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-    per_test = det_data.get("per_test") or []
-    # Inconclusive tests carry composite: null; exclude them so numeric
-    # comparisons downstream never see None.
-    return {
-        test["test_id"]: test["composite"]
-        for test in per_test
-        if "test_id" in test and isinstance(test.get("composite"), (int, float))
-    }
-
-
-def load_inconclusive_ids(results_path: str) -> set[str]:
-    """Set of test_ids marked inconclusive in deterministic_scores.json.
-
-    score_execution.py emits `status: "inconclusive"` with `composite: null`
-    for tests with no execution evidence. load_deterministic_scores drops them
-    from the score map, which made them indistinguishable from "never scored
-    deterministically": on a deterministic-only run they then fell back to
-    `score = 0.0, score_source = "llm_judge"`, dragging avg/FAIL counts and
-    (on an all-inconclusive run) misrouting triage into criteria_bug.
-    """
-    det_scores_path = Path(results_path).parent / "deterministic_scores.json"
-    if not det_scores_path.exists():
-        return set()
-    try:
-        with open(det_scores_path) as f:
-            det_data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return set()
-
-    per_test = det_data.get("per_test") or []
-    return {
-        test["test_id"]
-        for test in per_test
-        if "test_id" in test
-        and (
-            test.get("status") == "inconclusive"
-            or not isinstance(test.get("composite"), (int, float))
-        )
-    }
-
-
-def _llm_score(result: dict) -> float:
-    """LLM judge score with an explicit null treated the same as a missing key.
-
-    The eval_results schema allows score: null for inconclusive/score_error
-    tests, and .get's default only covers an absent key, so a raw
-    result.get("score", 0.0) returns None and crashes the >= comparisons."""
-    score = result.get("score")
-    return score if score is not None else 0.0
+# Shared helpers: null-tolerant access, canonical score fallback chain,
+# deterministic_scores.json loaders, and the authoritative thresholds
+# (ACTIONABLE_THRESHOLD = Phase 1 exit gate, CRITERIA_BUG_THRESHOLD =
+# run-wide "the criteria are suspect" bar). See hone_common.py docstrings.
+from hone_common import (
+    ACTIONABLE_THRESHOLD,
+    CRITERIA_BUG_THRESHOLD,
+    get,
+    load_deterministic_scores,
+    load_inconclusive_ids,
+    resolve_score,
+)
 
 
 def classify_failure(score: float, all_scores: list[float]) -> str:
@@ -156,10 +90,7 @@ def triage(path: str) -> dict:
         test_id = result.get("test_id", "unknown")
         if test_id in inconclusive_ids:
             continue
-        if test_id in det_per_test:
-            all_scores.append(det_per_test[test_id])
-        else:
-            all_scores.append(_llm_score(result))
+        all_scores.append(resolve_score(result, det_per_test))
 
     classifications = []
     counts: dict[str, int] = {
@@ -183,12 +114,8 @@ def triage(path: str) -> dict:
             )
             counts["inconclusive"] += 1
             continue
-        if test_id in det_per_test:
-            score = det_per_test[test_id]
-            source = "deterministic"
-        else:
-            score = _llm_score(result)
-            source = "llm_judge"
+        source = "deterministic" if test_id in det_per_test else "llm_judge"
+        score = resolve_score(result, det_per_test)
 
         classification = classify_failure(score, all_scores)
         classifications.append(
@@ -234,10 +161,7 @@ def analyze(path: str) -> None:
 
     def score_of(result: dict) -> float:
         """Deterministic composite when available, else the LLM judge score."""
-        test_id = result.get("test_id", "unknown")
-        if test_id in det_per_test:
-            return det_per_test[test_id]
-        return _llm_score(result)
+        return resolve_score(result, det_per_test)
 
     # Inconclusive tests were never scored; keep them out of pass/avg math
     # so "nothing was observed" does not read as a 0.0 failure.
@@ -301,7 +225,7 @@ def analyze(path: str) -> None:
 
         if isinstance(details, dict):
             # Programmatic checks
-            prog = details.get("programmatic_checks", [])
+            prog = get(details, "programmatic_checks", [])
             failed_prog = [p for p in prog if not p.get("passed", True)]
             if failed_prog:
                 print("  FAILED programmatic checks:")
@@ -336,7 +260,7 @@ def analyze(path: str) -> None:
         if isinstance(details, dict):
             cat = details.get("category", r.get("suite", "unknown"))
             score = score_of(r)
-            composite = details.get("composite_1_5", 0)
+            composite = get(details, "composite_1_5", 0)
             status = "PASS" if score >= ACTIONABLE_THRESHOLD else "FAIL"
             print(f"{cat:<20} {score:>6.3f} {composite:>5.1f} {status:>8}")
 

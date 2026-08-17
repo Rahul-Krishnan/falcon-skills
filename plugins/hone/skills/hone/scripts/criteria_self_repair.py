@@ -41,7 +41,17 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
+
+# Shared helpers: null-tolerant access, the canonical score fallback chain,
+# the deterministic_scores.json loader duplicated here before consolidation,
+# and the authoritative failing-test threshold. ACCEPTANCE_THRESHOLD (0.65)
+# is the post-fix bar Phase 2 uses to accept or revert a repair.
+from hone_common import (
+    CRITERIA_BUG_THRESHOLD,
+    get,
+    load_deterministic_scores,
+    resolve_score,
+)
 
 
 # === PATTERN TABLE ===
@@ -53,10 +63,10 @@ from pathlib import Path
 
 def _check_recursive_timeout(test_result: dict) -> bool:
     """Test timed out because it launched a recursive evaluation run."""
-    details = test_result.get("details", {})
-    timeout_analysis = details.get("timeout_analysis", "")
-    duration = test_result.get("duration_seconds", 0)
-    score = test_result.get("score", 1.0)
+    details = get(test_result, "details", {})
+    timeout_analysis = get(details, "timeout_analysis", "")
+    duration = get(test_result, "duration_seconds", 0)
+    score = get(test_result, "score", 1.0)
 
     if score > 0.0:
         return False
@@ -116,10 +126,10 @@ def _fix_recursive_timeout(test_result: dict) -> dict:
 
 def _check_empty_response(test_result: dict) -> bool:
     """Test produced no agent response at all."""
-    score = test_result.get("score", 1.0)
+    score = get(test_result, "score", 1.0)
     response = test_result.get("agent_response", test_result.get("response", ""))
-    details = test_result.get("details", {})
-    timeout_analysis = details.get("timeout_analysis", "")
+    details = get(test_result, "details", {})
+    timeout_analysis = get(details, "timeout_analysis", "")
 
     if score > 0.0:
         return False
@@ -155,9 +165,9 @@ def _fix_empty_response(test_result: dict) -> dict:
 
 def _check_tool_access_errors(test_result: dict) -> bool:
     """Test failed because executor tried tools not in allowed_tools."""
-    details = test_result.get("details", {})
-    timeout_analysis = details.get("timeout_analysis", "")
-    score = test_result.get("score", 1.0)
+    details = get(test_result, "details", {})
+    timeout_analysis = get(details, "timeout_analysis", "")
+    score = get(test_result, "score", 1.0)
 
     if score > 0.3:
         return False
@@ -210,32 +220,6 @@ PATTERNS = [
 ]
 
 
-def _load_deterministic_scores(results_path: str) -> dict[str, float]:
-    """Map test_id -> deterministic composite from deterministic_scores.json.
-
-    Same convention as analyze_results.load_deterministic_scores (scripts are
-    standalone, so the loader is duplicated rather than imported): results.json
-    carries a per-test `score` only when an LLM judge ran, so deterministic-only
-    rounds need this sibling file to see any scores at all. Returns an empty
-    dict when the file is missing or unreadable.
-    """
-    det_scores_path = Path(results_path).parent / "deterministic_scores.json"
-    if not det_scores_path.exists():
-        return {}
-    try:
-        with open(det_scores_path) as f:
-            det_data = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-    per_test = det_data.get("per_test") or []
-    return {
-        test["test_id"]: test["composite"]
-        for test in per_test
-        if "test_id" in test and isinstance(test.get("composite"), (int, float))
-    }
-
-
 def match_patterns(results_path: str) -> dict:
     """Match failing tests against pattern table. Return matched + unmatched."""
     try:
@@ -257,28 +241,27 @@ def match_patterns(results_path: str) -> dict:
         }
 
     results = data.get("results", [])
-    det_scores = _load_deterministic_scores(results_path)
+    det_scores = load_deterministic_scores(results_path)
     matched = []
     unmatched = []
 
     for result in results:
         test_id = result.get("test_id", "unknown")
-        score = result.get("score", result.get("final_score"))
-        if score is None:
-            # Deterministic-only rounds carry no per-test score in results.json
-            # (analyze_results.py:29-37). Fall back to deterministic_scores.json,
-            # and default a still-missing score to 0.0 (the sibling scripts'
-            # convention) — defaulting to 1.0 made every scoreless failing test
-            # look passing and silently no-opped self-repair.
-            score = det_scores.get(test_id, 0.0)
+        # Canonical fallback chain (score / final_score / deterministic
+        # composite / 0.0), preferring the result's own score: deterministic-only
+        # rounds carry no per-test score in results.json, and defaulting a
+        # still-missing score to 1.0 made every scoreless failing test look
+        # passing and silently no-opped self-repair.
+        score = resolve_score(result, det_scores, prefer_deterministic=False)
         # Normalize once: condition functions read result["score"] directly.
         # Assign on None rather than setdefault: an explicit JSON null keeps
         # the key present, and None would TypeError in `score > 0.0` checks.
         if result.get("score") is None:
             result["score"] = score
 
-        # Only process failures (score < 0.5, since 0.65 is the acceptance threshold)
-        if score >= 0.5:
+        # Only process failures (below CRITERIA_BUG_THRESHOLD; the higher
+        # ACCEPTANCE_THRESHOLD in hone_common is the post-fix acceptance bar)
+        if score >= CRITERIA_BUG_THRESHOLD:
             continue
 
         # Check each pattern
@@ -293,8 +276,8 @@ def match_patterns(results_path: str) -> dict:
 
         if not pattern_matched:
             # Build failure signature for human review
-            details = result.get("details", {})
-            timeout_analysis = details.get("timeout_analysis", "")
+            details = get(result, "details", {})
+            timeout_analysis = get(details, "timeout_analysis", "")
             duration_match = re.search(r"Duration: (\d+)s", timeout_analysis)
             tool_match = re.search(r"Tool calls: (\d+)", timeout_analysis)
 
