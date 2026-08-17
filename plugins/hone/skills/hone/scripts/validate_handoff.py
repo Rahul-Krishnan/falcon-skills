@@ -49,12 +49,15 @@ def _num(
     required: bool = True,
     min_value: float | None = None,
     max_value: float | None = None,
+    allow_null: bool = False,
 ) -> dict:
     spec: dict = {"type": "number", "required": required}
     if min_value is not None:
         spec["min_value"] = min_value
     if max_value is not None:
         spec["max_value"] = max_value
+    if allow_null:
+        spec["allow_null"] = True
     return spec
 
 
@@ -276,19 +279,28 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
         },
     },
     # Phase 1 -> Phase 2
+    # score_execution.py deliberately emits composite_score: null with grade
+    # "INCONCLUSIVE" when no test is conclusive, and per-test status
+    # "inconclusive" (score null) / "score_error". The schema must be able to
+    # represent that output, or an all-inconclusive run has no legal encoding
+    # and the mandatory pre-Phase-2 gate hard-stops with nothing to fix.
     "eval_results": {
         "fields": {
             "output_dir": _str(required=False),
             "results_path": _str(required=False),
-            "composite_score": _num(min_value=0.0, max_value=1.0),
-            "grade": _enum(["A", "B", "C", "D", "F"]),
+            "composite_score": _num(min_value=0.0, max_value=1.0, allow_null=True),
+            "grade": _enum(["A", "B", "C", "D", "F", "INCONCLUSIVE"]),
             "per_test": _arr(
                 items={
                     "type": "object",
                     "fields": {
                         "test_id": _str(non_empty=True),
-                        "score": _num(min_value=0.0, max_value=1.0),
-                        "status": _enum(["pass", "fail", "error"]),
+                        "score": _num(
+                            min_value=0.0, max_value=1.0, allow_null=True
+                        ),
+                        "status": _enum(
+                            ["pass", "fail", "error", "inconclusive", "score_error"]
+                        ),
                         "failure_type": _enum(
                             ["criteria_bug", "variance", "real_issue"],
                             required=False,
@@ -573,7 +585,11 @@ def validate_value(
 
     elif field_type == "number":
         checked += 1
-        if isinstance(value, bool):
+        if value is None and spec.get("allow_null"):
+            # Mirrors the enum branch: some producers legitimately emit null
+            # (eg score_execution.py's inconclusive composite).
+            pass
+        elif isinstance(value, bool):
             # bool is a subclass of int in Python, but JSON booleans
             # are not numbers. Reject before the int/float check.
             errors.append(

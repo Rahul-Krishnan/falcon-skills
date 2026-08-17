@@ -54,6 +54,37 @@ def load_deterministic_scores(results_path: str) -> dict[str, float]:
     }
 
 
+def load_inconclusive_ids(results_path: str) -> set[str]:
+    """Set of test_ids marked inconclusive in deterministic_scores.json.
+
+    score_execution.py emits `status: "inconclusive"` with `composite: null`
+    for tests with no execution evidence. load_deterministic_scores drops them
+    from the score map, which made them indistinguishable from "never scored
+    deterministically": on a deterministic-only run they then fell back to
+    `score = 0.0, score_source = "llm_judge"`, dragging avg/FAIL counts and
+    (on an all-inconclusive run) misrouting triage into criteria_bug.
+    """
+    det_scores_path = Path(results_path).parent / "deterministic_scores.json"
+    if not det_scores_path.exists():
+        return set()
+    try:
+        with open(det_scores_path) as f:
+            det_data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+    per_test = det_data.get("per_test") or []
+    return {
+        test["test_id"]
+        for test in per_test
+        if "test_id" in test
+        and (
+            test.get("status") == "inconclusive"
+            or not isinstance(test.get("composite"), (int, float))
+        )
+    }
+
+
 def classify_failure(score: float, all_scores: list[float]) -> str:
     """Deterministic failure classification.
 
@@ -106,10 +137,15 @@ def triage(path: str) -> dict:
         }
 
     det_per_test = load_deterministic_scores(path)
+    inconclusive_ids = load_inconclusive_ids(path)
 
+    # Inconclusive tests were never scored; they must not contribute a
+    # phantom 0.0 to the criteria_bug / variance population checks.
     all_scores = []
     for result in results:
         test_id = result.get("test_id", "unknown")
+        if test_id in inconclusive_ids:
+            continue
         if test_id in det_per_test:
             all_scores.append(det_per_test[test_id])
         else:
@@ -121,10 +157,22 @@ def triage(path: str) -> dict:
         "variance": 0,
         "real_issue": 0,
         "pass": 0,
+        "inconclusive": 0,
     }
 
     for result in results:
         test_id = result.get("test_id", "unknown")
+        if test_id in inconclusive_ids:
+            classifications.append(
+                {
+                    "test_id": test_id,
+                    "classification": "inconclusive",
+                    "score": None,
+                    "score_source": "deterministic",
+                }
+            )
+            counts["inconclusive"] += 1
+            continue
         if test_id in det_per_test:
             score = det_per_test[test_id]
             source = "deterministic"
@@ -172,6 +220,7 @@ def analyze(path: str) -> None:
         return
 
     det_per_test = load_deterministic_scores(path)
+    inconclusive_ids = load_inconclusive_ids(path)
 
     def score_of(result: dict) -> float:
         """Deterministic composite when available, else the LLM judge score."""
@@ -180,18 +229,30 @@ def analyze(path: str) -> None:
             return det_per_test[test_id]
         return result.get("score", 0.0)
 
+    # Inconclusive tests were never scored; keep them out of pass/avg math
+    # so "nothing was observed" does not read as a 0.0 failure.
+    conclusive = [
+        r for r in results if r.get("test_id", "unknown") not in inconclusive_ids
+    ]
+
     score_source = "deterministic" if det_per_test else "llm_judge"
-    passed = sum(1 for r in results if score_of(r) > 0.5)
-    avg_score = sum(score_of(r) for r in results) / total
+    passed = sum(1 for r in conclusive if score_of(r) > 0.5)
+    denom = len(conclusive)
+    avg_score = sum(score_of(r) for r in conclusive) / denom if denom else 0.0
 
     print(f"=== RESULTS SUMMARY ({total} tests) ===")
-    print(f"Passed: {passed}/{total} ({passed / total * 100:.0f}%)")
-    print(f"Composite: {avg_score:.3f} (source: {score_source})")
+    if inconclusive_ids:
+        print(f"Inconclusive (excluded from scoring): {len(results) - denom}/{total}")
+    if denom:
+        print(f"Passed: {passed}/{denom} ({passed / denom * 100:.0f}%)")
+        print(f"Composite: {avg_score:.3f} (source: {score_source})")
+    else:
+        print("No conclusive tests; nothing to score.")
     print()
 
     # Triage
-    all_zero = all(score_of(r) == 0.0 for r in results)
-    some_zero = any(score_of(r) == 0.0 for r in results) and not all_zero
+    all_zero = denom > 0 and all(score_of(r) == 0.0 for r in conclusive)
+    some_zero = any(score_of(r) == 0.0 for r in conclusive) and not all_zero
 
     if all_zero:
         print("TRIAGE: ALL TESTS SCORED 0.00")
@@ -201,7 +262,7 @@ def analyze(path: str) -> None:
         print("  -> Fix eval criteria, do NOT edit SKILL.md")
         print()
     elif some_zero:
-        zero_ids = [r.get("test_id", "?") for r in results if score_of(r) == 0.0]
+        zero_ids = [r.get("test_id", "?") for r in conclusive if score_of(r) == 0.0]
         print(f"TRIAGE: {len(zero_ids)} test(s) scored 0.00: {', '.join(zero_ids)}")
         print(
             "  -> Likely agent variance (skill misidentification) or eval criteria issue"
@@ -218,8 +279,12 @@ def analyze(path: str) -> None:
         details = r.get("details", {})
         tool_errors = r.get("tool_call_error_count", 0)
 
-        status = "PASS" if score > 0.5 else "FAIL"
-        print(f"\n--- {tid} [{suite}] {status} (score={score:.3f}) ---")
+        if tid in inconclusive_ids:
+            status, score_label = "INCONCLUSIVE", "score=n/a"
+        else:
+            status = "PASS" if score > 0.5 else "FAIL"
+            score_label = f"score={score:.3f}"
+        print(f"\n--- {tid} [{suite}] {status} ({score_label}) ---")
 
         if isinstance(details, dict):
             # Programmatic checks

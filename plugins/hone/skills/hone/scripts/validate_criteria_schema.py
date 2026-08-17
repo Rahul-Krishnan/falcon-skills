@@ -81,13 +81,20 @@ TEST_CASE_SCHEMA = {
             "tool_usage",
             "business_impact",
         ]),
-        "test_profile": _enum([
-            "execution",
-            "knowledge_extraction",
-            "error_handling",
-            "side_effect_guarded",
-            "failure_mode",
-        ]),
+        # Optional: phase1-evaluation.md only instructs generating this field
+        # for failure-mode cases (item 8), and score_execution.py falls back
+        # to heuristic profile detection when it is absent. Requiring it made
+        # every doc-shaped item 1-7 test case fail the pre-launch gate.
+        "test_profile": _enum(
+            [
+                "execution",
+                "knowledge_extraction",
+                "error_handling",
+                "side_effect_guarded",
+                "failure_mode",
+            ],
+            required=False,
+        ),
         "prompt": _str(non_empty=True),
         "runner_context": _str(non_empty=True),
         "allowed_tools": _arr(items={"type": "string"}, non_empty=True),

@@ -15,3 +15,7 @@ jobs:
         run: python3 scripts/test_validate_structure.py
       - name: Validate plugin structure
         run: python3 scripts/validate_structure.py
+      # The hone suites are unittest-based (stdlib-only, no pytest dependency),
+      # so they run through unittest discover rather than a second runner.
+      - name: Run hone script tests
+        run: python3 -m unittest discover -s plugins/hone/skills/hone/scripts -p 'test_*.py'

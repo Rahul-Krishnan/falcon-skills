@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from pathlib import Path
+
+import structural_audit
 
 # Import will work after structural_audit.py is created
 # For now, tests define expected behavior
@@ -124,9 +127,9 @@ description: A research skill
 
 ## Stage 1: Research
 
-### Step 1: Deep research
+### Step 1: Manual research
 
-Run /deep-research on the topic.
+Read the relevant files and take notes yourself.
 
 **Gate: Step 1 → Step 2 (checklist)**
 - [ ] Research complete
@@ -307,11 +310,30 @@ class TestStructuralAudit(unittest.TestCase):
         # Missing anti-pattern guidance goes to warnings, not findings
         self.assertTrue(len(result.get("warnings", [])) > 0)
 
-    def test_research_without_temper_flagged(self):
+    def test_research_without_delegation_skill_flagged(self):
         result = _run_audit(RESEARCH_SKILL_NO_TEMPER, "skill", complexity_tier="complex")
         rd = next(p for p in result["pillars"] if p["name"] == "research_depth")
         self.assertTrue(rd["applicable"])
         self.assertFalse(rd["passed"])
+
+    def test_research_skill_names_env_override(self):
+        content = RESEARCH_SKILL_NO_TEMPER.replace(
+            "Read the relevant files and take notes yourself.",
+            "Delegate to /my-own-researcher for the survey.",
+        )
+        os.environ["HONE_RESEARCH_SKILLS"] = "my-own-researcher"
+        try:
+            result = _run_audit(content, "skill", complexity_tier="complex")
+        finally:
+            del os.environ["HONE_RESEARCH_SKILLS"]
+        rd = next(p for p in result["pillars"] if p["name"] == "research_depth")
+        self.assertTrue(rd["applicable"])
+        self.assertTrue(rd["passed"])
+
+    def test_research_depth_is_warning_only(self):
+        self.assertIn(
+            structural_audit.RESEARCH_DEPTH, structural_audit.WARNING_ONLY_PILLARS
+        )
 
     # --- False positive regression tests ---
 

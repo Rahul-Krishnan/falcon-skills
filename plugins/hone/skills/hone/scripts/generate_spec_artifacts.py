@@ -110,6 +110,11 @@ def generate_grading(results, det_scores):
         score = result.get("score", 0)
         det = det_by_id.get(tc_id, {})
         det_composite = det.get("composite", score)
+        # score_execution.py emits composite: null for inconclusive tests, and
+        # .get's fallback does not apply to a key present with null; unguarded,
+        # `det_composite >= 0.8` below would TypeError before any file is written.
+        if not isinstance(det_composite, (int, float)):
+            det_composite = None
 
         # Same location as generate_evals: details.raw_semantic_scores dict.
         details = result.get("details", {})
@@ -126,16 +131,19 @@ def generate_grading(results, det_scores):
                 }
             )
 
-        assertion_results.append(
-            {
-                "eval_id": tc_id,
-                "assertion_id": f"{tc_id}-composite",
-                "passed": det_composite >= 0.8,
-                "score": det_composite,
-                "max_score": 1.0,
-                "evidence": f"LLM judge: {score}, deterministic: {det_composite}",
-            }
-        )
+        # Inconclusive tests carry no numeric evidence either way; skip the
+        # composite assertion rather than fabricating a pass/fail for it.
+        if det_composite is not None:
+            assertion_results.append(
+                {
+                    "eval_id": tc_id,
+                    "assertion_id": f"{tc_id}-composite",
+                    "passed": det_composite >= 0.8,
+                    "score": det_composite,
+                    "max_score": 1.0,
+                    "evidence": f"LLM judge: {score}, deterministic: {det_composite}",
+                }
+            )
 
     total = len(assertion_results)
     passed = sum(1 for a in assertion_results if a["passed"])

@@ -271,9 +271,11 @@ def match_patterns(results_path: str) -> dict:
             # convention) — defaulting to 1.0 made every scoreless failing test
             # look passing and silently no-opped self-repair.
             score = det_scores.get(test_id, 0.0)
-        # Normalize once: condition functions read result["score"] directly,
-        # so a final_score-only result must not default there.
-        result.setdefault("score", score)
+        # Normalize once: condition functions read result["score"] directly.
+        # Assign on None rather than setdefault: an explicit JSON null keeps
+        # the key present, and None would TypeError in `score > 0.0` checks.
+        if result.get("score") is None:
+            result["score"] = score
 
         # Only process failures (score < 0.5, since 0.65 is the acceptance threshold)
         if score >= 0.5:

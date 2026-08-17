@@ -15,7 +15,6 @@ import json
 import math
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 
 EPSILON = 1e-6
@@ -1674,14 +1673,6 @@ def main() -> None:
                 else:
                     print(f"  {test['test_id']}: {test['composite']:.4f}")
         print(f"\nScores written to: {output_path}")
-
-    usage_log = Path.home() / ".claude" / "scripts" / "usage.log"
-    try:
-        with open(usage_log, "a") as log_file:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-            log_file.write(f"{timestamp} | score_execution.py | success\n")
-    except OSError:
-        pass
 
 
 if __name__ == "__main__":

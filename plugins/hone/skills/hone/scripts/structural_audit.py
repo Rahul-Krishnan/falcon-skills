@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 # Pillar names
@@ -45,6 +45,10 @@ WORKFLOW_TYPES = {"skill", "command"}
 # They appear in output as WARN instead of PASS/FAIL.
 # ANTI_LAZINESS and AUTONOMOUS_EXECUTION demoted 2026-08-13:
 # they scored old-model failure-mode insurance, not present-day defects.
+# RESEARCH_DEPTH is warning-only because it is literal-name matching against
+# a configurable skill list: informative, but too environment-dependent to
+# cost structural score or to drive a Phase 2 auto-fix that would inject a
+# skill reference the user's machine may not have.
 WARNING_ONLY_PILLARS = {
     DESCRIPTION_GUARDRAILS,
     SCRIPT_QUALITY,
@@ -54,6 +58,7 @@ WARNING_ONLY_PILLARS = {
     STEP_NUMBERING,
     ANTI_LAZINESS,
     AUTONOMOUS_EXECUTION,
+    RESEARCH_DEPTH,
 }
 
 # Scope-aware pillar priority matrix.
@@ -180,6 +185,21 @@ RESEARCH_PHASE_PATTERNS = [
     re.compile(r"^#{2,4}\s+Research\b", re.MULTILINE | re.IGNORECASE),
     re.compile(r"invoke\s+/deep-research", re.IGNORECASE),
 ]
+
+# Skill names the research_depth pillar accepts as a research-delegation
+# step. Not a fixed literal: research pipelines differ per machine, so
+# HONE_RESEARCH_SKILLS (comma-separated) extends the set, mirroring
+# pipeline_skills.py's HONE_SIDE_EFFECTING_SKILLS override.
+DEFAULT_RESEARCH_SKILLS = frozenset({"temper-research", "deep-research"})
+
+
+def _research_skill_names() -> frozenset[str]:
+    """Accepted research-delegation skill names, defaults plus env override."""
+    raw = os.environ.get("HONE_RESEARCH_SKILLS", "")
+    extra = frozenset(
+        name.strip().lstrip("/").lower() for name in raw.split(",") if name.strip()
+    )
+    return DEFAULT_RESEARCH_SKILLS | extra
 
 # Data provenance indicators
 SCORE_FIELD_PATTERNS = [
@@ -480,7 +500,11 @@ def audit_anti_laziness(content: str, artifact_type: str) -> PillarResult:
 
 
 def audit_research_depth(content: str, artifact_type: str) -> PillarResult:
-    """Pillar 6: Check research phases invoke temper-research."""
+    """Pillar 6: Check research phases delegate to a research skill.
+
+    Accepted names come from DEFAULT_RESEARCH_SKILLS plus the
+    HONE_RESEARCH_SKILLS env override; the pillar is warning-only.
+    """
     if artifact_type not in WORKFLOW_TYPES:
         return PillarResult(RESEARCH_DEPTH, True, False, 0, 0)
 
@@ -490,13 +514,19 @@ def audit_research_depth(content: str, artifact_type: str) -> PillarResult:
             RESEARCH_DEPTH, True, False, 0, 0, ["No dedicated research phase found"]
         )
 
-    temper_pattern = re.compile(r"temper-research", re.IGNORECASE)
-    matches = temper_pattern.findall(content)
+    names = _research_skill_names()
+    skill_pattern = re.compile(
+        "|".join(re.escape(name) for name in sorted(names)), re.IGNORECASE
+    )
+    matches = skill_pattern.findall(content)
     passed = len(matches) > 0
     evidence = (
-        [f"temper-research invoked ({len(matches)} reference(s))"]
+        [f"research skill invoked ({len(matches)} reference(s))"]
         if passed
-        else ["Research phase exists but temper-research not invoked"]
+        else [
+            "Research phase exists but no research-delegation skill invoked "
+            f"(accepted: {', '.join(sorted(names))}; extend via HONE_RESEARCH_SKILLS)"
+        ]
     )
     return PillarResult(RESEARCH_DEPTH, passed, True, min(len(matches), 1), 1, evidence)
 
@@ -1391,14 +1421,6 @@ def main() -> None:
             print(f"\nFindings ({len(result['findings'])}):")
             for finding in result["findings"]:
                 print(f"  - {finding}")
-
-    usage_log = Path.home() / ".claude" / "scripts" / "usage.log"
-    try:
-        with open(usage_log, "a") as log_file:
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-            log_file.write(f"{timestamp} | structural_audit.py | success\n")
-    except OSError:
-        pass
 
 
 if __name__ == "__main__":
