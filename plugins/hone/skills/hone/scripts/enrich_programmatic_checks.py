@@ -176,7 +176,29 @@ def enrich_test_case(
     filtered = filter_candidates(
         raw_candidates, artifact_content, existing_absent, existing_present
     )
-    selected = rank_and_select(filtered, max_per_test)
+    # max_per_test budgets the test case's total enrichment, not this
+    # invocation's. filter_candidates already drops anything in
+    # required_present, so a per-invocation cap simply promoted the next N
+    # candidates on every run and required_present grew without bound (5, then
+    # 10, then 12). Phase 1 and Phase 3 both run this script over the same
+    # criteria, so Phase 3 was scoring against strictly more anchors than
+    # Phase 1 did, and score_programmatic_checks divides by that count: the
+    # before/after delta mixed an artifact change with a criteria change while
+    # phase3-reevaluation.md promises the refresh is idempotent, and auto-revert
+    # reads that delta.
+    #
+    # Only identifier-shaped entries count against the budget. That is the same
+    # ownership rule strip_stale_present uses for removals, and it is the whole
+    # shape enrichment ever adds; charging hand-written phrases (which assert on
+    # the agent response, not the artifact text) would starve a test case of
+    # deterministic anchors it never received.
+    owned = sum(
+        1
+        for entry in existing_present
+        if isinstance(entry, str) and IDENTIFIER_RE.fullmatch(entry)
+    )
+    budget = max(0, max_per_test - owned)
+    selected = rank_and_select(filtered, budget)
 
     return {
         "test_id": test_id,
@@ -250,7 +272,10 @@ def main() -> None:
         "--max-per-test",
         type=int,
         default=5,
-        help="Maximum required_present entries per test case (default: 5)",
+        help=(
+            "Maximum enrichment-owned required_present entries per test case, "
+            "counted across runs rather than per invocation (default: 5)"
+        ),
     )
     parser.add_argument(
         "--json",

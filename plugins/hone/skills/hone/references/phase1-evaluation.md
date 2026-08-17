@@ -417,7 +417,7 @@ Parse JSON output. The script:
    - Delegated side-effecting skills: any skill the artifact invokes that commits, pushes, opens a PR, or posts to a service. The default list lives in `pipeline_skills.py`; extend it without editing plugin source by setting `HONE_SIDE_EFFECTING_SKILLS` (comma-separated names). The guard also fails closed: any other slash-command delegation it detects in the artifact is sandboxed too, so unlisted pipelines cannot run real side effects during evals.
 2. If side effects detected:
    - Removes dangerous MCP tools from `allowed_tools` in each test case
-   - Prepends a SAFETY SANDBOX block to `runner_context` instructing the executor to simulate (not execute) dangerous commands
+   - Appends a SAFETY SANDBOX block to `runner_context` instructing the executor to simulate (not execute) dangerous commands
 3. Exit codes: 0 = criteria modified, 1 = error, 2 = no side effects (no changes needed)
 
 Log: "Side-effect guard: {action}. Bash: {bash_commands}. MCP removed: {tools_removed}. Delegated: {delegated_skills}."

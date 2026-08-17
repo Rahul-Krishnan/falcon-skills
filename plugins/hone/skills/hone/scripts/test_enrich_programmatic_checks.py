@@ -187,6 +187,21 @@ class TestEnrichTestCase(unittest.TestCase):
 
 
 class TestIdempotency(unittest.TestCase):
+    # A 12-identifier description, well over the default cap of 5. The original
+    # test used 2 candidates against a cap of 5, so the pool never exceeded the
+    # cap and the per-invocation budget bug was invisible.
+    OVERSUBSCRIBED_CHECK = (
+        "Covers max_rounds, target_score, progress_gates, handoff_interfaces, "
+        "state_persistence, schema_validation, anti_laziness, research_depth, "
+        "complexity_aware, data_provenance, description_guardrails, "
+        "script_quality"
+    )
+
+    def _run(self, test_case: dict, max_per_test: int = 5) -> list[str]:
+        result = enrich_test_case(test_case, SAMPLE_ARTIFACT, max_per_test)
+        apply_enrichment(test_case, result["added"])
+        return result["added"]
+
     def test_second_run_adds_nothing(self) -> None:
         test_case = {
             "id": "TC-001",
@@ -200,6 +215,48 @@ class TestIdempotency(unittest.TestCase):
         # Second enrichment on same (now-enriched) test case
         result2 = enrich_test_case(test_case, SAMPLE_ARTIFACT, 5)
         self.assertEqual(result2["added"], [])
+
+    def test_cap_is_per_test_case_not_per_invocation(self) -> None:
+        # The Phase 1 / Phase 3 hazard: both phases enrich the same criteria,
+        # so a per-invocation cap grew required_present 5 -> 10 -> 12 and
+        # Phase 3 scored against strictly more anchors than Phase 1 did.
+        test_case = {
+            "id": "TC-001",
+            "category": "invocation",
+            "checks": [{"description": self.OVERSUBSCRIBED_CHECK}],
+        }
+        self.assertEqual(len(self._run(test_case)), 5)
+        self.assertEqual(self._run(test_case), [])
+        self.assertEqual(self._run(test_case), [])
+        self.assertEqual(len(test_case["required_present"]), 5)
+
+    def test_hand_written_phrases_do_not_consume_the_budget(self) -> None:
+        # Phrases assert on the agent response, not the artifact text, so they
+        # are not enrichment-owned and must not starve a test case of anchors.
+        test_case = {
+            "id": "TC-002",
+            "category": "invocation",
+            "checks": [{"description": self.OVERSUBSCRIBED_CHECK}],
+            "required_present": [
+                "I cannot proceed without a name",
+                "Provide a target score",
+            ],
+        }
+        self.assertEqual(len(self._run(test_case)), 5)
+        self.assertEqual(len(test_case["required_present"]), 7)
+        self.assertEqual(self._run(test_case), [])
+
+    def test_raised_cap_admits_more_anchors(self) -> None:
+        # Converging is not the same as freezing: raising the cap between runs
+        # must still let the next most specific identifiers in.
+        test_case = {
+            "id": "TC-003",
+            "category": "invocation",
+            "checks": [{"description": self.OVERSUBSCRIBED_CHECK}],
+        }
+        self.assertEqual(len(self._run(test_case, 5)), 5)
+        self.assertEqual(len(self._run(test_case, 8)), 3)
+        self.assertEqual(len(test_case["required_present"]), 8)
 
 
 class TestStripStalePresent(unittest.TestCase):

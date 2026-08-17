@@ -389,10 +389,47 @@ FS_MUTATING_BASH_PATTERNS: list[tuple[str, str]] = [
     (r"\bcp\s+[^\s]+\s+[^\s]+", "cp"),
 ]
 
+# Destructive commands — the blast-radius group. Unlike the creation shapes
+# above, these cannot be undone by deleting a stray file afterwards, so an
+# unattended eval of a skill whose job is deletion (a cleanup skill, a branch
+# pruner) has to be sandboxed or it removes the operator's real data. The
+# guard previously carried no deletion pattern at all, so exactly those skills
+# got an empty sandbox.
+DESTRUCTIVE_BASH_PATTERNS: list[tuple[str, str]] = [
+    (r"\brm\s+(?:-[a-zA-Z]+\s+)*[^\s]+", "rm"),
+    (r"\btrash\s+(?:-[a-zA-Z]+\s+)*[^\s]+", "trash"),
+    (r"\bfind\s+[^\n]*\s-delete\b", "find -delete"),
+    # find -exec rm/trash is the same deletion with an extra hop; the -delete
+    # pattern above does not cover it because the verb moves into -exec.
+    (r"\bfind\s+[^\n]*-exec\s+(?:rm|trash)\b", "find -exec rm"),
+    (r"\bmv\s+[^\s]+\s+[^\s]+", "mv"),
+    (r"\bgit\s+reset\s+--hard\b", "git reset --hard"),
+    (r"\bgit\s+branch\s+-D\b", "git branch -D"),
+    (r"\bgit\s+checkout\s+\.(?:\s|$)", "git checkout ."),
+    (r"\bgit\s+clean\s+-[a-zA-Z]*[fd]", "git clean -fd"),
+]
+
+# Network writes. A POST/PUT/PATCH/DELETE from an unattended eval reaches a
+# real endpoint (an API, a chat webhook, a package registry) and is not
+# recoverable from the local filesystem, so it belongs in the same group as
+# deletions rather than with the read-only fetches, which are left alone.
+NETWORK_WRITE_BASH_PATTERNS: list[tuple[str, str]] = [
+    (r"\bcurl\s+[^\n]*-X\s*(?:POST|PUT|PATCH|DELETE)\b", "curl -X POST"),
+    (r"\bcurl\s+[^\n]*(?:--data(?:-raw|-binary|-urlencode)?|\s-d\s)", "curl --data"),
+    (r"\bgh\s+api\s+[^\n]*-(?:X|-method)\s*(?:POST|PUT|PATCH|DELETE)\b", "gh api -X POST"),
+    (r"\bwget\s+[^\n]*--post-(?:data|file)\b", "wget --post-data"),
+]
+
 # Full ordered set used by side_effect_guard.py (order determines the
-# sandbox-context listing order).
+# sandbox-context listing order). validate_eval_criteria.py's runner_context
+# hygiene check deliberately consumes only FS_MUTATING_BASH_PATTERNS: the two
+# groups above describe what the artifact under test may do, not what a
+# criteria author accidentally wrote into a SETUP: block.
 BASH_SIDE_EFFECT_PATTERNS: list[tuple[str, str]] = (
-    GIT_MUTATING_BASH_PATTERNS + FS_MUTATING_BASH_PATTERNS
+    GIT_MUTATING_BASH_PATTERNS
+    + FS_MUTATING_BASH_PATTERNS
+    + DESTRUCTIVE_BASH_PATTERNS
+    + NETWORK_WRITE_BASH_PATTERNS
 )
 
 # Runner-context header side_effect_guard.py appends when sandboxing side

@@ -27,12 +27,21 @@ Output (JSON):
             "failure_signature": "duration=12s",
             "recommendation": "human_review"
         }],
+        "inconclusive": [{
+            "test_id": "TC-KE",
+            "reason": "never_measured"
+        }],
         "summary": {
             "total_failing": 3,
             "pattern_matched": 2,
-            "unmatched": 1
+            "unmatched": 1,
+            "inconclusive": 1
         }
     }
+
+Tests marked inconclusive in deterministic_scores.json are reported in their
+own bucket and never counted as failures: they were never measured, so a 0.0
+would be an artifact of the score fallback rather than a result.
 """
 
 from __future__ import annotations
@@ -50,6 +59,7 @@ from hone_common import (
     CRITERIA_BUG_THRESHOLD,
     get,
     load_deterministic_scores,
+    load_inconclusive_ids,
     resolve_score,
 )
 
@@ -237,23 +247,45 @@ def match_patterns(results_path: str) -> dict:
             "error": f"results file not found: {results_path}",
             "matched": [],
             "unmatched": [],
-            "summary": {"total_failing": 0, "pattern_matched": 0, "unmatched": 0},
+            "inconclusive": [],
+            "summary": {
+                "total_failing": 0,
+                "pattern_matched": 0,
+                "unmatched": 0,
+                "inconclusive": 0,
+            },
         }
     except json.JSONDecodeError as exc:
         return {
             "error": f"invalid JSON in {results_path}: {exc}",
             "matched": [],
             "unmatched": [],
-            "summary": {"total_failing": 0, "pattern_matched": 0, "unmatched": 0},
+            "inconclusive": [],
+            "summary": {
+                "total_failing": 0,
+                "pattern_matched": 0,
+                "unmatched": 0,
+                "inconclusive": 0,
+            },
         }
 
     results = data.get("results", [])
     det_scores = load_deterministic_scores(results_path)
+    # Inconclusive tests were never measured, so they are not failures. Without
+    # this, resolve_score's 0.0 default put every one of them in `unmatched`
+    # with recommendation "human_review". Not a rare shape: score_execution
+    # marks every knowledge-extraction test inconclusive unconditionally, so it
+    # fired on ordinary runs. analyze_results excludes them the same way.
+    inconclusive_ids = load_inconclusive_ids(results_path)
     matched = []
     unmatched = []
+    inconclusive = []
 
     for result in results:
         test_id = result.get("test_id", "unknown")
+        if test_id in inconclusive_ids:
+            inconclusive.append({"test_id": test_id, "reason": "never_measured"})
+            continue
         # Canonical fallback chain (score / final_score / deterministic
         # composite / 0.0), preferring the result's own score: deterministic-only
         # rounds carry no per-test score in results.json, and defaulting a
@@ -261,9 +293,13 @@ def match_patterns(results_path: str) -> dict:
         # passing and silently no-opped self-repair.
         score = resolve_score(result, det_scores, prefer_deterministic=False)
         # Normalize once: condition functions read result["score"] directly.
-        # Assign on None rather than setdefault: an explicit JSON null keeps
-        # the key present, and None would TypeError in `score > 0.0` checks.
-        if result.get("score") is None:
+        # Overwrite anything non-numeric, not just None. resolve_score already
+        # treats a stringified "0.85" or a list as absent and falls through, so
+        # leaving the raw value in place let it reach `score >= THRESHOLD` and
+        # raise TypeError. results.json is assembled by an LLM subagent, so
+        # this type slop is the shape hone_common already defends against.
+        stored = result.get("score")
+        if not isinstance(stored, (int, float)) or isinstance(stored, bool):
             result["score"] = score
 
         # Only process failures (below CRITERIA_BUG_THRESHOLD; the higher
@@ -303,10 +339,12 @@ def match_patterns(results_path: str) -> dict:
     return {
         "matched": matched,
         "unmatched": unmatched,
+        "inconclusive": inconclusive,
         "summary": {
             "total_failing": len(matched) + len(unmatched),
             "pattern_matched": len(matched),
             "unmatched": len(unmatched),
+            "inconclusive": len(inconclusive),
         },
     }
 
@@ -335,6 +373,11 @@ def main() -> None:
         print(f"Failing tests: {result['summary']['total_failing']}")
         print(f"Pattern matched: {result['summary']['pattern_matched']}")
         print(f"Unmatched (human review): {result['summary']['unmatched']}")
+        if result["summary"].get("inconclusive"):
+            print(
+                f"Inconclusive (never measured, not failures): "
+                f"{result['summary']['inconclusive']}"
+            )
         print()
 
         for m in result["matched"]:

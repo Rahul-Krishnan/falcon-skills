@@ -814,5 +814,132 @@ class TestDeterministicScoresFallback(unittest.TestCase):
         self.assertEqual(output["summary"]["total_failing"], 0)
 
 
+class TestInconclusiveTestsAreNotFailures(unittest.TestCase):
+    """score_execution marks every knowledge-extraction test inconclusive
+    unconditionally, so a test that was never measured used to arrive here
+    scoring 0.0 and get reported as a failure needing human review."""
+
+    def _run(self, results, per_test):
+        with tempfile.TemporaryDirectory() as tmp:
+            results_path = os.path.join(tmp, "results.json")
+            with open(results_path, "w") as f:
+                json.dump(results, f)
+            with open(os.path.join(tmp, "deterministic_scores.json"), "w") as f:
+                json.dump({"per_test": per_test}, f)
+            return match_patterns(results_path)
+
+    def test_inconclusive_test_is_bucketed_not_failed(self):
+        output = self._run(
+            {"results": [{"test_id": "TC-KE", "agent_response": "ok", "details": {}}]},
+            [{"test_id": "TC-KE", "composite": None, "status": "inconclusive"}],
+        )
+        self.assertEqual(output["summary"]["total_failing"], 0)
+        self.assertEqual(output["unmatched"], [])
+        self.assertEqual(output["summary"]["inconclusive"], 1)
+        self.assertEqual(
+            output["inconclusive"],
+            [{"test_id": "TC-KE", "reason": "never_measured"}],
+        )
+
+    def test_score_error_is_also_inconclusive(self):
+        output = self._run(
+            {"results": [{"test_id": "TC-ERR", "agent_response": "ok", "details": {}}]},
+            [{"test_id": "TC-ERR", "composite": None, "status": "score_error"}],
+        )
+        self.assertEqual(output["summary"]["inconclusive"], 1)
+        self.assertEqual(output["summary"]["total_failing"], 0)
+
+    def test_real_failures_still_reported_alongside_inconclusive(self):
+        output = self._run(
+            {
+                "results": [
+                    {"test_id": "TC-KE", "agent_response": "ok", "details": {}},
+                    {"test_id": "TC-FAIL", "agent_response": "ok", "details": {}},
+                ]
+            },
+            [
+                {"test_id": "TC-KE", "composite": None, "status": "inconclusive"},
+                {"test_id": "TC-FAIL", "composite": 0.1, "status": "scored"},
+            ],
+        )
+        self.assertEqual(output["summary"]["inconclusive"], 1)
+        self.assertEqual(output["summary"]["total_failing"], 1)
+        self.assertEqual(output["unmatched"][0]["test_id"], "TC-FAIL")
+
+    def test_error_paths_carry_the_inconclusive_keys(self):
+        missing = match_patterns("/nonexistent/results.json")
+        self.assertEqual(missing["inconclusive"], [])
+        self.assertEqual(missing["summary"]["inconclusive"], 0)
+
+
+class TestNonNumericScoreNormalization(unittest.TestCase):
+    """results.json is assembled by an LLM subagent, so a stringified score is
+    a real shape. resolve_score already treats it as absent; leaving the raw
+    value on the result let it reach the pattern conditions and TypeError."""
+
+    def test_stringified_score_does_not_crash(self):
+        output = run_script(
+            {
+                "results": [
+                    {
+                        "test_id": "TC-1",
+                        "score": "0.85",
+                        "agent_response": "ok",
+                        "details": {},
+                    }
+                ]
+            }
+        )
+        # "0.85" is not a usable score, so the chain falls through to the 0.0
+        # default and the test is processed as failing rather than crashing.
+        self.assertEqual(output["summary"]["total_failing"], 1)
+        self.assertEqual(output["unmatched"][0]["score"], 0.0)
+
+    def test_list_score_does_not_crash(self):
+        output = run_script(
+            {
+                "results": [
+                    {
+                        "test_id": "TC-2",
+                        "score": [0.9],
+                        "agent_response": "",
+                        "details": {},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(output["summary"]["total_failing"], 1)
+
+    def test_bool_score_is_not_treated_as_numeric(self):
+        output = run_script(
+            {
+                "results": [
+                    {
+                        "test_id": "TC-3",
+                        "score": True,
+                        "agent_response": "ok",
+                        "details": {},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(output["summary"]["total_failing"], 1)
+
+    def test_numeric_score_survives_untouched(self):
+        output = run_script(
+            {
+                "results": [
+                    {
+                        "test_id": "TC-4",
+                        "score": 0.42,
+                        "agent_response": "ok",
+                        "details": {},
+                    }
+                ]
+            }
+        )
+        self.assertEqual(output["unmatched"][0]["score"], 0.42)
+
+
 if __name__ == "__main__":
     unittest.main()

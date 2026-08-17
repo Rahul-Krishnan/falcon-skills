@@ -9,7 +9,7 @@ Converts eval runner results.json + deterministic_scores.json into spec-format:
 
 Usage:
     python3 generate_spec_artifacts.py <output_dir> \
-        --criteria <eval_criteria.yaml> \
+        --criteria <eval_criteria.json> \
         --timing-ms <duration_ms> \
         --timing-tokens <token_count> \
         [--baseline-dir <baseline_output_dir>] \
@@ -44,14 +44,25 @@ def load_json(path):
 def load_criteria_json(path):
     """Load eval_criteria.json and extract test case metadata.
 
-    Returns list of dicts with id, name, and category for each test case.
+    Returns list of dicts with id, name, and category for each test case, or
+    None when the file cannot be read or parsed. None and [] are different
+    answers: [] is a criteria file that declares no test cases, None is no
+    usable criteria file at all. Collapsing them wrote an evals.json with zero
+    evals and exited 0, leaving grading.json's assertion_results pointing at
+    eval_ids that existed in no eval definition.
     """
     try:
         with open(path) as f:
             data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"Warning: Could not load criteria {path}: {e}", file=sys.stderr)
-        return []
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+        print(f"Error: Could not load criteria {path}: {e}", file=sys.stderr)
+        return None
+
+    if not isinstance(data, dict):
+        print(
+            f"Error: criteria {path} is not a JSON object", file=sys.stderr
+        )
+        return None
 
     test_cases = []
     for tc in data.get("test_cases", []):
@@ -76,8 +87,12 @@ def generate_evals(test_cases, results):
         # Per-check semantic scores live in details.raw_semantic_scores
         # (a {check_description: score} dict), the location the rest of the
         # pipeline writes and reads (see analyze_results.py).
-        details = result.get("details", {})
-        raw_scores = details.get("raw_semantic_scores", {}) if isinstance(details, dict) else {}
+        # get() tolerates explicit nulls for both details and the scores dict,
+        # exactly as generate_grading does; `raw_semantic_scores: null` is a
+        # documented shape from a judge that returned no per-check scores, and
+        # a raw dict.get handed that None straight to enumerate().
+        details = get(result, "details", {}, expected=dict)
+        raw_scores = get(details, "raw_semantic_scores", {}, expected=dict)
         for i, check in enumerate(raw_scores):
             assertions.append(
                 {
@@ -300,7 +315,18 @@ def main():
         sys.exit(1)
 
     det_scores = load_json(det_path)
+
+    # Exit 1 per the documented codes rather than writing an empty evals.json:
+    # every downstream gate ("evals.json exists and is valid JSON") passes on
+    # the empty file, so a mistyped --criteria published a spec artifact set
+    # whose grading references eval_ids that are defined nowhere.
     test_cases = load_criteria_json(args.criteria)
+    if test_cases is None:
+        print(
+            f"Error: Cannot load criteria {args.criteria}; no artifacts written",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Load baseline if provided
     baseline_results = None
