@@ -845,6 +845,10 @@ SELF_CONTAINED_PATTERNS = [
     re.compile(r"from __future__"),  # Modern Python conventions
 ]
 
+# __main__ guard: marks a Python file as an invocable script rather than a
+# library/constants module.
+MAIN_GUARD_PATTERN = re.compile(r"__name__\s*==\s*[\"']__main__[\"']")
+
 
 def audit_script_quality(scripts_dir: str) -> PillarResult:
     """Pillar 11: Check bundled scripts for agentic design principles."""
@@ -854,7 +858,14 @@ def audit_script_quality(scripts_dir: str) -> PillarResult:
             SCRIPT_QUALITY, True, False, 0, 0, ["Scripts directory does not exist"]
         )
 
-    script_files = list(scripts_path.glob("*.py")) + list(scripts_path.glob("*.sh"))
+    # Unit tests are not CLI scripts: grading them against help/usage,
+    # structured output, and exit-code checks fills the warnings channel
+    # with false positives that invite Phase 2 to add argparse to test files.
+    script_files = [
+        f
+        for f in list(scripts_path.glob("*.py")) + list(scripts_path.glob("*.sh"))
+        if not f.name.startswith("test_")
+    ]
     if not script_files:
         return PillarResult(
             SCRIPT_QUALITY, True, False, 0, 0, ["No .py or .sh scripts found"]
@@ -872,6 +883,11 @@ def audit_script_quality(scripts_dir: str) -> PillarResult:
             continue
 
         is_python = script_file.suffix == ".py"
+
+        # Python modules without a __main__ guard are libraries/constants
+        # modules, not invocable scripts; the CLI checks don't apply.
+        if is_python and not MAIN_GUARD_PATTERN.search(content):
+            continue
         file_checks_passed = 0
         file_checks_total = 0
         missing = []
@@ -1272,12 +1288,38 @@ def audit(
         ).get(complexity_tier, "LOW")
         pillar_dicts.append(pillar_dict)
 
+    # Handoff booleans for the structural_audit interface validated by
+    # validate_handoff.py. Deterministically derived from pillar results:
+    # "has" = the mechanism was found in the content (count_found > 0),
+    # "needed" = the pillar applies to this artifact/tier. Without these,
+    # the script's own output could not pass the schema it feeds.
+    by_name = {pillar.name: pillar for pillar in pillars}
+    handoff_booleans = {}
+    for pillar_name, has_key, needed_key in (
+        (STATE_PERSISTENCE, "has_state_persistence", "state_persistence_needed"),
+        (ANTI_LAZINESS, "has_anti_laziness_check", "anti_laziness_needed"),
+        (
+            RESEARCH_DEPTH,
+            "has_research_depth_enforcement",
+            "research_depth_needed",
+        ),
+        (
+            COMPLEXITY_AWARE,
+            "has_complexity_aware_analysis",
+            "complexity_aware_needed",
+        ),
+    ):
+        pillar = by_name.get(pillar_name)
+        handoff_booleans[has_key] = bool(pillar and pillar.count_found > 0)
+        handoff_booleans[needed_key] = bool(pillar and pillar.applicable)
+
     return {
         "structural_score": round(structural_score, 4),
         "pillars": pillar_dicts,
         "findings": findings,
         "warnings": warnings,
         "complexity_tier": complexity_tier,
+        **handoff_booleans,
     }
 
 

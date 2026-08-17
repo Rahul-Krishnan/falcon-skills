@@ -45,10 +45,12 @@ def load_deterministic_scores(results_path: str) -> dict[str, float]:
         return {}
 
     per_test = det_data.get("per_test") or []
+    # Inconclusive tests carry composite: null; exclude them so numeric
+    # comparisons downstream never see None.
     return {
         test["test_id"]: test["composite"]
         for test in per_test
-        if "test_id" in test and "composite" in test
+        if "test_id" in test and isinstance(test.get("composite"), (int, float))
     }
 
 

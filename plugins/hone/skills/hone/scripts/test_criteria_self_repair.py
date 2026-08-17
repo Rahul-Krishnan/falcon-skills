@@ -726,5 +726,69 @@ class TestScriptErrorHandling(unittest.TestCase):
             os.unlink(tmp_path)
 
 
+class TestDeterministicScoresFallback(unittest.TestCase):
+    """Deterministic-only rounds carry no per-test score in results.json;
+    the repair must read deterministic_scores.json instead of defaulting
+    scoreless tests to a passing 1.0."""
+
+    def _scoreless_results(self):
+        return {
+            "results": [
+                {"test_id": "TC-001", "details": {}},
+                {"test_id": "TC-002", "details": {}},
+            ]
+        }
+
+    def test_scoreless_failing_tests_are_processed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results_path = os.path.join(tmp, "results.json")
+            with open(results_path, "w") as f:
+                json.dump(self._scoreless_results(), f)
+            with open(os.path.join(tmp, "deterministic_scores.json"), "w") as f:
+                json.dump(
+                    {
+                        "per_test": [
+                            {"test_id": "TC-001", "composite": 0.2},
+                            {"test_id": "TC-002", "composite": 0.1},
+                        ]
+                    },
+                    f,
+                )
+
+            output = match_patterns(results_path)
+
+        self.assertEqual(output["summary"]["total_failing"], 2)
+
+    def test_missing_scores_default_to_failing_not_passing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results_path = os.path.join(tmp, "results.json")
+            with open(results_path, "w") as f:
+                json.dump(self._scoreless_results(), f)
+            # No deterministic_scores.json at all: default must be 0.0.
+            output = match_patterns(results_path)
+
+        self.assertEqual(output["summary"]["total_failing"], 2)
+
+    def test_passing_deterministic_scores_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            results_path = os.path.join(tmp, "results.json")
+            with open(results_path, "w") as f:
+                json.dump(self._scoreless_results(), f)
+            with open(os.path.join(tmp, "deterministic_scores.json"), "w") as f:
+                json.dump(
+                    {
+                        "per_test": [
+                            {"test_id": "TC-001", "composite": 0.9},
+                            {"test_id": "TC-002", "composite": 0.85},
+                        ]
+                    },
+                    f,
+                )
+
+            output = match_patterns(results_path)
+
+        self.assertEqual(output["summary"]["total_failing"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

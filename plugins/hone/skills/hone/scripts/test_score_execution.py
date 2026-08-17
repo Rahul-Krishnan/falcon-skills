@@ -1016,7 +1016,9 @@ class TestMalformedTestInput(unittest.TestCase):
 
         scored = _score_single_test(result, "skill")
         self.assertEqual(scored["test_id"], "tc_string_input")
-        self.assertIsInstance(scored["composite"], float)
+        # Empty timeline + no recognized profile: inconclusive, not a number.
+        self.assertIsNone(scored["composite"])
+        self.assertEqual(scored["status"], "inconclusive")
 
     def test_string_test_input_scores_whole_run(self):
         from score_execution import score_from_results
@@ -1134,6 +1136,182 @@ class TestRequiredAbsentNegation(unittest.TestCase):
         from score_execution import _has_unnegated_occurrence
 
         self.assertFalse(_has_unnegated_occurrence("eval runner", "nothing here"))
+
+
+class TestNullContentEntries(unittest.TestCase):
+    """content: null in timeline entries must not TypeError into score_error."""
+
+    _TIMELINE = [
+        {
+            "step_type": "tool_use",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "/tmp/a"},
+            "content": None,
+        },
+        {
+            "step_type": "tool_use",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/a"},
+            "content": None,
+        },
+        {"step_type": "text", "content": None},
+    ]
+
+    def test_direct_scorers_do_not_raise(self):
+        from score_execution import (
+            score_research_first,
+            score_user_communication,
+            score_verify_actions,
+        )
+
+        score_verify_actions(self._TIMELINE)
+        score_research_first(self._TIMELINE)
+        score_user_communication(self._TIMELINE, "report")
+
+    def test_single_test_not_zeroed_by_null_content(self):
+        from score_execution import _score_single_test
+
+        scored = _score_single_test(
+            {
+                "test_id": "T-null",
+                "execution_timeline": self._TIMELINE,
+                "agent_response": "## Report\nDone.",
+            },
+            "skill",
+        )
+        self.assertNotEqual(scored.get("status"), "score_error")
+        self.assertIsInstance(scored["composite"], float)
+
+
+class TestEmptyTimelineInconclusive(unittest.TestCase):
+    """Empty-timeline skill/command tests must not default to composite 1.0."""
+
+    def test_single_test_marked_inconclusive(self):
+        from score_execution import _score_single_test
+
+        scored = _score_single_test(
+            {
+                "test_id": "T",
+                "execution_timeline": [],
+                "agent_response": "<arbitrarily bad text>",
+            },
+            "skill",
+        )
+        self.assertIsNone(scored["composite"])
+        self.assertEqual(scored["status"], "inconclusive")
+
+    def test_all_inconclusive_run_reports_no_grade(self):
+        from score_execution import score_from_results
+
+        results = {
+            "results": [
+                {"test_id": "T1", "execution_timeline": [], "agent_response": "bad"},
+                {"test_id": "T2", "execution_timeline": [], "agent_response": "bad"},
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump(results, handle)
+            output = score_from_results(path, "skill")
+
+        self.assertIsNone(output["composite_score"])
+        self.assertEqual(output["grade"], "INCONCLUSIVE")
+        self.assertEqual(output["metadata"]["inconclusive_tests"], 2)
+
+    def test_mixed_run_excludes_inconclusive_from_aggregate(self):
+        from score_execution import score_from_results
+
+        results = {
+            "results": [
+                {"test_id": "T1", "execution_timeline": [], "agent_response": "bad"},
+                {
+                    "test_id": "T2",
+                    "execution_timeline": [],
+                    "agent_response": "Invalid input. Which file should I scan?",
+                    "test_input": {"test_profile": "error_handling"},
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump(results, handle)
+            output = score_from_results(path, "skill")
+
+        conclusive = [
+            t for t in output["per_test"] if t.get("status") != "inconclusive"
+        ]
+        self.assertEqual(len(conclusive), 1)
+        self.assertEqual(output["composite_score"], conclusive[0]["composite"])
+        self.assertEqual(output["metadata"]["inconclusive_tests"], 1)
+
+
+class TestGateComplianceSinglePenalty(unittest.TestCase):
+    """Malformed gates count against the score once, not squared."""
+
+    def _gate(self, step, result):
+        return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
+
+    def test_one_good_one_malformed_scores_half(self):
+        from score_execution import score_gate_compliance
+
+        response = (
+            json.dumps(self._gate("a", "pass"))
+            + "\n"
+            + json.dumps(self._gate("b", "enter_phase2"))
+        )
+        result = score_gate_compliance([], response)
+        self.assertEqual(result["score"], 0.5)
+
+    def test_three_good_one_malformed_scores_three_quarters(self):
+        from score_execution import score_gate_compliance
+
+        gates = [self._gate(s, "pass") for s in ("a", "b", "c")]
+        # Invalid result value: extracted as a gate event but malformed.
+        gates.append(self._gate("d", "maybe"))
+        response = "\n".join(json.dumps(g) for g in gates)
+        result = score_gate_compliance([], response)
+        self.assertEqual(result["score"], 0.75)
+
+
+class TestStepExtractionDocumentOrder(unittest.TestCase):
+    """Mixed heading styles must yield steps in document order."""
+
+    MIXED_ARTIFACT = "## Step 1: Load\ntext\n## 2. Analyze\ntext\n## Step 3: Report\n"
+
+    def test_steps_sorted_by_position(self):
+        from score_execution import _extract_steps_from_artifact
+
+        steps = _extract_steps_from_artifact(self.MIXED_ARTIFACT)
+        self.assertEqual(steps, ["## Step 1", "## 2.", "## Step 3"])
+
+    def test_in_order_execution_scores_full(self):
+        from score_execution import score_workflow_sequence
+
+        timeline = [
+            {"step_type": "text", "content": "Step 1: Load complete"},
+            {"step_type": "text", "content": "2. Analyze complete"},
+            {"step_type": "text", "content": "Step 3: Report complete"},
+        ]
+        result = score_workflow_sequence(timeline, self.MIXED_ARTIFACT)
+        self.assertEqual(result["score"], 1.0)
+
+    def test_search_advances_past_previous_step(self):
+        from score_execution import score_workflow_sequence
+
+        artifact = "## Step 1: Load\n## Step 2: Analyze\n"
+        # "Step 2" is mentioned in a preamble before Step 1 executes. Searching
+        # from offset 0 finds that first occurrence, which sits before Step 1's
+        # position, and the step was wrongly dropped; searching past last_pos
+        # finds the real execution mention.
+        timeline = [
+            {"step_type": "text", "content": "Plan: will run Step 2 after Step 1."},
+            {"step_type": "text", "content": "Step 1 complete."},
+            {"step_type": "text", "content": "Step 2 complete."},
+        ]
+        result = score_workflow_sequence(timeline, artifact)
+        self.assertEqual(result["score"], 1.0)
 
 
 if __name__ == "__main__":

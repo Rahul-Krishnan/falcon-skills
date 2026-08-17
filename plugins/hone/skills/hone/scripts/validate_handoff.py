@@ -115,10 +115,16 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
         },
     },
     # Step 2 -> Phase 2 structural findings
+    # transitions/handoffs are optional: structural_audit.py computes gate and
+    # handoff coverage as document-wide aggregates, not per-transition, so the
+    # script cannot emit honest per-item entries. The model MAY enrich the
+    # handoff with them (validated against the item schemas when present).
+    # The has_*/*_needed booleans ARE emitted deterministically by the script.
     "structural_audit": {
         "fields": {
             "structural_score": _num(min_value=0.0, max_value=1.0),
             "transitions": _arr(
+                required=False,
                 items={
                     "type": "object",
                     "fields": {
@@ -138,6 +144,7 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
                 }
             ),
             "handoffs": _arr(
+                required=False,
                 items={
                     "type": "object",
                     "fields": {

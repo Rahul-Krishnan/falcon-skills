@@ -642,5 +642,75 @@ Before exiting, run the **ANTI-LAZINESS SELF-CHECK** from MEMORY.md.
         self.assertFalse(sn["passed"])
 
 
+class TestHandoffBooleans(unittest.TestCase):
+    """audit() must emit the has/needed booleans the handoff schema requires."""
+
+    BOOLEAN_KEYS = (
+        "has_state_persistence",
+        "state_persistence_needed",
+        "has_anti_laziness_check",
+        "anti_laziness_needed",
+        "has_research_depth_enforcement",
+        "research_depth_needed",
+        "has_complexity_aware_analysis",
+        "complexity_aware_needed",
+    )
+
+    def test_booleans_present_and_typed(self):
+        from structural_audit import audit
+
+        content = (
+            "## Step 1: Load\nWrite state to /tmp/workflow-x.json\n"
+            "**Gate:** - [ ] loaded\n"
+            "## Step 2: Report\nANTI-LAZINESS SELF-CHECK\n"
+        )
+        result = audit(content, "skill", "some-skill", "standard")
+        for key in self.BOOLEAN_KEYS:
+            self.assertIn(key, result)
+            self.assertIsInstance(result[key], bool)
+        self.assertTrue(result["has_state_persistence"])
+        self.assertTrue(result["has_anti_laziness_check"])
+        self.assertFalse(result["complexity_aware_needed"])
+
+    def test_booleans_false_when_mechanisms_absent(self):
+        from structural_audit import audit
+
+        # complex tier: state_persistence is not tier-skipped, so "needed"
+        # reflects the pillar's own applicability (2+ steps).
+        result = audit("## Step 1: A\n## Step 2: B\n", "skill", "x", "complex")
+        self.assertFalse(result["has_state_persistence"])
+        self.assertTrue(result["state_persistence_needed"])
+
+
+class TestScriptQualityFiltering(unittest.TestCase):
+    """Unit tests and library modules must not be graded as CLI scripts."""
+
+    def test_test_files_and_library_modules_skipped(self):
+        import tempfile
+
+        from structural_audit import audit_script_quality
+
+        cli_script = (
+            "import argparse, json, sys\n"
+            "def main():\n"
+            "    json.dumps({})\n"
+            "    sys.exit(0)\n"
+            'if __name__ == "__main__":\n'
+            "    main()\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "cli.py").write_text(cli_script)
+            (tmp_path / "test_cli.py").write_text("import unittest\n")
+            (tmp_path / "constants.py").write_text("NAMES = ['a', 'b']\n")
+
+            result = audit_script_quality(tmp)
+
+        evidence = " ".join(result.evidence)
+        self.assertNotIn("test_cli.py", evidence)
+        self.assertNotIn("constants.py", evidence)
+        self.assertTrue(result.passed)
+
+
 if __name__ == "__main__":
     unittest.main()

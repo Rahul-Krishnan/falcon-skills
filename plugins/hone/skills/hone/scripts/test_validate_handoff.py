@@ -626,5 +626,35 @@ class TestScriptTestCoverage(unittest.TestCase):
         self.assertFalse(result.valid)
 
 
+class TestStructuralAuditScriptOutputValidates(unittest.TestCase):
+    """structural_audit.py's own --json output must satisfy the handoff schema.
+
+    Regression: the schema used to require transitions/handoffs plus 8 booleans
+    the script never emitted, so every audited run hard-stopped at Phase 2
+    handoff validation unless the model fabricated the fields.
+    """
+
+    def test_audit_output_passes_structural_audit_schema(self) -> None:
+        from structural_audit import audit
+
+        content = (
+            "## Step 1: Load\nWrite state to /tmp/workflow-x.json\n"
+            "**Gate:** - [ ] loaded\n"
+            "## Step 2: Report\nDone.\n"
+        )
+        output = audit(content, "skill", "some-skill", "standard")
+        output["artifact_path"] = "/tmp/some-skill/SKILL.md"
+        output["artifact_type"] = "skill"
+
+        state = {"structural_audit": output}
+        result = validate_handoff(state, "structural_audit")
+        self.assertTrue(
+            result.valid,
+            f"Errors: {[e.message for e in result.errors]}",
+        )
+        results = validate_all(state)
+        self.assertTrue(all(r.valid for r in results))
+
+
 if __name__ == "__main__":
     unittest.main()

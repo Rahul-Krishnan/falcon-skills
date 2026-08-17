@@ -62,6 +62,10 @@ SANDBOX_HEADER = "SAFETY SANDBOX — side-effect simulation mode"
 # error-handling tests; artifacts never declare either. Lowercase base names.
 HARNESS_TOOLS = frozenset({"skill", "askuserquestion"})
 
+# Read-only default used when filtering would otherwise empty a test case's
+# allowed_tools (which the criteria schema rejects as invalid).
+SAFE_FALLBACK_TOOLS = ("Read", "Grep", "Glob")
+
 # Fail-closed delegation detection: any /slash-command in the artifact that is
 # not a known side-effecting skill is still treated as side-effecting, because
 # an unlisted user pipeline (/deploy, /release) escaping the sandbox can run a
@@ -215,6 +219,7 @@ def guard_criteria(
     )
     tests_modified = 0
     tools_removed: list[str] = []
+    fallbacks_applied = 0
 
     for tc in criteria.get("test_cases", []):
         modified = False
@@ -254,6 +259,21 @@ def guard_criteria(
                     tools_removed.extend(removed)
                     modified = True
 
+        # Never write allowed_tools: [] — the criteria schema declares it
+        # non_empty, and the next mandatory validation step has no backup to
+        # restore. Fall back to the declared frontmatter set (MCP-filtered),
+        # else a read-only default.
+        if tc.get("allowed_tools") == [] and modified:
+            fallback = [
+                t
+                for t in (artifact_allowed_tools or [])
+                if not any(blocked in t.lower() for blocked in mcp_tools)
+            ]
+            if not fallback:
+                fallback = list(SAFE_FALLBACK_TOOLS)
+            tc["allowed_tools"] = fallback
+            fallbacks_applied += 1
+
         # Prepend sandbox instructions to runner_context
         if sandbox_context:
             existing = tc.get("runner_context", "")
@@ -267,6 +287,7 @@ def guard_criteria(
     return {
         "tests_modified": tests_modified,
         "tools_removed": sorted(set(tools_removed)),
+        "fallbacks_applied": fallbacks_applied,
     }
 
 
@@ -360,6 +381,7 @@ def main() -> int:
         "action": "dry_run" if args.dry_run else "modified",
         "tests_modified": changes["tests_modified"],
         "tools_removed": changes["tools_removed"],
+        "fallbacks_applied": changes["fallbacks_applied"],
     }
 
     if not args.dry_run:

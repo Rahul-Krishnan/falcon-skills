@@ -387,12 +387,18 @@ def compute_composite(
 
 
 def _extract_steps_from_artifact(artifact_content: str) -> list[str]:
-    """Find step markers in artifact content."""
-    steps = []
+    """Find step markers in artifact content, in document order.
+
+    Matches are collected with their offsets across all patterns and sorted
+    by position. Iterating pattern-by-pattern instead would group steps by
+    heading style ("## Step 1", "## 2.", ...), and a mixed-style artifact
+    would hand score_workflow_sequence a mis-ordered expected sequence.
+    """
+    positioned: list[tuple[int, str]] = []
     for pattern in STEP_PATTERNS:
         for match in pattern.finditer(artifact_content):
-            steps.append(match.group().strip())
-    return steps
+            positioned.append((match.start(), match.group().strip()))
+    return [text for _pos, text in sorted(positioned)]
 
 
 def _get_tool_uses(timeline: list[dict]) -> list[dict]:
@@ -429,9 +435,12 @@ def score_workflow_sequence(
     steps_found_in_order = 0
     last_pos = -1
     for step in steps:
-        step_key = re.escape(step.strip("#").strip())
-        match = re.search(step_key, text_content, re.IGNORECASE)
-        if match and match.start() > last_pos:
+        step_pattern = re.compile(re.escape(step.strip("#").strip()), re.IGNORECASE)
+        # Search only past the previous step's position: searching from offset 0
+        # finds the *first* occurrence, which breaks ordering semantics whenever
+        # a step name is mentioned before it is executed.
+        match = step_pattern.search(text_content, last_pos + 1)
+        if match:
             steps_found_in_order += 1
             last_pos = match.start()
 
@@ -554,7 +563,11 @@ def score_gate_compliance(
 
         malformed = total - well_formed
         noncompliant = total - compliant
-        score = (compliant / total) * (well_formed / max(1, total))
+        # Malformed gates never reach `compliant` (the loop skips them), so
+        # they already count against the score via the denominator. A second
+        # well_formed/total factor squared the penalty: 1 good + 1 malformed
+        # scored 0.25 instead of 0.5.
+        score = compliant / total
         evidence = f"{compliant}/{total} gate(s) compliant"
         if expected_fail:
             evidence += f" ({expected_fail} expected-fail)"
@@ -966,7 +979,7 @@ def score_user_communication(
         e for e in timeline
         if e.get("step_type") in {"text", "fallback_text_output", "fallback_output"}
     ]
-    has_text = any(entry.get("content", "").strip() for entry in text_entries)
+    has_text = any((entry.get("content") or "").strip() for entry in text_entries)
     if has_text:
         return {
             "score": 0.7,
@@ -1108,7 +1121,9 @@ def _is_write_entry(entry: dict) -> bool:
     tool = entry.get("tool_name") or entry.get("tool", "")
     if tool in _WRITE_TOOL_NAMES:
         return True
-    return bool(_WRITE_CONTENT_RE.match(entry.get("content", "")))
+    # `or ""` (not a .get default): tool_use entries commonly carry content: null,
+    # and a None here would raise TypeError inside re and zero the whole test.
+    return bool(_WRITE_CONTENT_RE.match(entry.get("content") or ""))
 
 
 def _is_artifact_write_entry(entry: dict) -> bool:
@@ -1122,7 +1137,7 @@ def _is_artifact_write_entry(entry: dict) -> bool:
     file_path = tool_input.get("file_path", "") if isinstance(tool_input, dict) else ""
     if file_path and _TEMP_PATH_RE.search(file_path):
         return False
-    content = entry.get("content", "")
+    content = entry.get("content") or ""
     if _TEMP_PATH_RE.search(content):
         return False
     return _is_write_entry(entry)
@@ -1132,14 +1147,14 @@ def _is_read_entry(entry: dict) -> bool:
     tool = entry.get("tool_name") or entry.get("tool", "")
     if tool in _READ_TOOL_NAMES:
         return True
-    return bool(_READ_CONTENT_RE.match(entry.get("content", "")))
+    return bool(_READ_CONTENT_RE.match(entry.get("content") or ""))
 
 
 def _is_verify_entry(entry: dict) -> bool:
     tool = entry.get("tool_name") or entry.get("tool", "")
     if tool in _READ_TOOL_NAMES or tool == "Bash":
         return True
-    return bool(_VERIFY_CONTENT_RE.search(entry.get("content", "")))
+    return bool(_VERIFY_CONTENT_RE.search(entry.get("content") or ""))
 
 
 def score_verify_actions(timeline: list[dict]) -> dict[str, float | str]:
@@ -1250,7 +1265,13 @@ def _score_single_test(
     artifact_content: str = "",
     criteria_index: dict[str, dict] | None = None,
 ) -> dict:
-    """Score a single test result across all applicable dimensions."""
+    """Score a single test result across all applicable dimensions.
+
+    A skill/command test with an empty execution timeline is returned with
+    `status: "inconclusive"` and `composite: None`; callers must exclude it
+    from aggregation rather than average a fabricated number.
+    """
+    inconclusive = False
     timeline = test_result.get("execution_timeline") or []
     agent_response = test_result.get("agent_response", "")
     test_input = _test_input_dict(test_result)
@@ -1350,10 +1371,15 @@ def _score_single_test(
             weights = SKILL_WEIGHTS if artifact_type == "skill" else COMMAND_WEIGHTS
             active_weights = _renormalize_weights(weights, dimensions)
         else:
+            # Empty timeline (simulation mode) has no execution evidence:
+            # error_handling([]) is a constant 1.0, which used to yield
+            # composite 1.0 for arbitrarily bad output. Mark inconclusive;
+            # dimensions stay visible but no composite is manufactured.
             partial_scoring = True
+            inconclusive = True
             dimensions["voice_compliance"] = score_voice_compliance(agent_response)
             dimensions["error_handling"] = score_error_handling(timeline)
-            active_weights = dict(KNOWLEDGE_EXTRACTION_WEIGHTS)
+            active_weights = {}
 
     elif artifact_type == "hook":
         dimensions = {
@@ -1401,7 +1427,9 @@ def _score_single_test(
     elif is_seg or is_fm:
         critical_dim = "gate_compliance"
 
-    if scores:
+    if inconclusive:
+        composite = None
+    elif scores:
         composite = compute_composite(scores, active_weights, critical_dim)
     else:
         composite = 0.0
@@ -1417,7 +1445,7 @@ def _score_single_test(
     else:
         test_type_label = "execution"
 
-    return {
+    scored: dict = {
         "test_id": test_result.get("test_id", "unknown"),
         "composite": composite,
         "dimensions": {
@@ -1427,6 +1455,9 @@ def _score_single_test(
         "partial_scoring": partial_scoring,
         "test_type": test_type_label,
     }
+    if inconclusive:
+        scored["status"] = "inconclusive"
+    return scored
 
 
 def score_from_results(
@@ -1518,11 +1549,23 @@ def score_from_results(
         if scored.get("partial_scoring"):
             any_partial = True
 
-    composites = [t["composite"] for t in per_test]
-    overall_composite = round(sum(composites) / max(1, len(composites)), 4)
+    # Inconclusive tests (empty timeline, no execution evidence) carry
+    # composite None and are excluded: averaging them in either direction
+    # would turn "nothing was observed" into a grade signal.
+    conclusive = [
+        t
+        for t in per_test
+        if t.get("status") != "inconclusive" and t.get("composite") is not None
+    ]
+    inconclusive_count = len(per_test) - len(conclusive)
+    composites = [t["composite"] for t in conclusive]
+    if composites:
+        overall_composite = round(sum(composites) / len(composites), 4)
+    else:
+        overall_composite = None
 
     all_dims: dict[str, list[float]] = {}
-    for test in per_test:
+    for test in conclusive:
         for dim_name, dim_data in test.get("dimensions", {}).items():
             if dim_name not in all_dims:
                 all_dims[dim_name] = []
@@ -1538,7 +1581,9 @@ def score_from_results(
 
     return {
         "composite_score": overall_composite,
-        "grade": map_grade(overall_composite),
+        "grade": map_grade(overall_composite)
+        if overall_composite is not None
+        else "INCONCLUSIVE",
         "per_test": per_test,
         "aggregate_dimensions": aggregate_dimensions,
         "metadata": {
@@ -1548,6 +1593,7 @@ def score_from_results(
             "scoring_formula": "weighted_geometric_mean",
             "epsilon": EPSILON,
             "partial_scoring": any_partial,
+            "inconclusive_tests": inconclusive_count,
             "schema_version": 2,
         },
     }
@@ -1611,14 +1657,22 @@ def main() -> None:
         json.dump(result, sys.stdout, indent=2)
         print()
     else:
-        print(f"Composite Score: {result['composite_score']:.4f} ({result['grade']})")
+        if result["composite_score"] is None:
+            print(f"Composite Score: n/a ({result['grade']})")
+        else:
+            print(
+                f"Composite Score: {result['composite_score']:.4f} ({result['grade']})"
+            )
         print()
         for dim, score in result.get("aggregate_dimensions", {}).items():
             print(f"  {dim:<25s} {score:.4f}")
         if result.get("per_test"):
             print(f"\nPer-test ({len(result['per_test'])} tests):")
             for test in result["per_test"]:
-                print(f"  {test['test_id']}: {test['composite']:.4f}")
+                if test.get("composite") is None:
+                    print(f"  {test['test_id']}: inconclusive")
+                else:
+                    print(f"  {test['test_id']}: {test['composite']:.4f}")
         print(f"\nScores written to: {output_path}")
 
     usage_log = Path.home() / ".claude" / "scripts" / "usage.log"

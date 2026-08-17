@@ -94,9 +94,12 @@ Parse JSON output. The script scans for 14 structural pillars using regex patter
 When a pillar is inapplicable, it is marked `applicable: false` in the script output and excluded from the structural_score denominator.
 
 Map the script output to the handoff interface:
-- `pillars[].passed` → `transitions[].status` (gated/ungated)
-- `structural_score` → `structural_score`
-- `findings` → `findings`
+- `structural_score`, `findings`, and the eight `has_*`/`*_needed` booleans are
+  emitted by the script directly — copy them as-is.
+- `transitions[]` / `handoffs[]` are OPTIONAL enrichment: the script only
+  computes document-wide gate/handoff coverage, so include per-item entries
+  only if you derive them yourself from the artifact (they are schema-validated
+  when present). Omitting them is valid.
 
 **Gate: Step 2 → Step 3 (checklist)**
 - [ ] All step transitions in the artifact have been enumerated
@@ -114,13 +117,15 @@ Map the script output to the handoff interface:
 ```
 structural_audit: {
   structural_score: number,              // 0.0-1.0
-  transitions: [{
+  // transitions and handoffs are optional (model-derived enrichment);
+  // everything else comes straight from structural_audit.py --json output
+  transitions?: [{
     from: string,                        // eg "Step 1"
     to: string,                          // eg "Step 2"
     gate_type: "checklist" | "rubric" | "crucible" | "interaction_schema" | "none",
     status: "gated" | "ungated"
   }],
-  handoffs: [{
+  handoffs?: [{
     from: string,
     to: string,
     has_interface: boolean,

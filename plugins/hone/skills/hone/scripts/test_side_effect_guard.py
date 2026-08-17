@@ -88,5 +88,41 @@ class TestFrontmatterParsing(unittest.TestCase):
         self.assertIsNone(parse_allowed_tools_frontmatter(content))
 
 
+class TestEmptyIntersectionFallback(unittest.TestCase):
+    """The guard must never write allowed_tools: [] — the criteria schema
+    declares the field non_empty, so an empty list fails the very next
+    mandatory validation step with no backup to restore."""
+
+    def test_empty_intersection_falls_back_to_declared_tools(self) -> None:
+        criteria = {"test_cases": [{"allowed_tools": ["Bash", "Write"]}]}
+        changes = guard_criteria(
+            criteria, [], [], [], artifact_allowed_tools=["Read", "Grep"]
+        )
+        tc = criteria["test_cases"][0]
+        self.assertEqual(tc["allowed_tools"], ["Read", "Grep"])
+        self.assertEqual(changes["fallbacks_applied"], 1)
+        self.assertEqual(sorted(changes["tools_removed"]), ["Bash", "Write"])
+
+    def test_mcp_filter_emptying_list_falls_back_to_safe_default(self) -> None:
+        from side_effect_guard import SAFE_FALLBACK_TOOLS
+
+        criteria = {"test_cases": [{"allowed_tools": ["mcp__evil__send"]}]}
+        changes = guard_criteria(
+            criteria, [], ["mcp__evil"], [], artifact_allowed_tools=None
+        )
+        tc = criteria["test_cases"][0]
+        self.assertEqual(tc["allowed_tools"], list(SAFE_FALLBACK_TOOLS))
+        self.assertEqual(changes["fallbacks_applied"], 1)
+
+    def test_nonempty_intersection_untouched_by_fallback(self) -> None:
+        criteria = {"test_cases": [{"allowed_tools": ["Read", "Bash"]}]}
+        changes = guard_criteria(
+            criteria, [], [], [], artifact_allowed_tools=["Read"]
+        )
+        tc = criteria["test_cases"][0]
+        self.assertEqual(tc["allowed_tools"], ["Read"])
+        self.assertEqual(changes["fallbacks_applied"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

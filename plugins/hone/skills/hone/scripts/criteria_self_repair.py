@@ -41,6 +41,7 @@ import argparse
 import json
 import re
 import sys
+from pathlib import Path
 
 
 # === PATTERN TABLE ===
@@ -209,6 +210,32 @@ PATTERNS = [
 ]
 
 
+def _load_deterministic_scores(results_path: str) -> dict[str, float]:
+    """Map test_id -> deterministic composite from deterministic_scores.json.
+
+    Same convention as analyze_results.load_deterministic_scores (scripts are
+    standalone, so the loader is duplicated rather than imported): results.json
+    carries a per-test `score` only when an LLM judge ran, so deterministic-only
+    rounds need this sibling file to see any scores at all. Returns an empty
+    dict when the file is missing or unreadable.
+    """
+    det_scores_path = Path(results_path).parent / "deterministic_scores.json"
+    if not det_scores_path.exists():
+        return {}
+    try:
+        with open(det_scores_path) as f:
+            det_data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    per_test = det_data.get("per_test") or []
+    return {
+        test["test_id"]: test["composite"]
+        for test in per_test
+        if "test_id" in test and isinstance(test.get("composite"), (int, float))
+    }
+
+
 def match_patterns(results_path: str) -> dict:
     """Match failing tests against pattern table. Return matched + unmatched."""
     try:
@@ -230,15 +257,23 @@ def match_patterns(results_path: str) -> dict:
         }
 
     results = data.get("results", [])
+    det_scores = _load_deterministic_scores(results_path)
     matched = []
     unmatched = []
 
     for result in results:
-        score = result.get("score", result.get("final_score", 1.0))
-        # Normalize once: condition functions read result["score"] directly,
-        # so a final_score-only result must not default to 1.0 there.
-        result.setdefault("score", score)
         test_id = result.get("test_id", "unknown")
+        score = result.get("score", result.get("final_score"))
+        if score is None:
+            # Deterministic-only rounds carry no per-test score in results.json
+            # (analyze_results.py:29-37). Fall back to deterministic_scores.json,
+            # and default a still-missing score to 0.0 (the sibling scripts'
+            # convention) — defaulting to 1.0 made every scoreless failing test
+            # look passing and silently no-opped self-repair.
+            score = det_scores.get(test_id, 0.0)
+        # Normalize once: condition functions read result["score"] directly,
+        # so a final_score-only result must not default there.
+        result.setdefault("score", score)
 
         # Only process failures (score < 0.5, since 0.65 is the acceptance threshold)
         if score >= 0.5:
