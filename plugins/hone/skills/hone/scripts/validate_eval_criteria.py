@@ -19,8 +19,15 @@ Audit mode (--audit):
   - Missing or incomplete allowed_tools
   - Missing target_skills
   - Keyword-only semantic checks (heuristic detection)
-  - Minimum test count (3+)
+  - Minimum test count (3+, 2 for lightweight-tier artifacts)
   Outputs JSON to stdout. Human-readable messages go to stderr.
+
+Exit codes (validate mode):
+  0 = valid; warnings may be present (references/phase1-evaluation.md's
+      Step 5 -> Step 6 gate accepts warnings, and the handoff field
+      validation_passed is defined as exit 0 — warnings must not flip it)
+  2 = errors (schema-invalid, unreadable, empty, or empty prompts)
+Audit mode exits 1 on a hard error (unreadable/empty file), else 0.
 """
 
 from __future__ import annotations
@@ -98,47 +105,60 @@ DEFAULT_SKILL_TOOLS = [
 ]
 
 
-# These helpers go through hone_common.get, which treats an explicit JSON
-# null the same as an absent key. Audit mode runs on schema-invalid files by
-# design, so any of these fields can arrive as null; a raw tc.get(k, default)
-# returns None in that case and crashes the audit (e.g. None.strip()) before
-# any findings reach stdout.
+# These helpers go through hone_common.get with an `expected` type, which
+# treats an explicit JSON null OR a wrong-typed value the same as an absent
+# key. Audit mode runs on schema-invalid files by design, so any of these
+# fields can arrive as null or mistyped; a raw tc.get(k, default) crashes
+# the audit (e.g. None.strip(), ["list"].strip(), "str" + ["Skill"]) before
+# any findings reach stdout, and the auto-repair path never runs. The
+# string-list getters additionally drop non-string items so per-value
+# checks (regex search, .lower()) never meet an int or a dict.
 
 
-def _get_required_present(tc: dict) -> list:
+def _string_items(values: list) -> list[str]:
+    """Only the string items of a possibly mixed-type list."""
+    return [value for value in values if isinstance(value, str)]
+
+
+def _get_required_present(tc: dict) -> list[str]:
     """Get required_present from test case."""
-    return get(tc, "required_present", [])
+    return _string_items(get(tc, "required_present", [], expected=list))
 
 
-def _get_required_absent(tc: dict) -> list:
+def _get_required_absent(tc: dict) -> list[str]:
     """Get required_absent from test case."""
-    return get(tc, "required_absent", [])
+    return _string_items(get(tc, "required_absent", [], expected=list))
 
 
 def _get_checks(tc: dict) -> list:
     """Get checks from test case."""
-    return get(tc, "checks", [])
+    return get(tc, "checks", [], expected=list)
 
 
 def _get_runner_context(tc: dict) -> str:
     """Get runner_context from test case."""
-    return get(tc, "runner_context", "").strip()
+    return get(tc, "runner_context", "", expected=str).strip()
 
 
 def _get_allowed_tools(tc: dict) -> list:
     """Get allowed_tools from test case."""
-    return get(tc, "allowed_tools", [])
+    return get(tc, "allowed_tools", [], expected=list)
 
 
 def _get_target_skills(tc: dict) -> list:
     """Get target_skills from test case."""
-    return get(tc, "target_skills", [])
+    return get(tc, "target_skills", [], expected=list)
+
+
+def _get_prompt(tc: dict) -> str:
+    """Get prompt from test case."""
+    return get(tc, "prompt", "", expected=str)
 
 
 def check_unsimulatable_pipeline(tc: dict) -> str | None:
     """Check if a test case invokes a pipeline command and expects full execution."""
     tc_id = get(tc, "id", "unknown")
-    prompt = get(tc, "prompt", "")
+    prompt = _get_prompt(tc)
 
     invoked_command = None
     for cmd in PIPELINE_COMMANDS:
@@ -156,7 +176,7 @@ def check_unsimulatable_pipeline(tc: dict) -> str | None:
     for check in checks:
         description = ""
         if isinstance(check, dict):
-            description = check.get("description", "")
+            description = get(check, "description", "", expected=str)
         elif isinstance(check, str):
             description = check
         if PIPELINE_RESULT_PATTERNS.search(description):
@@ -300,7 +320,7 @@ def check_allowed_tools_audit(tc: dict) -> dict | None:
     """Flag test cases with missing or incomplete allowed_tools."""
     tc_id = get(tc, "id", "unknown")
     tools = _get_allowed_tools(tc)
-    prompt = get(tc, "prompt", "")
+    prompt = _get_prompt(tc)
 
     if not tools:
         return {
@@ -360,7 +380,7 @@ def check_semantic_check_quality(tc: dict) -> list[dict]:
     for i, check in enumerate(checks):
         description = ""
         if isinstance(check, dict):
-            description = check.get("description", "")
+            description = get(check, "description", "", expected=str)
         elif isinstance(check, str):
             description = check
 
@@ -391,15 +411,21 @@ def check_semantic_check_quality(tc: dict) -> list[dict]:
 
 
 def check_minimum_test_count(test_cases: list) -> dict | None:
-    """Warn if fewer than 3 test cases."""
+    """Warn if fewer than 3 test cases.
+
+    The contract (references/phase1-evaluation.md, Step 5 -> Step 6 gate)
+    is at least 3 test cases, or 2 for the lightweight complexity tier.
+    This script cannot see the tier, so 2 test cases draw a non-blocking
+    warning for the tier-aware gate to interpret, never a hard failure.
+    """
     if len(test_cases) < 3:
         return {
             "test_id": "_global",
             "issue": "low_test_count",
             "severity": "warning",
             "message": (
-                f"Only {len(test_cases)} test case(s). Recommend at least 3 "
-                "for meaningful evaluation coverage."
+                f"Only {len(test_cases)} test case(s). The minimum is 3 "
+                "(2 for lightweight-tier artifacts)."
             ),
         }
     return None
@@ -432,7 +458,7 @@ def validate(path: str, output_stream=None) -> int:
         print(f"ERROR: Empty or null JSON file: {path}", file=out)
         return 2
 
-    test_cases = data.get("test_cases", [])
+    test_cases = get(data, "test_cases", [], expected=list)
     if not test_cases:
         print("ERROR: No test cases found", file=out)
         return 2
@@ -463,7 +489,7 @@ def validate(path: str, output_stream=None) -> int:
                 f"  {tc_id}: no checks defined (only programmatic checks)"
             )
 
-        if not get(tc, "prompt", "").strip():
+        if not _get_prompt(tc).strip():
             errors.append(f"  {tc_id}: empty prompt")
 
         pipeline_warning = check_unsimulatable_pipeline(tc)
@@ -491,7 +517,11 @@ def validate(path: str, output_stream=None) -> int:
 
     if errors:
         return 2
-    return 1
+    # Warnings alone do not fail validation: the Step 5 -> Step 6 gate
+    # accepts warnings, and validation_passed (defined as exit 0) must
+    # agree with the gate or an executor hard-stops on a file the
+    # checklist declared acceptable.
+    return 0
 
 
 def audit(criteria_path: str, artifact_path: str | None) -> dict:
@@ -535,7 +565,7 @@ def audit(criteria_path: str, artifact_path: str | None) -> dict:
             "total_test_cases": 0,
         }
 
-    test_cases = data.get("test_cases", [])
+    test_cases = get(data, "test_cases", [], expected=list)
     if not test_cases:
         return {
             "error": "No test cases found",

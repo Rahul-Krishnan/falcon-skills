@@ -159,7 +159,7 @@ Look for `eval_criteria.json` using the resolution order in the artifact profile
 **Gate: Step 3 → Step 4 or Step 5 (checklist)**
 - [ ] Eval criteria path was checked on disk
 - [ ] Routing decision is one of: reuse (Step 4 -> Step 6 -> Step 7 -> Step 8), regenerate (Step 5 -> Step 6 -> Step 7 -> Step 8), fix-only (Phase 2)
-- [ ] If reusing: file is non-empty and contains at least 3 test cases (quick line count check)
+- [ ] If reusing: file is non-empty and contains at least 3 test cases — 2 for `lightweight`-tier artifacts (quick line count check)
 - [ ] If criteria file exists but is empty or corrupt: treat as "no criteria exist", proceed to Step 5
 
 **Handoff interface (Step 3 → Step 4 or Step 5):**
@@ -167,7 +167,7 @@ Look for `eval_criteria.json` using the resolution order in the artifact profile
 routing_decision: {
   has_existing_criteria: boolean,     // file exists on disk
   criteria_path: string,             // full path to eval_criteria.json
-  criteria_valid: boolean,           // non-empty, 3+ test cases
+  criteria_valid: boolean,           // non-empty, 3+ test cases (2+ for lightweight tier)
   route: "reuse" | "regenerate" | "fix_only"
 }
 ```
@@ -348,8 +348,8 @@ Test methodology: direct Bash invocation, same as hooks. Capture stdout, stderr,
 
 **Gate: Step 5 → Step 6 (checklist)**
 - [ ] Eval criteria file was written to `{eval_criteria_path}` (file exists on disk)
-- [ ] File contains at least 3 test cases
-- [ ] `validate_eval_criteria.py` passes with no errors (warnings acceptable)
+- [ ] File contains at least 3 test cases — 2 for `lightweight`-tier artifacts (the tier carve-out from Step 1; the handoff schema's `test_count >= 2` floor is this same contract minus the tier knowledge the schema does not have)
+- [ ] `validate_eval_criteria.py` passes with no errors — warnings acceptable (warnings-only runs exit 0, so this line and `validation_passed` below agree)
 - [ ] If validation fails: fix criteria inline, re-validate. Do not proceed with broken criteria.
 - [ ] **For hooks:** All mandatory profile test case types are present: `true_positive`, `true_negative`, `edge_case_input`, `performance`. `throttle_behavior` is required only if the hook script contains throttling logic (scan for `last_run`, `throttle`, or `debounce` patterns before generating criteria). If a required type is absent: add it before marking this gate done. Do NOT proceed with fewer than 4 hook test cases.
 - [ ] **For scripts:** All mandatory profile test case types are present: `happy_path`, `missing_input`, `invalid_input`, `idempotency`. `edge_case` is required only if the script has conditional branches. If a required type is absent: add it before marking this gate done.
@@ -359,11 +359,11 @@ Test methodology: direct Bash invocation, same as hooks. Capture stdout, stderr,
 generated_criteria: {
   criteria_path: string,             // path to eval_criteria.json
   test_count: number,                // number of test cases generated
-  validation_passed: boolean,        // validate_eval_criteria.py exit 0
+  validation_passed: boolean,        // validate_eval_criteria.py exit 0 (warnings do not affect the exit code)
   dimensions: string[]               // dimension names used
 }
 ```
-Step 6 validates: `validation_passed` is true and `test_count >= 3`. If validation fails, STOP.
+Step 6 validates: `validation_passed` is true and `test_count >= 3` (`>= 2` for `lightweight`-tier artifacts). If validation fails, STOP.
 
 ### Step 6: Programmatic Checks Enrichment (skills and commands only)
 

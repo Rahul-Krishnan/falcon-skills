@@ -25,6 +25,11 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+# Null-tolerant dict access (same-directory flat import). State files under
+# validation are exactly where present-but-null keys show up; a raw
+# state.get("steps", {}) returns None for {"steps": null} and crashes.
+from hone_common import get as null_safe_get
+
 
 # ---------------------------------------------------------------------------
 # Schema DSL
@@ -215,9 +220,12 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     "generated_criteria": {
         "fields": {
             "criteria_path": _str(non_empty=True),
-            # Minimum 2, not 3: the lightweight complexity tier legitimately
-            # generates 2 test cases (references/phase1-evaluation.md), and a
-            # higher floor here hard-stops runs that followed their own spec.
+            # Absolute floor 2, not 3: the contract is "at least 3 test
+            # cases, 2 for the lightweight complexity tier"
+            # (references/phase1-evaluation.md, Step 5 -> Step 6 gate). This
+            # schema cannot see the tier, so it enforces the lower bound;
+            # the tier-aware floor lives in the doc gate, which carries the
+            # lightweight carve-out explicitly.
             "test_count": _num(min_value=2),
             "validation_passed": _bool(),
             "dimensions": _arr(items={"type": "string"}, non_empty=True),
@@ -499,16 +507,14 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     # Hook pre-scan metadata (Step 1 discovery for hooks)
     "hook_metadata": {
         "fields": {
-            "event_type": _enum(
-                [
-                    "Stop",
-                    "PostToolUse",
-                    "UserPromptSubmit",
-                    "PreToolUse",
-                    "SessionStart",
-                    "Notification",
-                ]
-            ),
+            # Not an enum: the hook-event vocabulary belongs to the Claude
+            # Code harness, not this plugin. A hard-coded list went stale
+            # (SubagentStop, PreCompact, SessionEnd were rejected as
+            # invalid, blocking /hone on correct hooks) and every future
+            # harness event would need a plugin release. Any non-empty
+            # string is accepted; references/artifact-profiles.md documents
+            # the vocabulary as open.
+            "event_type": _str(non_empty=True),
             "has_throttle": _bool(),
             "shebang": _str(),
         },
@@ -816,17 +822,24 @@ def validate_step(
     contract = STEP_CONTRACTS[step_name]
     results: list[ValidationResult] = []
 
-    steps = state.get("steps", {})
-    step_status = steps.get(step_name)
+    # null_safe_get tolerates {"steps": null} and a non-object steps value;
+    # the validator most likely to meet malformed state files must report
+    # them, not crash on them.
+    steps = null_safe_get(state, "steps", {}, expected=dict)
+    step_status = null_safe_get(steps, step_name)
 
     # SKILL.md's Mechanical Exit Gate and reuse path both write "skipped";
     # this is the canonical spelling for a skipped step status.
     if step_status == "skipped":
-        # Skipped steps don't need output validation, but inputs should exist
+        # Skipped steps don't need output validation, but every required
+        # input must exist and validate. Checking only present keys let a
+        # state file with no artifact_context at all (and therefore no
+        # original_backup_path for Phase 3 auto-revert) sail through as a
+        # vacuous ALL PASS.
         for handoff_name in contract["requires"]:
-            if handoff_name in state:
-                results.append(validate_handoff(state, handoff_name))
+            results.append(validate_handoff(state, handoff_name))
         if not results:
+            # Step has no required inputs; record an explicit pass.
             results.append(
                 ValidationResult(
                     handoff=f"{step_name}(skipped)",

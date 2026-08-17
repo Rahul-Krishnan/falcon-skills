@@ -35,7 +35,7 @@ Each artifact type has a profile that configures the shared hone loop.
 
 **Hook pre-scan (run during Step 1 discovery, before criteria generation):** When discovering a hook, extract the following metadata from the script before generating any test criteria. This prevents incomplete coverage and avoids shell quoting errors caused by mismatched input schemas:
 
-- **Trigger event type:** Check `~/.claude/settings.json` for the hook registration. The event type (`Stop`, `PostToolUse`, `UserPromptSubmit`, `PreToolUse`) determines the input JSON schema for test cases. Each event type has a different shape — use the wrong schema and every test case will fail.
+- **Trigger event type:** Check `~/.claude/settings.json` for the hook registration. The event type (e.g. `Stop`, `PostToolUse`, `UserPromptSubmit`, `PreToolUse`, `SubagentStop`, `PreCompact`, `SessionEnd`) determines the input JSON schema for test cases. Each event type has a different shape — use the wrong schema and every test case will fail. This vocabulary is owned by the Claude Code harness and grows over time, so `hook_metadata.event_type` is validated as any non-empty string, never against a closed list.
 - **Throttling logic:** Scan the script for `last_run`, `throttle`, `debounce`, or timestamp-comparison patterns. If found, `throttle_behavior` test case is required; otherwise it is optional.
 - **Shebang:** Check whether the script uses `#!/bin/bash` or `#!/usr/bin/env bash`. If `/bin/bash` is absent, note that the script may behave differently in restricted environments.
 

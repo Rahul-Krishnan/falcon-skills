@@ -22,6 +22,10 @@ import json
 import sys
 from pathlib import Path
 
+# Null-tolerant dict access: a present-but-null test_cases key defeats a
+# raw data.get("test_cases", []) and would crash the semantic pass below.
+from hone_common import get as null_safe_get
+
 # Import validation DSL and engine from validate_handoff.py (same directory)
 from validate_handoff import (
     ValidationError,
@@ -157,8 +161,12 @@ def validate_criteria(
     errors: list[ValidationError] = []
     fields_checked = validate_fields(data, CRITERIA_SCHEMA, "", errors)
 
-    # Additional semantic checks beyond schema validation
-    test_cases = data.get("test_cases", [])
+    # Additional semantic checks beyond schema validation. The list guard
+    # matters: validate_fields above records a clean type error for a null
+    # or non-list test_cases, and this pass must then degrade to "no test
+    # cases" instead of dying on enumerate(None) with a raw traceback
+    # (which also leaves --json consumers with unparseable output).
+    test_cases = null_safe_get(data, "test_cases", [], expected=list)
     seen_ids: set[str] = set()
     for idx, test_case in enumerate(test_cases):
         if not isinstance(test_case, dict):

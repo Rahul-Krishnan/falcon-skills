@@ -60,6 +60,15 @@ class TestNullTolerantGet(unittest.TestCase):
     def test_default_defaults_to_none(self):
         self.assertIsNone(get({}, "missing"))
 
+    def test_expected_type_mismatch_returns_default(self):
+        # Audit-path callers run on schema-invalid files by design; a
+        # wrong-typed value must degrade like a null, not crash consumers.
+        self.assertEqual(get({"runner_context": ["x"]}, "runner_context", "", expected=str), "")
+        self.assertEqual(get({"allowed_tools": "Read"}, "allowed_tools", [], expected=list), [])
+
+    def test_expected_type_match_returns_value(self):
+        self.assertEqual(get({"prompt": "hi"}, "prompt", "", expected=str), "hi")
+
 
 class TestResolveScore(unittest.TestCase):
     def test_llm_score_used_when_no_deterministic(self):
@@ -68,10 +77,29 @@ class TestResolveScore(unittest.TestCase):
     def test_explicit_null_score_falls_through(self):
         self.assertEqual(resolve_score({"test_id": "T1", "score": None}), 0.0)
 
-    def test_final_score_alias_fallback(self):
+    def test_final_score_alias_used_only_when_score_key_absent(self):
         self.assertEqual(
-            resolve_score({"test_id": "T1", "score": None, "final_score": 0.6}), 0.6
+            resolve_score({"test_id": "T1", "final_score": 0.6}), 0.6
         )
+
+    def test_explicit_null_score_skips_alias_and_uses_deterministic(self):
+        # Consolidation regression pin: pre-consolidation,
+        # criteria_self_repair's result.get("score", result.get("final_score"))
+        # returned None for a present-but-null score (the judge errored), so
+        # the test fell through to the deterministic composite. The alias
+        # must not paper over an errored judge in either convention.
+        result = {"test_id": "T1", "score": None, "final_score": 0.9}
+        self.assertEqual(
+            resolve_score(result, {"T1": 0.2}, prefer_deterministic=False), 0.2
+        )
+        self.assertEqual(
+            resolve_score(result, {"T1": 0.2}, prefer_deterministic=True), 0.2
+        )
+
+    def test_explicit_null_score_with_alias_and_no_deterministic_is_default(self):
+        result = {"test_id": "T1", "score": None, "final_score": 0.9}
+        self.assertEqual(resolve_score(result, {}), 0.0)
+        self.assertEqual(resolve_score(result, {}, prefer_deterministic=False), 0.0)
 
     def test_deterministic_preferred_by_default(self):
         result = {"test_id": "T1", "score": 0.2}
@@ -125,6 +153,25 @@ class TestDeterministicLoaders(unittest.TestCase):
         )
         self.assertEqual(load_deterministic_scores(results_path), {"T1": 0.8, "T3": 0.5})
         self.assertEqual(load_inconclusive_ids(results_path), {"T2", "T3"})
+
+    def test_non_dict_det_file_degrades_to_empty(self):
+        # "{} on any failure" includes a file that parses as a non-object
+        # (e.g. [] from truncation); returning it raw crashed both loaders.
+        results_path = self._write([])
+        self.assertEqual(load_deterministic_scores(results_path), {})
+        self.assertEqual(load_inconclusive_ids(results_path), set())
+
+    def test_non_dict_per_test_entries_are_ignored(self):
+        results_path = self._write(
+            {"per_test": [{"test_id": "T1", "composite": 0.8}, 7, "junk", None]}
+        )
+        self.assertEqual(load_deterministic_scores(results_path), {"T1": 0.8})
+        self.assertEqual(load_inconclusive_ids(results_path), set())
+
+    def test_null_per_test_degrades_to_empty(self):
+        results_path = self._write({"per_test": None})
+        self.assertEqual(load_deterministic_scores(results_path), {})
+        self.assertEqual(load_inconclusive_ids(results_path), set())
 
 
 class TestThresholdConsistency(unittest.TestCase):

@@ -361,6 +361,30 @@ class TestValidateHandoff(unittest.TestCase):
         result = validate_handoff(state, "hook_metadata")
         self.assertTrue(result.valid)
 
+    def test_hook_metadata_accepts_harness_events_outside_any_list(self) -> None:
+        # The hook-event vocabulary is owned by the Claude Code harness; a
+        # closed enum went stale and rejected valid hooks (SubagentStop,
+        # PreCompact, SessionEnd). Any non-empty string must validate.
+        for event in ("SubagentStop", "PreCompact", "SessionEnd", "FutureEvent"):
+            state = {
+                "hook_metadata": {
+                    "event_type": event,
+                    "has_throttle": False,
+                    "shebang": "#!/bin/bash",
+                },
+            }
+            self.assertTrue(validate_handoff(state, "hook_metadata").valid, event)
+
+    def test_hook_metadata_rejects_empty_event_type(self) -> None:
+        state = {
+            "hook_metadata": {
+                "event_type": "",
+                "has_throttle": False,
+                "shebang": "#!/bin/bash",
+            },
+        }
+        self.assertFalse(validate_handoff(state, "hook_metadata").valid)
+
     def test_handoff_data_not_dict(self) -> None:
         state = {"artifact_context": "this should be an object"}
         result = validate_handoff(state, "artifact_context")
@@ -389,10 +413,46 @@ class TestValidateStep(unittest.TestCase):
         results = validate_step(state, "phase1_evaluate")
         self.assertFalse(all(r.valid for r in results))
 
-    def test_skipped_step_ok(self) -> None:
-        state = {"steps": {"phase1_structural_audit": "skipped"}}
+    def test_skipped_step_with_valid_inputs_ok(self) -> None:
+        state = {
+            "steps": {"phase1_structural_audit": "skipped"},
+            "artifact_context": {
+                "artifact_content": "content",
+                "artifact_path": "/path",
+                "edit_path": "/path",
+                "original_backup_path": "/tmp/hone-backup/SKILL.md",
+                "artifact_type": "skill",
+                "artifact_name": "test",
+                "scope_intent": {
+                    "complexity_tier": "standard",
+                    "primary_dimension": "correctness",
+                    "line_count": 100,
+                },
+            },
+        }
         results = validate_step(state, "phase1_structural_audit")
         self.assertTrue(all(r.valid for r in results))
+
+    def test_skipped_step_missing_required_input_fails(self) -> None:
+        # A skipped structural audit with no artifact_context at all (and
+        # therefore no original_backup_path for Phase 3 auto-revert) must
+        # not produce a vacuous ALL PASS.
+        state = {"steps": {"phase1_structural_audit": "skipped"}}
+        results = validate_step(state, "phase1_structural_audit")
+        self.assertFalse(all(r.valid for r in results))
+
+    def test_skipped_step_without_required_inputs_ok(self) -> None:
+        # phase1_evaluate requires no inputs; a skip records an explicit pass.
+        state = {"steps": {"phase1_evaluate": "skipped"}}
+        results = validate_step(state, "phase1_evaluate")
+        self.assertTrue(all(r.valid for r in results))
+
+    def test_null_steps_reports_cleanly(self) -> None:
+        # {"steps": null} is the present-but-null pitfall; --step mode must
+        # emit the clean "step status is None" error, not an AttributeError.
+        results = validate_step({"steps": None}, "phase1_evaluate")
+        self.assertFalse(all(r.valid for r in results))
+        self.assertIn("None", results[0].errors[0].message)
 
     def test_pending_step_fails(self) -> None:
         state = {"steps": {"phase1_evaluate": "pending"}}

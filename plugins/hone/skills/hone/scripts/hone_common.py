@@ -52,7 +52,7 @@ ACTIONABLE_THRESHOLD = 0.8
 # Null-tolerant access
 # ---------------------------------------------------------------------------
 
-def get(d: object, key: str, default=None):
+def get(d: object, key: str, default=None, expected: type | tuple | None = None):
     """dict.get that also treats an explicit JSON null as absent.
 
     Returns `default` when `d` is not a dict, when `key` is missing, or when
@@ -60,19 +60,40 @@ def get(d: object, key: str, default=None):
     score/details/timeout fields, and a raw `d.get(key, default)` returns
     None in that case, crashing numeric comparisons and method calls
     downstream.
+
+    `expected` optionally extends the same treatment to wrong-typed values:
+    when set, a stored value that is not an instance of `expected` also
+    returns `default`. Audit-path callers use this because they run on
+    schema-invalid files by design — a `runner_context` that arrives as a
+    list must not crash `.strip()` before any findings reach stdout.
     """
     if not isinstance(d, dict):
         return default
     value = d.get(key, default)
-    return default if value is None else value
+    if value is None:
+        return default
+    if expected is not None and not isinstance(value, expected):
+        return default
+    return value
 
 
 def _raw_llm_score(result: dict):
-    """`score` with `final_score` (skill-creator alias) fallback; None if neither."""
-    score = result.get("score") if isinstance(result, dict) else None
-    if score is None and isinstance(result, dict):
-        score = result.get("final_score")
-    return score
+    """The result's own LLM score: `score`, else the `final_score` alias.
+
+    An explicit `score: null` means the judge ran and errored; it is
+    returned as None (NOT papered over by the `final_score` alias) so
+    resolve_score falls through to the deterministic composite. This pins
+    the pre-consolidation behavior of criteria_self_repair's
+    `result.get("score", result.get("final_score"))`, where a present-but-
+    null `score` never consulted `final_score`. The alias applies only when
+    the `score` key is absent entirely (skill-creator runners emit
+    `final_score` instead of `score`).
+    """
+    if not isinstance(result, dict):
+        return None
+    if "score" in result:
+        return result["score"]
+    return result.get("final_score")
 
 
 def resolve_score(
@@ -86,8 +107,10 @@ def resolve_score(
     Sources, in order:
       - the deterministic composite for this test_id in `det_scores`
         (from deterministic_scores.json via load_deterministic_scores)
-      - the LLM judge `score` in the result (explicit null == absent)
-      - the `final_score` alias some runners emit
+      - the LLM judge `score` in the result; the `final_score` alias some
+        runners emit stands in only when the `score` key is absent. An
+        explicit `score: null` (judge ran and errored) skips both and
+        falls through to the deterministic composite.
       - `default` (0.0 — a scoreless failing test must not look passing)
 
     `prefer_deterministic=True` (analyze_results convention) consults the
@@ -112,15 +135,33 @@ def resolve_score(
 # ---------------------------------------------------------------------------
 
 def _load_det_file(results_path: str) -> dict:
-    """Parse deterministic_scores.json next to results.json; {} on any failure."""
+    """Parse deterministic_scores.json next to results.json; {} on any failure.
+
+    "Any failure" includes a file that parses but is not a JSON object
+    (e.g. `[]` from truncation or a bad repair) — returning it as-is would
+    crash both public loaders on `.get`.
+    """
     det_scores_path = Path(results_path).parent / "deterministic_scores.json"
     if not det_scores_path.exists():
         return {}
     try:
         with open(det_scores_path) as f:
-            return json.load(f)
+            parsed = json.load(f)
     except (json.JSONDecodeError, OSError):
         return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _per_test_entries(results_path: str) -> list[dict]:
+    """Object entries of deterministic_scores.json's per_test array.
+
+    Tolerates a null/non-list `per_test` and non-object items (an int item
+    would make `"test_id" in test` raise TypeError in the loaders below).
+    """
+    per_test = _load_det_file(results_path).get("per_test")
+    if not isinstance(per_test, list):
+        return []
+    return [test for test in per_test if isinstance(test, dict)]
 
 
 def load_deterministic_scores(results_path: str) -> dict[str, float]:
@@ -135,10 +176,9 @@ def load_deterministic_scores(results_path: str) -> dict[str, float]:
     comparisons downstream never see None. Returns an empty dict when the
     file is missing or unreadable.
     """
-    per_test = _load_det_file(results_path).get("per_test") or []
     return {
         test["test_id"]: test["composite"]
-        for test in per_test
+        for test in _per_test_entries(results_path)
         if "test_id" in test and isinstance(test.get("composite"), (int, float))
     }
 
@@ -153,10 +193,9 @@ def load_inconclusive_ids(results_path: str) -> set[str]:
     back to `score = 0.0`, dragging avg/FAIL counts and (on an
     all-inconclusive run) misrouting triage into criteria_bug.
     """
-    per_test = _load_det_file(results_path).get("per_test") or []
     return {
         test["test_id"]
-        for test in per_test
+        for test in _per_test_entries(results_path)
         if "test_id" in test
         and (
             test.get("status") == "inconclusive"

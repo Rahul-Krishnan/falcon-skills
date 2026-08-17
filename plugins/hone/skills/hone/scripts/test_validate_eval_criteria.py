@@ -14,9 +14,12 @@ from pathlib import Path
 PYTHON = sys.executable
 SCRIPT = str(Path(__file__).parent / "validate_eval_criteria.py")
 
-# Exit codes
+# Exit codes. Warnings do not flip the exit code: the Step 5 -> Step 6 gate
+# accepts warnings, and the handoff field validation_passed is defined as
+# exit 0 — a warnings-only run must satisfy both. Tests that expect a
+# warning therefore also assert on the WARNINGS block in stdout.
 EXIT_CLEAN = 0
-EXIT_WARNINGS = 1
+EXIT_WARNINGS = 0
 EXIT_ERRORS = 2
 
 
@@ -125,8 +128,18 @@ class TestValidateMode(unittest.TestCase):
         tc = _make_tc(required_absent=["error"])
         result = run_validate({"test_cases": [tc]})
         self.assertEqual(result.returncode, EXIT_WARNINGS)
+        self.assertIn("WARNINGS", result.stdout)
         self.assertIn("error", result.stdout)
         self.assertIn("required_absent", result.stdout)
+
+    def test_warnings_only_run_exits_zero(self):
+        # Contract pin: warnings alone must not fail validation, or the
+        # validation_passed handoff (exit 0) disagrees with the gate
+        # checklist ("warnings acceptable") and hard-stops a good file.
+        tc = _make_tc(required_absent=["error"])
+        result = run_validate({"test_cases": [tc]})
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("WARNINGS", result.stdout)
 
     def test_all_dangerous_absent_words_produce_warnings(self):
         """Each DANGEROUS_ABSENT_WORDS entry should trigger a warning."""
@@ -139,6 +152,7 @@ class TestValidateMode(unittest.TestCase):
                 tc = _make_tc(required_absent=[word])
                 result = run_validate({"test_cases": [tc]})
                 self.assertEqual(result.returncode, EXIT_WARNINGS, f"Expected warning for '{word}'")
+                self.assertIn("WARNINGS", result.stdout, f"Expected warning for '{word}'")
 
     def test_required_present_section_header_is_warning(self):
         """Multi-word uppercase string in required_present triggers brittleness warning."""
@@ -234,6 +248,27 @@ class TestAuditMode(unittest.TestCase):
         self.assertIn("missing_allowed_tools", issues)
         self.assertGreaterEqual(payload["fixable_count"], 1)
 
+    def test_audit_wrong_typed_fields_do_not_crash(self):
+        """Audit runs on schema-invalid files by design; wrong-typed (not
+        just null) fields must degrade to findings, never a traceback that
+        leaves the hone executor zero bytes of JSON on stdout."""
+        tc = _make_tc()
+        tc["runner_context"] = ["not", "a", "string"]
+        tc["prompt"] = 42
+        tc["allowed_tools"] = "Read"
+        tc["required_present"] = ["run_script.py", 7]
+        returncode, payload = self._audit({"test_cases": [tc]})
+        self.assertEqual(returncode, EXIT_CLEAN)
+        self.assertFalse(payload["schema_valid"])
+        issues = [f["issue"] for f in payload["findings"]]
+        self.assertIn("missing_runner_context", issues)
+        self.assertIn("missing_allowed_tools", issues)
+
+    def test_audit_null_test_cases_returns_error_key(self):
+        _, payload = self._audit({"test_cases": None})
+        self.assertIn("error", payload)
+        self.assertEqual(payload["total_test_cases"], 0)
+
     def test_audit_reports_missing_skill_tool_when_slash_command_in_prompt(self):
         tc = _make_tc(
             prompt="/some-skill do the thing",
@@ -308,7 +343,7 @@ class TestAuditMode(unittest.TestCase):
     def test_audit_empty_test_cases_returns_error_key(self):
         returncode, payload = self._audit({"test_cases": []})
         # Audit mode exits 1 (not 2) for errors via sys.exit(1 if error else 0)
-        self.assertEqual(returncode, EXIT_WARNINGS)
+        self.assertEqual(returncode, 1)
         self.assertIn("error", payload)
         self.assertEqual(payload["total_test_cases"], 0)
 

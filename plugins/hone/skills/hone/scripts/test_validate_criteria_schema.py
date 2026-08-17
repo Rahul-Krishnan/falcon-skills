@@ -89,6 +89,27 @@ class TestInvalidCriteria(unittest.TestCase):
         result = run_validate({"test_cases": []})
         self.assertEqual(result.returncode, 1)
 
+    def test_null_test_cases_reports_cleanly(self):
+        # Present-but-null test_cases: the type error must surface as a
+        # clean INVALID report (exit 1), not a TypeError traceback from
+        # the semantic duplicate-id pass iterating None.
+        result = run_validate({"test_cases": None})
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertIn("INVALID", result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_null_test_cases_json_output_is_parseable(self):
+        result = run_validate({"test_cases": None}, ["--json"])
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["valid"])
+        self.assertEqual(payload["test_case_count"], 0)
+
+    def test_non_list_test_cases_reports_cleanly(self):
+        result = run_validate({"test_cases": {"tc": 1}})
+        self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
     def test_missing_required_field_is_error(self):
         data = {
             "test_cases": [

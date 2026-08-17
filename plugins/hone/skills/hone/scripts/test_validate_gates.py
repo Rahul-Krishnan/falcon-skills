@@ -38,11 +38,42 @@ class TestSchema(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertTrue(any("missing required key 'judge'" in e for e in report["errors"]))
 
-    def test_unknown_judge_is_warning_not_error(self):
+    def test_unknown_judge_is_error(self):
+        # The judge vocabulary is a closed enum owned by
+        # gate-event-schema.json; a state file violating the published
+        # schema must not be blessed by the deterministic gate check.
         gates = NORMAL_RUN[:-1] + [gate("workflow_exit", judge="vibes")]
         report = validate_gates(gates, "normal")
-        self.assertTrue(report["valid"])
-        self.assertTrue(report["warnings"])
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("judge 'vibes'" in e for e in report["errors"]))
+
+    def test_valid_rubric_passes(self):
+        rubric = [
+            {"severity": "CRITICAL", "item": "0 CRITICAL findings", "result": "pass"},
+            {"severity": "LOW", "item": "style check", "result": "warn"},
+        ]
+        gates = NORMAL_RUN[:-1] + [dict(gate("workflow_exit"), rubric=rubric)]
+        self.assertTrue(validate_gates(gates, "normal")["valid"])
+
+    def test_rubric_result_enum_violation_is_error(self):
+        rubric = [{"severity": "HIGH", "item": "x", "result": "maybe"}]
+        gates = NORMAL_RUN[:-1] + [dict(gate("workflow_exit"), rubric=rubric)]
+        report = validate_gates(gates, "normal")
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("rubric[0] result" in e for e in report["errors"]))
+
+    def test_rubric_missing_keys_and_bad_severity_are_errors(self):
+        rubric = [{"severity": "SEVERE", "result": "pass"}, "not-an-object"]
+        gates = NORMAL_RUN[:-1] + [dict(gate("workflow_exit"), rubric=rubric)]
+        report = validate_gates(gates, "normal")
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("missing required key 'item'" in e for e in report["errors"]))
+        self.assertTrue(any("severity 'SEVERE'" in e for e in report["errors"]))
+        self.assertTrue(any("rubric[1] is not an object" in e for e in report["errors"]))
+
+    def test_null_rubric_is_allowed(self):
+        gates = NORMAL_RUN[:-1] + [dict(gate("workflow_exit"), rubric=None)]
+        self.assertTrue(validate_gates(gates, "normal")["valid"])
 
     def test_gates_not_a_list(self):
         report = validate_gates("nope", "normal")

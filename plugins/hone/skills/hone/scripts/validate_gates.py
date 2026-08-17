@@ -7,8 +7,12 @@ Mistakes" #7 and #9, the Mechanical Exit Gate paragraph, and the Gate Events
 table) all describe constraints this script enforces mechanically.
 
 What it checks:
-  1. Schema: every event has step, judge, result; judge is a known value;
-     result is exactly "pass" or "fail".
+  1. Schema: every event has step, judge, result; judge is in the
+     references/gate-event-schema.json enum; result is exactly "pass" or
+     "fail"; rubric items (when present) carry severity/item/result with
+     the schema's enums. Violations of the published schema are errors —
+     this script is the deterministic compliance check the schema promises,
+     so it must not bless a state file the schema rejects.
   2. Completeness: the expected event set for the run mode is present.
   3. Fail semantics: a "fail" event is legitimate when it is terminal (the
      pipeline halted there) or when a later "pass" for the same step records
@@ -77,6 +81,45 @@ REQUIRED_STEPS = {
 }
 
 
+# Rubric-item enums mirror references/gate-event-schema.json (rubric.items).
+RUBRIC_SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
+RUBRIC_RESULTS = ("pass", "fail", "warn")
+
+
+def _rubric_errors(index: int, rubric: object) -> list[str]:
+    """Schema errors for a gate's optional rubric array.
+
+    gate-event-schema.json requires each rubric item to be an object with
+    severity/item/result, severity in RUBRIC_SEVERITIES and result in
+    RUBRIC_RESULTS. An absent or null rubric is fine (the field is
+    optional); anything else must match the published schema.
+    """
+    if rubric is None:
+        return []
+    if not isinstance(rubric, list):
+        return [f"gates[{index}] rubric is not an array"]
+    errors: list[str] = []
+    for item_index, item in enumerate(rubric):
+        label = f"gates[{index}] rubric[{item_index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{label} is not an object")
+            continue
+        for key in ("severity", "item", "result"):
+            if key not in item:
+                errors.append(f"{label} missing required key '{key}'")
+        if "severity" in item and item["severity"] not in RUBRIC_SEVERITIES:
+            errors.append(
+                f"{label} severity {item['severity']!r} is not one of "
+                f"{RUBRIC_SEVERITIES}"
+            )
+        if "result" in item and item["result"] not in RUBRIC_RESULTS:
+            errors.append(
+                f"{label} result {item['result']!r} is not one of "
+                f"{RUBRIC_RESULTS}"
+            )
+    return errors
+
+
 def validate_gates(gates: list, mode: str) -> dict:
     """Return a report dict describing schema, completeness, and fail-semantics."""
     errors: list[str] = []
@@ -107,9 +150,13 @@ def validate_gates(gates: list, mode: str) -> dict:
             )
         judge = gate.get("judge")
         if "judge" in gate and judge not in VALID_JUDGES:
-            warnings.append(
+            # Error, not warning: unlike hook event types, the judge
+            # vocabulary is owned by this plugin's gate-event-schema.json,
+            # which declares it as a closed enum.
+            errors.append(
                 f"gates[{index}] judge '{judge}' is not one of {VALID_JUDGES}"
             )
+        errors.extend(_rubric_errors(index, gate.get("rubric")))
 
     # Fail semantics: terminal, or repaired by a later pass for the same step.
     for index, gate in enumerate(gates):
