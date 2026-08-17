@@ -71,6 +71,24 @@ ACCEPTANCE_THRESHOLD = 0.65
 # summaries must use this same bar so triage and reporting never disagree.
 ACTIONABLE_THRESHOLD = 0.8
 
+# Floor applied to each dimension inside score_execution's weighted geometric
+# mean, so also the smallest composite a deterministic run can produce: with
+# weights summing to 1, all-floored dimensions give 0.05 ** 1 == 0.05. It
+# lives here because analyze_results' triage bands have to agree with it —
+# written against an exact 0.0, which the floor makes unreachable, `variance`
+# could never be returned on a deterministic-only run.
+DIMENSION_FLOOR = 0.05
+
+
+def at_score_floor(score: float) -> bool:
+    """True when a composite sits at (or below) the deterministic floor.
+
+    The floor is the "nothing scored" reading that an exact 0.0 used to carry.
+    The tolerance absorbs the float noise in `0.05 ** 1` (0.049999999999999996)
+    for callers that skip the round-trip through `round(..., 4)`.
+    """
+    return isinstance(score, (int, float)) and score <= DIMENSION_FLOOR + 1e-9
+
 
 # ---------------------------------------------------------------------------
 # Run shapes (authoritative — see the module docstring)
@@ -168,6 +186,32 @@ def get(d: object, key: str, default=None, expected: type | tuple | None = None)
     if expected is not None and not isinstance(value, expected):
         return default
     return value
+
+
+# Top-level keys that can carry the per-test array, in precedence order.
+# `results` is the canonical hone format; `test_results` is the skill-creator
+# alias. Both are real inputs, so every consumer of a results file has to
+# accept both — analyze_results read only `results` and silently reported an
+# empty run on a file score_execution had just graded.
+RESULTS_KEYS: tuple[str, ...] = ("results", "test_results")
+
+
+def extract_results(data: object) -> tuple[list, str | None]:
+    """Split a parsed results file into (test entries, key that carried them).
+
+    The returned key is None when neither alias is present, which callers use
+    to tell a schema mismatch ("this file is not a results file") from a valid
+    file whose array is empty ("no tests ran"). A present-but-wrong-typed value
+    yields an empty list under its own key: the schema was recognized, the
+    payload was not usable.
+    """
+    if not isinstance(data, dict):
+        return [], None
+    for key in RESULTS_KEYS:
+        if key in data:
+            value = data.get(key)
+            return (value if isinstance(value, list) else []), key
+    return [], None
 
 
 def _raw_llm_score(result: dict):

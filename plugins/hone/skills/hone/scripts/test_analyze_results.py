@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import json
+import contextlib
+import io
 import os
 import tempfile
 import unittest
 
-from analyze_results import classify_failure, triage
+from analyze_results import analyze, classify_failure, triage
+from hone_common import DIMENSION_FLOOR
 
 
 class TestClassifyFailure(unittest.TestCase):
@@ -21,6 +24,24 @@ class TestClassifyFailure(unittest.TestCase):
     def test_single_zero_with_others_passing_is_variance(self):
         result = classify_failure(0.0, [0.0, 0.8, 0.9])
         self.assertEqual(result, "variance")
+
+    def test_floor_score_with_others_passing_is_variance(self):
+        """A deterministic composite bottoms out at DIMENSION_FLOOR, not 0.0.
+
+        Written against an exact 0.0, this band was dead in the documented
+        primary mode.
+        """
+        floor = DIMENSION_FLOOR
+        self.assertEqual(classify_failure(floor, [floor, 0.8, 0.9]), "variance")
+
+    def test_all_at_floor_is_criteria_bug(self):
+        floor = DIMENSION_FLOOR
+        self.assertEqual(classify_failure(floor, [floor] * 3), "criteria_bug")
+
+    def test_float_noise_at_floor_still_counts_as_floor(self):
+        """0.05 ** 1 is 0.049999999999999996 before rounding."""
+        noisy = 0.05 ** 1.0
+        self.assertEqual(classify_failure(noisy, [noisy, 0.9]), "variance")
 
     def test_low_score_is_real_issue(self):
         result = classify_failure(0.3, [0.3, 0.8, 0.9])
@@ -128,6 +149,39 @@ class TestTriageFunction(unittest.TestCase):
         self.assertEqual(result["summary"]["variance"], 1)
         self.assertEqual(result["summary"]["pass"], 1)
 
+    def test_variance_reachable_on_deterministic_only_run(self):
+        """The real shape: no LLM scores, composites from the sibling file.
+
+        The other variance tests hand-write an LLM `score: 0.0`, which a
+        deterministic composite can never be.
+        """
+        path = self._write_results(
+            {"results": [{"test_id": "TC-001"}, {"test_id": "TC-002"}]},
+            det_scores={
+                "per_test": [
+                    {"test_id": "TC-001", "composite": DIMENSION_FLOOR},
+                    {"test_id": "TC-002", "composite": 0.9},
+                ]
+            },
+        )
+        result = triage(path)
+        tc1 = next(c for c in result["classifications"] if c["test_id"] == "TC-001")
+        self.assertEqual(tc1["score_source"], "deterministic")
+        self.assertEqual(tc1["classification"], "variance")
+        self.assertEqual(result["summary"]["variance"], 1)
+        self.assertEqual(result["summary"]["pass"], 1)
+
+    def test_test_results_alias_is_triaged(self):
+        """Reading only `results` reported a zero-test run for a file
+        score_execution had just graded, so Phase 2 saw no failures."""
+        path = self._write_results(
+            {"test_results": [{"test_id": "TC-001", "score": 0.3}]}
+        )
+        result = triage(path)
+        self.assertEqual(len(result["classifications"]), 1)
+        self.assertEqual(result["classifications"][0]["test_id"], "TC-001")
+        self.assertEqual(result["summary"]["real_issue"], 1)
+
     def test_deterministic_scores_preferred(self):
         path = self._write_results(
             {
@@ -167,6 +221,55 @@ class TestTriageFunction(unittest.TestCase):
             f.write("not json")
         result = triage(path)
         self.assertIn("error", result)
+
+
+class TestAnalyzeOutput(unittest.TestCase):
+    """The human-readable report must not contradict itself."""
+
+    def _write(self, results_data, det_scores):
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "results.json")
+        with open(path, "w") as f:
+            json.dump(results_data, f)
+        with open(os.path.join(tmpdir, "deterministic_scores.json"), "w") as f:
+            json.dump(det_scores, f)
+        return path
+
+    def _run(self, path):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            analyze(path)
+        return buf.getvalue()
+
+    def test_inconclusive_row_not_reported_as_zero_fail(self):
+        path = self._write(
+            {
+                "results": [
+                    {"test_id": "t_inc", "details": {"category": "sim"}},
+                    {"test_id": "t_ok", "details": {"category": "exec"}},
+                ]
+            },
+            {
+                "per_test": [
+                    {"test_id": "t_inc", "composite": None, "status": "inconclusive"},
+                    {"test_id": "t_ok", "composite": 0.508},
+                ]
+            },
+        )
+        summary = self._run(path).split("=== DIMENSION SUMMARY ===")[1]
+        sim_row = next(ln for ln in summary.splitlines() if ln.startswith("sim"))
+        self.assertIn("INCONCL", sim_row)
+        self.assertNotIn("0.000", sim_row)
+        self.assertNotIn("FAIL", sim_row)
+
+    def test_analyze_reads_test_results_alias(self):
+        path = self._write(
+            {"test_results": [{"test_id": "t1", "details": {"category": "exec"}}]},
+            {"per_test": [{"test_id": "t1", "composite": 0.508}]},
+        )
+        output = self._run(path)
+        self.assertNotIn("No test results found", output)
+        self.assertIn("0.508", output)
 
 
 if __name__ == "__main__":

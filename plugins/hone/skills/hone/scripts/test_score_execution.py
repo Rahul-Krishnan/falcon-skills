@@ -1284,7 +1284,9 @@ class TestStepExtractionDocumentOrder(unittest.TestCase):
         from score_execution import _extract_steps_from_artifact
 
         steps = _extract_steps_from_artifact(self.MIXED_ARTIFACT)
-        self.assertEqual(steps, ["## Step 1", "## 2.", "## Step 3"])
+        # The numeric marker carries its title: a bare "## 2." would be
+        # searched for in the transcript as the literal "2.".
+        self.assertEqual(steps, ["## Step 1", "## 2. Analyze", "## Step 3"])
 
     def test_in_order_execution_scores_full(self):
         from score_execution import score_workflow_sequence
@@ -1312,6 +1314,192 @@ class TestStepExtractionDocumentOrder(unittest.TestCase):
         ]
         result = score_workflow_sequence(timeline, artifact)
         self.assertEqual(result["score"], 1.0)
+
+
+class TestScoringEvidenceIntegrity(unittest.TestCase):
+    """A score must never be better than the evidence behind it."""
+
+    ARTIFACT = "## 1. Gather inputs\n## 2. Validate\n## 3. Report\n"
+
+    # --- knowledge-extraction tests can no longer fabricate a 1.0 ---
+
+    def test_knowledge_extraction_without_evidence_is_inconclusive(self):
+        """The KE branch scores one dimension that defaults to 1.0.
+
+        An empty answer over an empty timeline emitted composite 1.0, which
+        resolve_score then preferred over the LLM judge.
+        """
+        from score_execution import _score_single_test
+
+        result = _score_single_test(
+            {
+                "test_id": "ke1",
+                "agent_response": "",
+                "execution_timeline": [],
+                "test_input": {"test_profile": "knowledge_extraction"},
+            },
+            "skill",
+            "",
+        )
+        self.assertIsNone(result["composite"])
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertTrue(result["partial_scoring"])
+
+    def test_knowledge_extraction_with_evidence_still_scores(self):
+        from score_execution import _score_single_test
+
+        result = _score_single_test(
+            {
+                "test_id": "ke2",
+                "agent_response": "The file declares three phases.",
+                "execution_timeline": [
+                    {"step_type": "tool_use", "tool_name": "Read", "step_index": 0}
+                ],
+                "test_input": {"test_profile": "knowledge_extraction"},
+            },
+            "skill",
+            "",
+        )
+        self.assertIsNotNone(result["composite"])
+        self.assertNotIn("status", result)
+
+    # --- tool_name / tool alias, applied consistently ---
+
+    def _gate_entry(self, key: str) -> dict:
+        gates = json.dumps({"gates": [{"step": "s1", "judge": "j", "result": "pass"}]})
+        return {
+            "step_type": "tool_use",
+            key: "Write",
+            "tool_input": {"file_path": "/tmp/workflow-x.json", "content": gates},
+            "step_index": 0,
+        }
+
+    def test_tool_alias_scores_identically_to_tool_name(self):
+        """A runner storing the name under `tool` used to zero two dimensions."""
+        from score_execution import score_gate_compliance, score_state_persistence
+
+        for key in ("tool_name", "tool"):
+            with self.subTest(key=key):
+                entry = self._gate_entry(key)
+                self.assertEqual(score_gate_compliance([entry], "", "")["score"], 1.0)
+                self.assertEqual(score_state_persistence([entry])["score"], 1.0)
+
+    def test_tool_alias_recognized_by_bash_scorers(self):
+        from score_execution import score_trigger_accuracy
+
+        for key in ("tool_name", "tool"):
+            with self.subTest(key=key):
+                timeline = [{"step_type": "tool_use", key: "Bash", "is_error": True}]
+                self.assertEqual(score_trigger_accuracy(timeline)["score"], 0.0)
+
+    # --- numeric step headings must carry their title ---
+
+    def test_numeric_step_markers_capture_titles(self):
+        from score_execution import _extract_steps_from_artifact
+
+        self.assertEqual(
+            _extract_steps_from_artifact(self.ARTIFACT),
+            ["## 1. Gather inputs", "## 2. Validate", "## 3. Report"],
+        )
+
+    def test_ascending_decimals_do_not_satisfy_workflow_sequence(self):
+        """Ascending decimals in prose are not evidence of executed steps."""
+        from score_execution import score_workflow_sequence
+
+        timeline = [
+            {
+                "step_type": "text",
+                "content": "I read config v1. Then 2. something 3. done",
+            }
+        ]
+        result = score_workflow_sequence(timeline, self.ARTIFACT)
+        self.assertLess(result["score"], 1.0)
+
+    def test_untitled_numeric_heading_is_dropped(self):
+        from score_execution import _extract_steps_from_artifact
+
+        self.assertEqual(_extract_steps_from_artifact("## 1.\n## 2.\n"), [])
+
+    # --- rounding parity on the critical-dimension cap ---
+
+    def test_capped_composite_is_rounded(self):
+        from score_execution import SKILL_WEIGHTS, compute_composite
+
+        scores = {dim: 0.0 for dim in SKILL_WEIGHTS}
+        composite = compute_composite(scores, SKILL_WEIGHTS, "workflow_sequence")
+        self.assertEqual(composite, 0.05)
+        self.assertEqual(composite, round(composite, 4))
+
+    # --- present-but-null fields must not fabricate a 0.0 ---
+
+    def test_null_step_index_does_not_crash(self):
+        from score_execution import score_parallel_efficiency
+
+        timeline = [
+            {"step_type": "tool_use", "tool_name": "Read", "step_index": None}
+            for _ in range(2)
+        ]
+        self.assertIsInstance(score_parallel_efficiency(timeline)["score"], float)
+
+    def test_null_required_present_scores_as_absent(self):
+        from score_execution import _score_single_test
+
+        result = _score_single_test(
+            {
+                "test_id": "t_good",
+                "agent_response": "All done, report written.",
+                "execution_timeline": [
+                    {"step_type": "tool_use", "tool_name": "Read", "step_index": 0}
+                ],
+            },
+            "skill",
+            "",
+            {"t_good": {"required_present": None, "required_absent": None}},
+        )
+        self.assertIsNotNone(result["composite"])
+        self.assertGreater(result["composite"], 0.0)
+        self.assertNotIn("status", result)
+
+    def test_malformed_criteria_file_degrades_to_empty_index(self):
+        from score_execution import _load_criteria_index
+
+        for payload in ("[]", '{"test_cases": ["t_bad_id"]}', '{"test_cases": null}'):
+            with self.subTest(payload=payload):
+                tmpdir = tempfile.mkdtemp()
+                path = os.path.join(tmpdir, "crit.json")
+                with open(path, "w") as f:
+                    f.write(payload)
+                self.assertEqual(_load_criteria_index(path), {})
+
+    # --- results / test_results alias ---
+
+    def test_test_results_alias_scored(self):
+        from score_execution import score_from_results
+
+        tmpdir = tempfile.mkdtemp()
+        path = os.path.join(tmpdir, "results.json")
+        with open(path, "w") as f:
+            json.dump(
+                {
+                    "test_results": [
+                        {
+                            "test_id": "t1",
+                            "agent_response": "done",
+                            "execution_timeline": [
+                                {
+                                    "step_type": "tool_use",
+                                    "tool_name": "Read",
+                                    "step_index": 0,
+                                }
+                            ],
+                        }
+                    ]
+                },
+                f,
+            )
+        result = score_from_results(path, "skill", "")
+        self.assertEqual(len(result["per_test"]), 1)
+        self.assertNotIn("error", result["metadata"])
 
 
 if __name__ == "__main__":

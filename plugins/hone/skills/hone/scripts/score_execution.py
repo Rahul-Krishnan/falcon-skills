@@ -17,11 +17,13 @@ import re
 import sys
 from pathlib import Path
 
-EPSILON = 1e-6
+# Shared helpers. Reading criteria through raw `dict.get` is why several
+# present-but-null fields (required_present, step_index) crashed a whole test
+# into a fabricated 0.0; `get(..., expected=T)` treats an explicit JSON null,
+# and a wrong-typed value, as absent, as the validators already do.
+from hone_common import DIMENSION_FLOOR, extract_results, get as typed_get
 
-# Floor applied to each dimension inside the weighted geometric mean. Keeps a
-# zeroed dimension from collapsing the composite to an unrankable number.
-DIMENSION_FLOOR = 0.05
+EPSILON = 1e-6
 
 # Cues that flip a forbidden-phrase match into a denial. A correct halt message
 # often has to name the work it is declining to do ("does NOT run the structural
@@ -63,11 +65,18 @@ GRADE_THRESHOLDS = [
     (0.0, "F"),
 ]
 
-# Step marker patterns (same as structural_audit.py, case-insensitive)
+# Step marker patterns, case-insensitive. These markers are searched for as
+# literals in the execution transcript, so the numeric form must capture its
+# heading title: the bare marker "## 1." sent score_workflow_sequence hunting
+# for "1.", "2.", "3.", which any ordered list or ascending version number
+# satisfies. structural_audit.py keeps the looser form — it only counts step
+# transitions. Separators are [ \t], not \s, so the title has to be on the
+# same line; \s spans newlines, which let an untitled `## 1.` borrow the next
+# heading as its title.
 STEP_PATTERNS = [
     re.compile(r"^#{2,4}\s+(?:Step|Phase|Stage)\s+\d+", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^#{2,4}\s+Part\s+[A-Z]", re.MULTILINE | re.IGNORECASE),
-    re.compile(r"^#{2,4}\s+\d+\.\s+", re.MULTILINE),
+    re.compile(r"^#{2,4}[ \t]+\d+\.[ \t]+\S.*$", re.MULTILINE),
 ]
 
 # Gate/validation keywords
@@ -261,7 +270,7 @@ def _is_knowledge_extraction(test_result: dict) -> bool:
 
     timeline = test_result.get("execution_timeline") or []
     tools_used = {
-        entry.get("tool_name", "")
+        _tool_name(entry)
         for entry in timeline
         if entry.get("step_type") == "tool_use"
     }
@@ -380,8 +389,11 @@ def compute_composite(
     """
     clamped = {dim: max(score, DIMENSION_FLOOR) for dim, score in scores.items()}
     raw = math.prod(clamped[dim] ** weights[dim] for dim in clamped if dim in weights)
+    # Both exits round: the capped branch used to return the raw float, so a
+    # capped test carried full float noise into deterministic_scores.json and
+    # the aggregate while every other path was rounded to 4 places.
     if scores.get(critical_dim, 1.0) < 0.3:
-        return min(raw, 0.5)
+        return round(min(raw, 0.5), 4)
     return round(raw, 4)
 
 
@@ -398,6 +410,18 @@ def _extract_steps_from_artifact(artifact_content: str) -> list[str]:
         for match in pattern.finditer(artifact_content):
             positioned.append((match.start(), match.group().strip()))
     return [text for _pos, text in sorted(positioned)]
+
+
+def _tool_name(entry: dict) -> str:
+    """The tool name on a timeline entry, under either key the runners emit.
+
+    Eval runners store it as `tool_name` or as the `tool` alias. Half the
+    scorers honoured both and half read `tool_name` alone, so a runner using
+    `tool` zeroed gate_compliance and state_persistence — the critical
+    dimension for two profiles — on a fully compliant run. Every scorer reads
+    the name through here so the two shapes cannot diverge again.
+    """
+    return entry.get("tool_name") or entry.get("tool") or ""
 
 
 def _get_tool_uses(timeline: list[dict]) -> list[dict]:
@@ -464,7 +488,7 @@ def _extract_gate_events(
     # Primary: tool_input.content on Write/Edit calls to state files
     tool_uses = _get_tool_uses(timeline)
     for entry in reversed(tool_uses):
-        if entry.get("tool_name") not in ("Write", "Edit"):
+        if _tool_name(entry) not in ("Write", "Edit"):
             continue
         # `or {}` / `or ""` (not .get defaults): tool_use entries can carry an
         # explicit tool_input: null, which the default would pass through.
@@ -613,7 +637,7 @@ def score_state_persistence(timeline: list[dict]) -> dict[str, float | str]:
     tool_uses = _get_tool_uses(timeline)
 
     for entry in tool_uses:
-        tool_name = entry.get("tool_name", "")
+        tool_name = _tool_name(entry)
         if tool_name in ("Write", "Edit"):
             # `or {}` / `or ""`: tool_use entries can carry explicit nulls.
             tool_input = entry.get("tool_input") or {}
@@ -742,8 +766,12 @@ def score_parallel_efficiency(timeline: list[dict]) -> dict[str, float | str]:
 
     step_index_groups: dict[int, int] = {}
     for entry in tool_uses:
-        idx = entry.get("step_index", -1)
-        if idx >= 0:
+        # A `.get` default only covers an *absent* key. An explicit
+        # `"step_index": null` flowed straight into `idx >= 0` and raised
+        # TypeError, which the per-test handler recorded as a 0.0 failure for
+        # the whole test. The isinstance check also drops a stringified index.
+        idx = entry.get("step_index")
+        if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
             step_index_groups[idx] = step_index_groups.get(idx, 0) + 1
 
     parallel_batches = sum(1 for count in step_index_groups.values() if count > 1)
@@ -787,7 +815,7 @@ def score_error_handling(timeline: list[dict]) -> dict[str, float | str]:
             follow = timeline[follow_idx]
             if (
                 follow.get("step_type") == "tool_use"
-                and follow.get("tool_name", "") in diagnostic_tools
+                and _tool_name(follow) in diagnostic_tools
             ):
                 recovered += 1
                 break
@@ -813,7 +841,7 @@ def score_trigger_accuracy(
     collapsed into this one at their combined weight (see HOOK_WEIGHTS).
     """
     tool_uses = _get_tool_uses(timeline)
-    bash_calls = [t for t in tool_uses if t.get("tool_name") == "Bash"]
+    bash_calls = [t for t in tool_uses if _tool_name(t) == "Bash"]
 
     if not bash_calls:
         return {"score": 1.0, "evidence": "No Bash calls to evaluate"}
@@ -910,7 +938,7 @@ def score_early_termination(timeline: list[dict]) -> dict[str, float | str]:
     # Check for workflow-progression indicators (should be absent)
     # `or {}` / `or ""`: tool_use entries can carry explicit nulls.
     wrote_state = any(
-        t.get("tool_name") in ("Write", "Edit")
+        _tool_name(t) in ("Write", "Edit")
         and STATE_FILE_PATTERN.search((t.get("tool_input") or {}).get("file_path") or "")
         for t in tool_uses
     )
@@ -954,10 +982,6 @@ def score_user_communication(
     tool_uses = _get_tool_uses(timeline)
 
     # Best: AskUserQuestion called successfully as a tool.
-    # Eval runner may store tool name in "tool" or "tool_name" field.
-    def _tool_name(t: dict) -> str:
-        return t.get("tool_name") or t.get("tool") or ""
-
     used_ask_tool = any(_tool_name(t) == "AskUserQuestion" for t in tool_uses)
     if used_ask_tool:
         return {
@@ -1061,15 +1085,27 @@ PROFILE_WEIGHT_MAP = {
 
 
 def _load_criteria_index(criteria_path: str | None) -> dict[str, dict]:
-    """Load eval_criteria.json and return dict keyed by test_id."""
+    """Load eval_criteria.json and return dict keyed by test_id.
+
+    Type-tolerant on every hop, matching hone_common's loaders: main() calls
+    this *outside* the try/except that wraps score_from_results, so a
+    schema-shaped surprise here killed the whole scoring step with a
+    traceback instead of degrading. A top-level list made `data.get` raise
+    AttributeError; a string test case passed the `"id" in tc` substring test
+    and then raised TypeError on `tc["id"]`.
+    """
     if not criteria_path:
         return {}
     try:
         with open(criteria_path) as f:
             data = json.load(f)
-        return {tc["id"]: tc for tc in data.get("test_cases", []) if "id" in tc}
     except (json.JSONDecodeError, OSError):
         return {}
+    return {
+        tc["id"]: tc
+        for tc in typed_get(data, "test_cases", [], expected=list)
+        if isinstance(tc, dict) and isinstance(tc.get("id"), str)
+    }
 
 
 def score_quality_checks(
@@ -1126,7 +1162,7 @@ _TEMP_PATH_RE = re.compile(r"/tmp/|workflow[-_]state|state\.json", re.IGNORECASE
 
 
 def _is_write_entry(entry: dict) -> bool:
-    tool = entry.get("tool_name") or entry.get("tool", "")
+    tool = _tool_name(entry)
     if tool in _WRITE_TOOL_NAMES:
         return True
     # `or ""` (not a .get default): tool_use entries commonly carry content: null,
@@ -1158,14 +1194,14 @@ def _is_artifact_write_entry(entry: dict) -> bool:
 
 
 def _is_read_entry(entry: dict) -> bool:
-    tool = entry.get("tool_name") or entry.get("tool", "")
+    tool = _tool_name(entry)
     if tool in _READ_TOOL_NAMES:
         return True
     return bool(_READ_CONTENT_RE.match(entry.get("content") or ""))
 
 
 def _is_verify_entry(entry: dict) -> bool:
-    tool = entry.get("tool_name") or entry.get("tool", "")
+    tool = _tool_name(entry)
     if tool in _READ_TOOL_NAMES or tool == "Bash":
         return True
     return bool(_VERIFY_CONTENT_RE.search(entry.get("content") or ""))
@@ -1287,7 +1323,9 @@ def _score_single_test(
     """
     inconclusive = False
     timeline = test_result.get("execution_timeline") or []
-    agent_response = test_result.get("agent_response", "")
+    # `or ""`: an explicit `"agent_response": null` is a real shape from a
+    # runner whose test crashed, and None crashes every string consumer below.
+    agent_response = test_result.get("agent_response") or ""
     test_input = _test_input_dict(test_result)
     # None (not 0.0) when timing is absent: a missing duration must score as
     # unknown, not as an instantaneous run that aces the performance budget.
@@ -1303,15 +1341,19 @@ def _score_single_test(
 
     # Load quality assertions from criteria_index (if provided)
     test_id = test_result.get("test_id", "unknown")
-    crit = (criteria_index or {}).get(test_id, {})
-    required_present = crit.get("required_present", [])
-    required_absent = crit.get("required_absent", [])
+    # typed_get, not dict.get: the criteria schema marks these optional
+    # without rejecting null, so an explicit `"required_present": null`
+    # reached `len(None)` and recorded a fabricated 0.0 for a passing test.
+    # validate_eval_criteria.py reads the same two fields the same way.
+    crit = typed_get(criteria_index or {}, test_id, {}, expected=dict)
+    required_present = typed_get(crit, "required_present", [], expected=list)
+    required_absent = typed_get(crit, "required_absent", [], expected=list)
     # Performance is scored only against a budget the criteria author declared.
     # duration_seconds is the wall time of the whole agentic eval test (tens of
     # seconds), so scoring it against the function's 1.0s default floored the
     # dimension to 0.0 on every timed run. No declared budget -> dimension is
     # skipped and weights renormalize, same as an untimed run.
-    perf_budget = crit.get("performance_budget_seconds")
+    perf_budget = typed_get(crit, "performance_budget_seconds", expected=(int, float))
 
     if artifact_type in ("skill", "command"):
         dimensions: dict[str, dict] = {}
@@ -1321,6 +1363,15 @@ def _score_single_test(
             # Deterministic scoring only checks for errors (typically 1.0).
             dimensions["error_handling"] = score_error_handling(timeline)
             active_weights = dict(KNOWLEDGE_EXTRACTION_WEIGHTS)
+            # One dimension at weight 1.0, and score_error_handling([]) is a
+            # constant 1.0 — the same shape the empty-timeline branch below is
+            # marked inconclusive for. Without this an empty answer scored a
+            # composite 1.0, which resolve_score then preferred over a judge
+            # who had scored the same answer 0.15.
+            if not timeline or not agent_response.strip():
+                partial_scoring = True
+                inconclusive = True
+                active_weights = {}
         elif is_eh:
             # Error-handling: score on early termination and user communication.
             # Execution dimensions (workflow, state) are meaningless here
@@ -1493,20 +1544,12 @@ def score_from_results(
             "metadata": {"error": str(exc)},
         }
 
-    # Accept `results` (canonical hone format) or `test_results` (skill-creator alias).
-    # Fail loud on schema mismatch instead of silently returning 0.0/F — a perfect
-    # artifact with the wrong top-level key should not look like a catastrophic failure.
-    has_results_key = isinstance(data, dict) and "results" in data
-    has_test_results_key = isinstance(data, dict) and "test_results" in data
-    if has_results_key:
-        results = data.get("results") or []
-        results_key_used = "results"
-    elif has_test_results_key:
-        results = data.get("test_results") or []
-        results_key_used = "test_results"
-    else:
-        results = []
-        results_key_used = None
+    # Accept `results` (canonical hone format) or `test_results` (skill-creator
+    # alias) — shared with analyze_results via hone_common so the two scripts
+    # cannot disagree about which files contain tests. Fail loud on schema
+    # mismatch instead of silently returning 0.0/F: a perfect artifact with the
+    # wrong top-level key should not look like a catastrophic failure.
+    results, results_key_used = extract_results(data)
 
     if not results:
         top_level_keys = sorted(data.keys()) if isinstance(data, dict) else []

@@ -22,6 +22,9 @@ import sys
 from hone_common import (
     ACTIONABLE_THRESHOLD,
     CRITERIA_BUG_THRESHOLD,
+    DIMENSION_FLOOR,
+    at_score_floor,
+    extract_results,
     get,
     load_deterministic_scores,
     load_inconclusive_ids,
@@ -33,10 +36,18 @@ def classify_failure(score: float, all_scores: list[float]) -> str:
     """Deterministic failure classification.
 
     Classification priority (evaluated in order, first match wins):
-    1. All scores zero -> criteria are broken, not the artifact
-    2. This score zero but others passed -> agent variance/misidentification
+    1. All scores at the floor -> criteria are broken, not the artifact
+    2. This score at the floor but others passed -> agent variance
     3. Score below threshold -> genuine quality gap
     4. Score at or above threshold -> passing
+
+    "At the floor" is `at_score_floor`, not `== 0.0`. score_execution clamps
+    every dimension to DIMENSION_FLOOR before the weighted geometric mean, so
+    the worst composite a deterministic run can produce is 0.05 and an exact
+    0.0 never appears. Written against 0.0, bands 1 and 2 were dead on
+    deterministic-only runs — the documented primary mode, since resolve_score
+    prefers the deterministic composite — and `variance` could never be
+    returned at all.
 
     Args:
         score: the score for this specific test (0.0-1.0, may be from
@@ -52,15 +63,13 @@ def classify_failure(score: float, all_scores: list[float]) -> str:
 
     Returns: "criteria_bug" | "variance" | "real_issue" | "pass"
     """
-    if all(s == 0.0 for s in all_scores):
+    if all_scores and all(at_score_floor(s) for s in all_scores):
         return "criteria_bug"
     if all(s < CRITERIA_BUG_THRESHOLD for s in all_scores) and len(all_scores) > 1:
         return "criteria_bug"
-    if score == 0.0 and any(s > CRITERIA_BUG_THRESHOLD for s in all_scores):
+    if at_score_floor(score) and any(s > CRITERIA_BUG_THRESHOLD for s in all_scores):
         return "variance"
-    if 0.0 < score < ACTIONABLE_THRESHOLD:
-        return "real_issue"
-    if score == 0.0:
+    if score < ACTIONABLE_THRESHOLD:
         return "real_issue"
     return "pass"
 
@@ -73,7 +82,10 @@ def triage(path: str) -> dict:
     except (json.JSONDecodeError, OSError) as exc:
         return {"error": str(exc), "classifications": [], "summary": {}}
 
-    results = data.get("results", [])
+    # Same key resolution as score_execution (hone_common.extract_results):
+    # reading only `results` reported a skill-creator-format file as a zero-test
+    # run right after score_execution had graded it a D.
+    results, _key = extract_results(data)
     if not results:
         return {
             "classifications": [],
@@ -143,7 +155,7 @@ def analyze(path: str) -> None:
         )
         sys.exit(2)
 
-    results = data.get("results", [])
+    results, _key = extract_results(data)
     summary = data.get("summary", {})
     dims = data.get("dimension_aggregation", {})
 
@@ -188,19 +200,26 @@ def analyze(path: str) -> None:
     print()
 
     # Triage
-    all_zero = denom > 0 and all(score_of(r) == 0.0 for r in conclusive)
-    some_zero = any(score_of(r) == 0.0 for r in conclusive) and not all_zero
+    # Floor-aware, matching classify_failure: a deterministic composite bottoms
+    # out at DIMENSION_FLOOR, so `== 0.0` never fired on a deterministic run.
+    all_zero = denom > 0 and all(at_score_floor(score_of(r)) for r in conclusive)
+    some_zero = any(at_score_floor(score_of(r)) for r in conclusive) and not all_zero
 
     if all_zero:
-        print("TRIAGE: ALL TESTS SCORED 0.00")
+        print(f"TRIAGE: ALL TESTS AT THE SCORING FLOOR ({DIMENSION_FLOOR:.2f})")
         print(
             "  -> This is almost certainly an eval criteria bug (required_present/required_absent)"
         )
         print("  -> Fix eval criteria, do NOT edit SKILL.md")
         print()
     elif some_zero:
-        zero_ids = [r.get("test_id", "?") for r in conclusive if score_of(r) == 0.0]
-        print(f"TRIAGE: {len(zero_ids)} test(s) scored 0.00: {', '.join(zero_ids)}")
+        zero_ids = [
+            r.get("test_id", "?") for r in conclusive if at_score_floor(score_of(r))
+        ]
+        print(
+            f"TRIAGE: {len(zero_ids)} test(s) at the scoring floor "
+            f"({DIMENSION_FLOOR:.2f}): {', '.join(zero_ids)}"
+        )
         print(
             "  -> Likely agent variance (skill misidentification) or eval criteria issue"
         )
@@ -259,8 +278,15 @@ def analyze(path: str) -> None:
         details = r.get("details", {})
         if isinstance(details, dict):
             cat = details.get("category", r.get("suite", "unknown"))
-            score = score_of(r)
             composite = get(details, "composite_1_5", 0)
+            # An inconclusive test was never scored. Printing score_of's 0.0
+            # default reported it as `0.000 FAIL`, contradicting the PER-TEST
+            # BREAKDOWN two lines above with exactly the "nothing was observed
+            # reads as a failure" conclusion the rest of this file prevents.
+            if r.get("test_id", "unknown") in inconclusive_ids:
+                print(f"{cat:<20} {'n/a':>6} {composite:>5.1f} {'INCONCL':>8}")
+                continue
+            score = score_of(r)
             status = "PASS" if score >= ACTIONABLE_THRESHOLD else "FAIL"
             print(f"{cat:<20} {score:>6.3f} {composite:>5.1f} {status:>8}")
 

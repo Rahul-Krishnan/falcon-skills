@@ -53,8 +53,13 @@ WORKFLOW_TYPES = {"skill", "command"}
 # a configurable skill list: informative, but too environment-dependent to
 # cost structural score or to drive a Phase 2 auto-fix that would inject a
 # skill reference the user's machine may not have.
+# DESCRIPTION_GUARDRAILS is deliberately NOT here. Every other non-warning
+# pillar is "skip" at lightweight/standard, which collapsed the default tier's
+# scoring denominator to `security` alone. Guardrails carry that tier because
+# they apply to every skill and command and a missing "when NOT to use" clause
+# is a real routing defect Phase 2 can fix — unlike gates, which improvement
+# preference 7 says attended flows should not be given.
 WARNING_ONLY_PILLARS = {
-    DESCRIPTION_GUARDRAILS,
     SCRIPT_QUALITY,
     COMPACTION_PROTECTION,
     SPEC_COMPLIANCE,
@@ -92,6 +97,18 @@ PILLAR_PRIORITY_MATRIX: dict[str, dict[str, str]] = {
 }
 
 VALID_TIERS = {"lightweight", "standard", "complex"}
+
+# (pillar, has_key, needed_key) for the handoff booleans validate_handoff.py's
+# phase1_structural_audit contract requires. Declared once so the populated
+# path and the empty-content early return cannot emit different key sets.
+# "has" = the mechanism was found in the content; "needed" = the pillar applies
+# to this artifact and tier.
+HANDOFF_BOOLEAN_KEYS: tuple[tuple[str, str, str], ...] = (
+    (STATE_PERSISTENCE, "has_state_persistence", "state_persistence_needed"),
+    (ANTI_LAZINESS, "has_anti_laziness_check", "anti_laziness_needed"),
+    (RESEARCH_DEPTH, "has_research_depth_enforcement", "research_depth_needed"),
+    (COMPLEXITY_AWARE, "has_complexity_aware_analysis", "complexity_aware_needed"),
+)
 
 # Step marker patterns (broad coverage, case-insensitive so STAGE/Stage/stage all match)
 STEP_PATTERNS = [
@@ -196,6 +213,17 @@ DEFENSIVE_HYGIENE_KEYWORDS = [
     "redact",
     "hygiene",
 ]
+
+# Sentence/line scope for the hygiene exemption. A newline is a break because
+# markdown prose is line-oriented: a frontmatter description and a command in
+# the body are never the same statement, however few characters separate them.
+# Terminators only count when whitespace or the end of the file follows, or
+# the dots inside the very things being matched (`~/.ssh/`, `.env`,
+# `example.com`) would split the sentence and strip the prohibition off it.
+_SENTENCE_BREAK_RE = re.compile(r"[.!?;](?=\s|$)|\n")
+
+# Fenced code block delimiters, used to spot a "do not do this:" example block.
+_FENCE_RE = re.compile(r"^[ \t]*(?:```|~~~).*$", re.MULTILINE)
 
 # Research phase indicators
 RESEARCH_PHASE_PATTERNS = [
@@ -623,39 +651,76 @@ def _is_defensive_injection_context(content: str, start: int, end: int) -> bool:
     return _is_defensive_context(content, start, end, DEFENSIVE_INJECTION_KEYWORDS)
 
 
+def _match_sentence(content: str, start: int, end: int) -> str:
+    """The sentence (or line) containing the match at [start, end)."""
+    left = 0
+    for boundary in _SENTENCE_BREAK_RE.finditer(content, 0, start):
+        left = boundary.end()
+    tail = _SENTENCE_BREAK_RE.search(content, end)
+    right = tail.start() if tail else len(content)
+    return content[left:right]
+
+
+def _fenced_negative_example(content: str, start: int, keywords: list[str]) -> bool:
+    """True when the match sits in a fenced block introduced as a bad example.
+
+    Covers the documented "do not do this:" followed by a fenced command. The
+    preamble is the fence's own line plus the two lines above it — enough to
+    carry the introduction, short enough that unrelated prose cannot reach it.
+    """
+    fences = list(_FENCE_RE.finditer(content))
+    for opener, closer in zip(fences[0::2], fences[1::2]):
+        if not opener.end() < start < closer.start():
+            continue
+        head_lines = content[: opener.end()].splitlines()
+        preamble = "\n".join(head_lines[-3:]).lower()
+        return any(kw in preamble for kw in keywords)
+    return False
+
+
+def _is_defensive_hygiene_context(content: str, start: int, end: int) -> bool:
+    """True if a credential/exfil/base64 match is documentation, not behavior.
+
+    Deliberately tighter than the injection check above, which can afford a
+    240-char window because its keywords are specific. The hygiene list is
+    "never", "do not", "avoid" and friends, which appear in ordinary skill
+    prose everywhere — and pillar 10 *requires* a "Do NOT use ..." clause in
+    the description, landing within 240 chars of the top of the body. A live
+    `curl --data @~/.ssh/id_rsa` therefore passed the pillar outright in any
+    artifact carrying the guardrail every skill is told to have.
+
+    So the exemption attaches to the match site: quoted/backticked, sharing a
+    sentence with a prohibition, or inside a fenced negative example.
+    """
+    keywords = DEFENSIVE_HYGIENE_KEYWORDS + DEFENSIVE_INJECTION_KEYWORDS
+    quote_chars = {'"', "'", "`"}
+    before = content[start - 1] if start > 0 else ""
+    after = content[end] if end < len(content) else ""
+    if before in quote_chars and after in quote_chars:
+        return True
+    if any(kw in _match_sentence(content, start, end).lower() for kw in keywords):
+        return True
+    return _fenced_negative_example(content, start, keywords)
+
+
 def audit_security(content: str, artifact_type: str) -> PillarResult:
     """Pillar 9: Scan for security threat patterns."""
     findings = []
 
-    # Credential/exfil/base64 matches get the same defensive-context exemption
-    # as prompt injection below: prose documenting correct hygiene ("Never read
-    # ~/.ssh/ or .env credentials.") is guidance, not a threat, and without the
-    # exemption it fails the pillar and force-caps the grade.
-    hygiene_keywords = DEFENSIVE_HYGIENE_KEYWORDS + DEFENSIVE_INJECTION_KEYWORDS
-
-    for pattern in CREDENTIAL_PATTERNS:
-        for match in pattern.finditer(content):
-            if _is_defensive_context(
-                content, match.start(), match.end(), hygiene_keywords
-            ):
-                continue
-            findings.append(f"CREDENTIAL: {match.group().strip()[:60]}")
-
-    for pattern in EXFIL_PATTERNS:
-        for match in pattern.finditer(content):
-            if _is_defensive_context(
-                content, match.start(), match.end(), hygiene_keywords
-            ):
-                continue
-            findings.append(f"EXFILTRATION: {match.group().strip()[:60]}")
-
-    for pattern in BASE64_PATTERNS:
-        for match in pattern.finditer(content):
-            if _is_defensive_context(
-                content, match.start(), match.end(), hygiene_keywords
-            ):
-                continue
-            findings.append(f"BASE64: {match.group().strip()[:60]}")
+    # Credential/exfil/base64 matches get a defensive-context exemption, but a
+    # site-scoped one: prose documenting correct hygiene ("Never read ~/.ssh/
+    # or .env credentials.") is guidance, not a threat, while the same command
+    # on its own line is behavior regardless of what the rest of the file says.
+    for label, patterns in (
+        ("CREDENTIAL", CREDENTIAL_PATTERNS),
+        ("EXFILTRATION", EXFIL_PATTERNS),
+        ("BASE64", BASE64_PATTERNS),
+    ):
+        for pattern in patterns:
+            for match in pattern.finditer(content):
+                if _is_defensive_hygiene_context(content, match.start(), match.end()):
+                    continue
+                findings.append(f"{label}: {match.group().strip()[:60]}")
 
     for pattern in PROMPT_INJECTION_PATTERNS:
         for match in pattern.finditer(content):
@@ -1281,11 +1346,22 @@ def audit(
         complexity_tier = "standard"
 
     if not content or not content.strip():
+        # Same key set as the populated path: validate_handoff.py requires
+        # `warnings` and the eight has_*/*_needed booleans, so omitting them
+        # failed an empty or truncated artifact at the gate with a schema
+        # error instead of the real "artifact is empty" finding.
+        empty_booleans = {
+            key: False
+            for pair in HANDOFF_BOOLEAN_KEYS
+            for key in pair[1:]
+        }
         return {
             "structural_score": 0.0,
             "pillars": [],
             "findings": ["Empty artifact content"],
+            "warnings": [],
             "complexity_tier": complexity_tier,
+            **empty_booleans,
         }
 
     pillars = [
@@ -1358,20 +1434,7 @@ def audit(
     # the script's own output could not pass the schema it feeds.
     by_name = {pillar.name: pillar for pillar in pillars}
     handoff_booleans = {}
-    for pillar_name, has_key, needed_key in (
-        (STATE_PERSISTENCE, "has_state_persistence", "state_persistence_needed"),
-        (ANTI_LAZINESS, "has_anti_laziness_check", "anti_laziness_needed"),
-        (
-            RESEARCH_DEPTH,
-            "has_research_depth_enforcement",
-            "research_depth_needed",
-        ),
-        (
-            COMPLEXITY_AWARE,
-            "has_complexity_aware_analysis",
-            "complexity_aware_needed",
-        ),
-    ):
+    for pillar_name, has_key, needed_key in HANDOFF_BOOLEAN_KEYS:
         pillar = by_name.get(pillar_name)
         handoff_booleans[has_key] = bool(pillar and pillar.count_found > 0)
         handoff_booleans[needed_key] = bool(pillar and pillar.applicable)
