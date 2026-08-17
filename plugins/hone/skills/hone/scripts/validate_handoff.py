@@ -429,6 +429,27 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             "syntax_check_passed": _bool(),
         },
     },
+    # P1 Step 10 -> Step 11 (spec artifact generation; supplementary)
+    "spec_artifacts": {
+        "fields": {
+            "evals_path": _str(non_empty=True),
+            "grading_path": _str(non_empty=True),
+            "timing_path": _str(non_empty=True),
+            "benchmark_path": _str(non_empty=True),
+            "has_baseline": _bool(),
+            "generation_success": _bool(),
+        },
+    },
+    # P2 Step 7 -> Phase 3 (trigger phrase testing)
+    "trigger_test": {
+        "fields": {
+            "accuracy": _num(min_value=0.0, max_value=1.0),
+            "should_trigger_pass_rate": _num(min_value=0.0, max_value=1.0),
+            "should_not_trigger_pass_rate": _num(min_value=0.0, max_value=1.0),
+            "description_improved": _bool(),
+            "queries_path": _str(non_empty=True),
+        },
+    },
     # Hook pre-scan metadata (Step 1 discovery for hooks)
     "hook_metadata": {
         "fields": {
@@ -466,6 +487,14 @@ STEP_CONTRACTS: dict[str, dict[str, list[str]]] = {
     "phase1_reference_validation": {
         "requires": ["artifact_context"],
         "produces": ["reference_validation"],
+    },
+    "phase1_spec_artifacts": {
+        "requires": ["eval_results"],
+        "produces": ["spec_artifacts"],
+    },
+    "phase2_trigger_test": {
+        "requires": [],
+        "produces": ["trigger_test"],
     },
     "phase2_fresh_eyes": {
         "requires": ["eval_results"],

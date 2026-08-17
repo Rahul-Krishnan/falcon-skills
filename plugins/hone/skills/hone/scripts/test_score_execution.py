@@ -474,6 +474,37 @@ class TestGradeMapping(unittest.TestCase):
         self.assertEqual(map_grade(0.0), "F")
 
 
+class TestPerformanceBudget(unittest.TestCase):
+    """Performance is scored only against a criteria-declared budget."""
+
+    def test_no_budget_skips_dimension_even_when_timed(self):
+        from score_execution import _score_single_test
+
+        # duration_seconds is 10.0 in the fixture; without a declared budget
+        # the old 1.0s default floored performance to 0.0 on every timed run.
+        scored = _score_single_test(_make_test_result(), "hook")
+        self.assertNotIn("performance", scored["dimensions"])
+
+    def test_declared_budget_scores_dimension(self):
+        from score_execution import _score_single_test
+
+        criteria_index = {"TC-001": {"performance_budget_seconds": 60}}
+        scored = _score_single_test(
+            _make_test_result(), "hook", criteria_index=criteria_index
+        )
+        self.assertIn("performance", scored["dimensions"])
+        self.assertEqual(scored["dimensions"]["performance"]["score"], 1.0)
+
+    def test_over_budget_scores_low(self):
+        from score_execution import _score_single_test
+
+        criteria_index = {"TC-001": {"performance_budget_seconds": 2}}
+        scored = _score_single_test(
+            _make_test_result(), "script", criteria_index=criteria_index
+        )
+        self.assertEqual(scored["dimensions"]["performance"]["score"], 0.0)
+
+
 class TestEndToEnd(unittest.TestCase):
     """Test the full score_from_results pipeline."""
 

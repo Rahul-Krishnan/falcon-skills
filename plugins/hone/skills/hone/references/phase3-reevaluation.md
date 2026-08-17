@@ -33,7 +33,7 @@ python3 <skill-dir>/scripts/enrich_programmatic_checks.py \
   --json
 ```
 
-This is idempotent: it strips stale entries (no longer in artifact) and adds any new identifiers introduced by Phase 2 edits.
+This is idempotent: it strips stale identifier-shaped `required_present` entries (no longer occurring in the artifact — hand-written phrases are untouched) and adds any new identifiers introduced by Phase 2 edits, so a Phase 2 rename cannot leave a permanently-MISSING check behind.
 
 Steps:
 1. Re-read artifact and eval criteria from disk (compaction protection).

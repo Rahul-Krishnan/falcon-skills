@@ -235,6 +235,9 @@ def match_patterns(results_path: str) -> dict:
 
     for result in results:
         score = result.get("score", result.get("final_score", 1.0))
+        # Normalize once: condition functions read result["score"] directly,
+        # so a final_score-only result must not default to 1.0 there.
+        result.setdefault("score", score)
         test_id = result.get("test_id", "unknown")
 
         # Only process failures (score < 0.5, since 0.65 is the acceptance threshold)

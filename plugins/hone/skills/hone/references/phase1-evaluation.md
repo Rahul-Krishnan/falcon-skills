@@ -402,7 +402,7 @@ Parse JSON output. The script:
 1. Scans the artifact (and `references/` directory if present) for:
    - Bash side effects: `git push`, `git push --force`, `gh pr create`, `gh pr merge`, `git commit`
    - MCP tool patterns: `google_chat`, `send_message`, `send_message_as_user`
-   - Delegated side-effecting skills: any skill the artifact invokes that commits, pushes, opens a PR, or posts to a service. The default list lives in `side_effect_guard.py`; extend it for your own pipeline skills.
+   - Delegated side-effecting skills: any skill the artifact invokes that commits, pushes, opens a PR, or posts to a service. The default list lives in `pipeline_skills.py`; extend it without editing plugin source by setting `HONE_SIDE_EFFECTING_SKILLS` (comma-separated names). The guard also fails closed: any other slash-command delegation it detects in the artifact is sandboxed too, so unlisted pipelines cannot run real side effects during evals.
 2. If side effects detected:
    - Removes dangerous MCP tools from `allowed_tools` in each test case
    - Prepends a SAFETY SANDBOX block to `runner_context` instructing the executor to simulate (not execute) dangerous commands
@@ -464,7 +464,13 @@ mkdir -p "$BASELINE_DIR"
 BASELINE_START_NS=$(date +%s%N)
 ```
 
-Run the same subagent evaluation without loading the skill context. Write results to `$BASELINE_DIR/results.json`.
+Run the same subagent evaluation without loading the skill context. Write results to `$BASELINE_DIR/results.json`. Then run deterministic scoring on the baseline too, so Step 10's benchmark compares like metrics (`generate_spec_artifacts.py` only computes a composite delta between matching metrics — deterministic vs deterministic, or LLM-average vs LLM-average — and omits it otherwise):
+
+```bash
+python3 <skill-dir>/scripts/score_execution.py "$BASELINE_DIR/results.json" --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --json
+```
+
+The script writes `$BASELINE_DIR/deterministic_scores.json` next to the results file.
 
 ```bash
 BASELINE_END_NS=$(date +%s%N)

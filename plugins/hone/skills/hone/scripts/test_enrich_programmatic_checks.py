@@ -12,6 +12,7 @@ from enrich_programmatic_checks import (
     filter_candidates,
     get_check_texts,
     rank_and_select,
+    strip_stale_present,
 )
 
 SAMPLE_ARTIFACT = """
@@ -199,6 +200,56 @@ class TestIdempotency(unittest.TestCase):
         # Second enrichment on same (now-enriched) test case
         result2 = enrich_test_case(test_case, SAMPLE_ARTIFACT, 5)
         self.assertEqual(result2["added"], [])
+
+
+class TestStripStalePresent(unittest.TestCase):
+    def test_strips_identifier_no_longer_in_artifact(self) -> None:
+        test_case = {
+            "id": "TC-001",
+            "required_present": ["max_rounds", "renamed_old_flag"],
+        }
+        removed = strip_stale_present(test_case, SAMPLE_ARTIFACT)
+        self.assertEqual(removed, ["renamed_old_flag"])
+        self.assertEqual(test_case["required_present"], ["max_rounds"])
+
+    def test_keeps_hand_written_phrases(self) -> None:
+        # Phrases assert on the agent response, not the artifact text; they
+        # must survive even though they never occur in the artifact.
+        test_case = {
+            "id": "TC-002",
+            "required_present": ["I cannot proceed without a name", "max_rounds"],
+        }
+        removed = strip_stale_present(test_case, SAMPLE_ARTIFACT)
+        self.assertEqual(removed, [])
+        self.assertEqual(
+            test_case["required_present"],
+            ["I cannot proceed without a name", "max_rounds"],
+        )
+
+    def test_noop_on_missing_or_invalid_field(self) -> None:
+        self.assertEqual(strip_stale_present({"id": "TC-003"}, SAMPLE_ARTIFACT), [])
+        self.assertEqual(
+            strip_stale_present(
+                {"id": "TC-004", "required_present": "not-a-list"}, SAMPLE_ARTIFACT
+            ),
+            [],
+        )
+
+    def test_refresh_after_rename_is_idempotent(self) -> None:
+        # Simulates the Phase 3 refresh: an identifier enriched earlier is
+        # renamed by Phase 2; the stale name must go, the new one can come in.
+        test_case = {
+            "id": "TC-005",
+            "category": "invocation",
+            "checks": [{"description": "Honors target_score"}],
+            "required_present": ["old_target_flag"],
+        }
+        removed = strip_stale_present(test_case, SAMPLE_ARTIFACT)
+        self.assertEqual(removed, ["old_target_flag"])
+        result = enrich_test_case(test_case, SAMPLE_ARTIFACT, 5)
+        apply_enrichment(test_case, result["added"])
+        self.assertIn("target_score", test_case["required_present"])
+        self.assertNotIn("old_target_flag", test_case["required_present"])
 
 
 class TestGetCheckTexts(unittest.TestCase):

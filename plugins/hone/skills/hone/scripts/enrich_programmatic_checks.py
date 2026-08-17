@@ -185,6 +185,40 @@ def enrich_test_case(
     }
 
 
+def strip_stale_present(test_case: dict, artifact_content: str) -> list[str]:
+    """Remove enrichment-shaped required_present entries no longer in artifact.
+
+    Phase 3 relies on re-running this script after edits: a Phase 2 rename
+    would otherwise leave the old identifier in required_present, score
+    MISSING deterministically on every re-eval, and trigger auto-revert of a
+    correct improvement. Only identifier-shaped entries (the only shape
+    enrichment ever adds) are candidates; hand-written phrases are left alone
+    because they assert on the agent response, not the artifact text.
+
+    Mutates test_case in place. Returns the removed entries.
+    """
+    existing = test_case.get("required_present", [])
+    if not isinstance(existing, list):
+        return []
+
+    artifact_lower = artifact_content.lower()
+    kept: list[str] = []
+    removed: list[str] = []
+    for entry in existing:
+        if (
+            isinstance(entry, str)
+            and IDENTIFIER_RE.fullmatch(entry)
+            and entry not in artifact_lower
+        ):
+            removed.append(entry)
+        else:
+            kept.append(entry)
+
+    if removed:
+        test_case["required_present"] = kept
+    return removed
+
+
 def apply_enrichment(test_case: dict, identifiers: list[str]) -> None:
     """Add required_present entries to a test case dict (mutates in place)."""
     if not identifiers:
@@ -261,27 +295,45 @@ def main() -> None:
     modified_ids: list[str] = []
     skipped_ids: list[str] = []
     total_added = 0
+    total_removed = 0
 
     for test_case in test_cases:
+        # Strip stale identifiers first so a renamed identifier can be
+        # re-added under its new name in the same pass. Same population as
+        # additions: error-handling tests are never enriched, so their
+        # entries are never enrichment-owned.
+        removed: list[str] = []
+        if test_case.get("category", "").lower() != "error-handling":
+            removed = strip_stale_present(test_case, artifact_content)
+
         result = enrich_test_case(test_case, artifact_content, args.max_per_test)
+        result["removed"] = removed
         report_per_test.append(result)
 
+        if removed:
+            total_removed += len(removed)
+            if result["test_id"] not in modified_ids:
+                modified_ids.append(result["test_id"])
+
         if result["skipped"]:
-            skipped_ids.append(result["test_id"])
+            if result["test_id"] not in modified_ids:
+                skipped_ids.append(result["test_id"])
             continue
 
         if result["added"]:
             apply_enrichment(test_case, result["added"])
-            modified_ids.append(result["test_id"])
+            if result["test_id"] not in modified_ids:
+                modified_ids.append(result["test_id"])
             total_added += len(result["added"])
 
-    if total_added == 0:
+    if total_added == 0 and total_removed == 0:
         report = {
             "enriched_count": 0,
             "test_cases_modified": [],
             "test_cases_skipped": skipped_ids,
             "per_test": report_per_test,
             "total_checks_added": 0,
+            "total_checks_removed": 0,
         }
         if args.json:
             json.dump(report, sys.stdout, indent=2)
@@ -297,6 +349,7 @@ def main() -> None:
             "test_cases_skipped": skipped_ids,
             "per_test": report_per_test,
             "total_checks_added": total_added,
+            "total_checks_removed": total_removed,
             "dry_run": True,
             "backup_path": None,
         }
@@ -304,7 +357,10 @@ def main() -> None:
             json.dump(report, sys.stdout, indent=2)
             print()
         else:
-            print(f"DRY RUN: would add {total_added} check(s); no file written")
+            print(
+                f"DRY RUN: would add {total_added} and remove {total_removed} "
+                "check(s); no file written"
+            )
         sys.exit(0)
 
     # Always back up before overwriting. The caller used to be told to run `cp`
@@ -334,6 +390,7 @@ def main() -> None:
         "test_cases_skipped": skipped_ids,
         "per_test": report_per_test,
         "total_checks_added": total_added,
+        "total_checks_removed": total_removed,
         "dry_run": False,
         "backup_path": backup_path,
     }
@@ -342,10 +399,16 @@ def main() -> None:
         json.dump(report, sys.stdout, indent=2)
         print()
     else:
-        print(f"Enriched {len(modified_ids)} test cases with {total_added} checks")
+        print(
+            f"Enriched {len(modified_ids)} test cases: "
+            f"+{total_added} checks, -{total_removed} stale"
+        )
         for entry in report_per_test:
-            if entry["added"]:
-                print(f"  {entry['test_id']}: +{entry['added']}")
+            if entry["added"] or entry.get("removed"):
+                print(
+                    f"  {entry['test_id']}: +{entry['added']} "
+                    f"-{entry.get('removed', [])}"
+                )
 
     sys.exit(0)
 

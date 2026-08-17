@@ -835,7 +835,13 @@ def score_false_positive_rate(
 def score_performance(
     duration_seconds: float, budget: float = 1.0
 ) -> dict[str, float | str]:
-    """Score time performance against a budget."""
+    """Score time performance against a budget.
+
+    Callers must pass a budget the criteria author declared
+    (`performance_budget_seconds` on the test case); the 1.0s default is only
+    meaningful for directly measured hook/script execution, never for eval
+    wall time.
+    """
     if duration_seconds <= budget:
         return {
             "score": 1.0,
@@ -1286,6 +1292,12 @@ def _score_single_test(
     crit = (criteria_index or {}).get(test_id, {})
     required_present = crit.get("required_present", [])
     required_absent = crit.get("required_absent", [])
+    # Performance is scored only against a budget the criteria author declared.
+    # duration_seconds is the wall time of the whole agentic eval test (tens of
+    # seconds), so scoring it against the function's 1.0s default floored the
+    # dimension to 0.0 on every timed run. No declared budget -> dimension is
+    # skipped and weights renormalize, same as an untimed run.
+    perf_budget = crit.get("performance_budget_seconds")
 
     if artifact_type in ("skill", "command"):
         dimensions: dict[str, dict] = {}
@@ -1373,10 +1385,11 @@ def _score_single_test(
             ),
             "error_handling": score_error_handling(timeline),
         }
-        # Untimed results (no duration_seconds key) skip the performance
-        # dimension entirely; the remaining weights are renormalized below.
-        if duration is not None:
-            dimensions["performance"] = score_performance(duration)
+        # Untimed results (no duration_seconds key) and runs without a
+        # declared performance_budget_seconds skip the performance dimension
+        # entirely; the remaining weights are renormalized below.
+        if duration is not None and perf_budget:
+            dimensions["performance"] = score_performance(duration, perf_budget)
         active_weights = _renormalize_weights(HOOK_WEIGHTS, dimensions)
 
     elif artifact_type == "script":
@@ -1388,8 +1401,8 @@ def _score_single_test(
             ),
             "error_handling": score_error_handling(timeline),
         }
-        if duration is not None:
-            dimensions["performance"] = score_performance(duration)
+        if duration is not None and perf_budget:
+            dimensions["performance"] = score_performance(duration, perf_budget)
         active_weights = _renormalize_weights(SCRIPT_WEIGHTS, dimensions)
 
     else:

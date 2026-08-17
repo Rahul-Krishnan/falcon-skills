@@ -75,10 +75,16 @@ When `$ARGUMENTS` has exactly ONE positional argument (before any `--flags`), th
    test -d ~/.agents/skills/{arg} && echo "skill"
    test -d ~/.local/share/ai-skills/{arg} && echo "skill"
    test -d ~/.codex/skills/{arg} && echo "skill"
+   test -f "$HONE_DIR/../{arg}/SKILL.md" && echo "skill"
+   ls -d ~/.claude/plugins/*/skills/{arg} ~/.claude/plugins/*/*/skills/{arg} 2>/dev/null | head -1 | grep -q . && echo "skill"
    test -f ~/.claude/commands/{arg}.md && echo "command"
    test -f ~/.claude/hooks/{arg}.sh && echo "hook"
    ls ~/.claude/scripts/{arg}* 2>/dev/null | head -1 && echo "script"
    ```
+   The `$HONE_DIR/../{arg}` check covers skills shipped in the same plugin as
+   hone (including hone itself under a marketplace install, where none of the
+   local-skill paths exist); the `~/.claude/plugins` globs cover skills from
+   any other installed plugin.
 4. **Exactly one match:** Auto-set `{type}` to the matched type and `{name}` to `{arg}`. Proceed past all conditions to "Parse Arguments".
 5. **Multiple matches:** Fire a disambiguation AskUserQuestion listing only the matched types.
 6. **Zero matches:** Fire Condition 1 (artifact not found — the AskUserQuestion will let the user specify both type and name).

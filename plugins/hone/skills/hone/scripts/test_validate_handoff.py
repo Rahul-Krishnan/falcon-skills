@@ -488,6 +488,60 @@ class TestSchemaCompleteness(unittest.TestCase):
             )
 
 
+class TestSpecArtifactsAndTriggerTestSchemas(unittest.TestCase):
+    """The two documented handoffs that previously had no schema at all."""
+
+    def test_valid_spec_artifacts(self) -> None:
+        state = {
+            "spec_artifacts": {
+                "evals_path": "/out/evals.json",
+                "grading_path": "/out/grading.json",
+                "timing_path": "/out/timing.json",
+                "benchmark_path": "/out/benchmark.json",
+                "has_baseline": True,
+                "generation_success": True,
+            },
+        }
+        result = validate_handoff(state, "spec_artifacts")
+        self.assertTrue(result.valid, f"Errors: {[e.message for e in result.errors]}")
+
+    def test_spec_artifacts_missing_field_fails(self) -> None:
+        state = {
+            "spec_artifacts": {
+                "evals_path": "/out/evals.json",
+                "has_baseline": False,
+            },
+        }
+        result = validate_handoff(state, "spec_artifacts")
+        self.assertFalse(result.valid)
+
+    def test_valid_trigger_test(self) -> None:
+        state = {
+            "trigger_test": {
+                "accuracy": 0.9,
+                "should_trigger_pass_rate": 1.0,
+                "should_not_trigger_pass_rate": 0.8,
+                "description_improved": True,
+                "queries_path": "/out/trigger_queries.json",
+            },
+        }
+        result = validate_handoff(state, "trigger_test")
+        self.assertTrue(result.valid, f"Errors: {[e.message for e in result.errors]}")
+
+    def test_trigger_test_accuracy_out_of_range_fails(self) -> None:
+        state = {
+            "trigger_test": {
+                "accuracy": 1.5,
+                "should_trigger_pass_rate": 1.0,
+                "should_not_trigger_pass_rate": 0.8,
+                "description_improved": False,
+                "queries_path": "/out/trigger_queries.json",
+            },
+        }
+        result = validate_handoff(state, "trigger_test")
+        self.assertFalse(result.valid)
+
+
 class TestScriptTestCoverage(unittest.TestCase):
     """Tests for the script_test_coverage optional field in reference_validation."""
 

@@ -608,13 +608,12 @@ class TestSummaryAndMultipleResults(unittest.TestCase):
         out = run_script(data)
         self.assertEqual(out["matched"][0]["test_id"], "MY-CUSTOM-ID")
 
-    def test_final_score_fallback_bug(self):
-        """BUG: final_score not propagated to condition functions.
+    def test_final_score_fallback_reaches_conditions(self):
+        """final_score-only results must match patterns like score-keyed ones.
 
-        match_patterns uses result.get('score', result.get('final_score', 1.0))
-        to enter the loop, but condition functions only check result.get('score', 1.0).
-        A result with only final_score=0.0 enters the loop but no condition matches,
-        so it lands in unmatched instead of matching empty_response.
+        match_patterns normalizes the score key once, so condition functions
+        (which read result['score']) see the final_score fallback instead of
+        defaulting to 1.0 and bailing.
         """
         data = {
             "results": [
@@ -627,9 +626,9 @@ class TestSummaryAndMultipleResults(unittest.TestCase):
             ]
         }
         out = run_script(data)
-        # Documents buggy behavior: lands in unmatched because conditions see score=1.0
-        self.assertEqual(len(out["matched"]), 0)
-        self.assertEqual(len(out["unmatched"]), 1)
+        self.assertEqual(len(out["matched"]), 1)
+        self.assertEqual(out["matched"][0]["pattern"], "empty_response")
+        self.assertEqual(len(out["unmatched"]), 0)
 
 
 class TestMatchPatternsErrorHandling(unittest.TestCase):

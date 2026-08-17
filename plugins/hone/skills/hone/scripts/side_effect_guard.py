@@ -54,6 +54,33 @@ MCP_TOOL_BLOCKLIST = [
 # Runner context block prepended to each test case when side effects are detected.
 SANDBOX_HEADER = "SAFETY SANDBOX — side-effect simulation mode"
 
+# Harness tools exempt from the allowed-tools intersection: Skill invokes the
+# artifact under test and criteria_self_repair.py adds AskUserQuestion for
+# error-handling tests; artifacts never declare either. Lowercase base names.
+HARNESS_TOOLS = frozenset({"skill", "askuserquestion"})
+
+# Fail-closed delegation detection: any /slash-command in the artifact that is
+# not a known side-effecting skill is still treated as side-effecting, because
+# an unlisted user pipeline (/deploy, /release) escaping the sandbox can run a
+# real `git push` during an unattended eval. The pattern matches a
+# delegation-shaped token (line start / whitespace / backtick / bracket before
+# the slash, no second slash after the name) so file paths like /tmp/x or
+# factor/face never fire; the stoplist below drops bare path heads.
+DELEGATION_RE = re.compile(r"(?:^|[\s`(\[])/([a-z][a-z0-9-]{2,})\b(?!/)", re.MULTILINE)
+DELEGATION_STOPLIST = frozenset(
+    {"tmp", "usr", "bin", "etc", "var", "opt", "dev", "home", "private", "users"}
+)
+
+
+def _base_tool_name(tool: str) -> str:
+    """Normalize a tool string to its lowercase base name.
+
+    'Bash(git:*)' -> 'bash', 'Bash' -> 'bash', 'mcp__x__y' -> 'mcp__x__y'.
+    Scoped forms must match their base tool, otherwise a declared
+    'Bash(git:*)' would strip a test case's plain 'Bash'.
+    """
+    return re.split(r"[(\s:]", tool.strip(), maxsplit=1)[0].lower()
+
 
 def parse_allowed_tools_frontmatter(content: str) -> list[str] | None:
     """Extract `allowed-tools:` list from artifact YAML frontmatter.
@@ -89,10 +116,13 @@ def parse_allowed_tools_frontmatter(content: str) -> list[str] | None:
     return None
 
 
-def scan_artifact(content: str) -> dict:
+def scan_artifact(content: str, self_names: frozenset[str] = frozenset()) -> dict:
     """Scan artifact content for side-effecting patterns.
 
-    Returns dict with 'bash_commands', 'mcp_tools', and 'delegated_skills'.
+    Returns dict with 'bash_commands', 'mcp_tools', 'delegated_skills', and
+    'unknown_delegations'. `self_names` are the artifact's own names (dir and
+    file stem), excluded from delegation detection so a skill's usage examples
+    of itself never sandbox the invocation the eval depends on.
     """
     bash_hits: list[str] = []
     for pattern, label, _ in BASH_SIDE_EFFECTS:
@@ -111,10 +141,26 @@ def scan_artifact(content: str) -> dict:
         if re.search(rf"/{re.escape(skill_name)}\b", content):
             delegated.append(skill_name)
 
+    # Fail closed: any other delegation-shaped slash command is treated as
+    # side-effecting too. A false positive costs one inert sandbox block; a
+    # false negative is a real push from an unattended eval.
+    unknown: list[str] = []
+    known = set(delegated)
+    for match in DELEGATION_RE.finditer(content):
+        name = match.group(1)
+        if (
+            name not in known
+            and name not in DELEGATION_STOPLIST
+            and name not in self_names
+            and name not in unknown
+        ):
+            unknown.append(name)
+
     return {
         "bash_commands": bash_hits,
         "mcp_tools": mcp_hits,
         "delegated_skills": delegated,
+        "unknown_delegations": sorted(unknown),
     }
 
 
@@ -185,12 +231,20 @@ def guard_criteria(
                 modified = True
 
         # Intersect with artifact-declared allowed_tools frontmatter.
-        # Any tool not declared by the artifact is removed from the test case.
+        # Any tool not declared by the artifact is removed from the test case,
+        # except harness tools (Skill, AskUserQuestion), which the eval itself
+        # needs and no artifact declares. Comparison is on base tool names so
+        # a declared scoped form like Bash(git:*) keeps a test's plain Bash.
         if artifact_allowed_tools is not None:
             current = tc.get("allowed_tools", [])
             if current:
-                declared_lower = {t.lower() for t in artifact_allowed_tools}
-                filtered = [t for t in current if t.lower() in declared_lower]
+                declared_bases = {_base_tool_name(t) for t in artifact_allowed_tools}
+                filtered = [
+                    t
+                    for t in current
+                    if _base_tool_name(t) in declared_bases
+                    or _base_tool_name(t) in HARNESS_TOOLS
+                ]
                 removed = set(current) - set(filtered)
                 if removed:
                     tc["allowed_tools"] = filtered
@@ -247,11 +301,18 @@ def main() -> int:
         for ref_file in refs_dir.glob("*.md"):
             artifact_content += "\n" + ref_file.read_text()
 
-    # Scan for side effects
-    findings = scan_artifact(artifact_content)
+    # Scan for side effects. The artifact's own names never count as
+    # delegations (a skill quoting its own invocation is the eval's entry
+    # point, not a side effect).
+    resolved = artifact_path.resolve()
+    self_names = frozenset({resolved.stem.lower(), resolved.parent.name.lower()})
+    findings = scan_artifact(artifact_content, self_names)
     bash_commands = findings["bash_commands"]
     mcp_tools = findings["mcp_tools"]
-    delegated_skills = findings["delegated_skills"]
+    # Unknown delegations are sandboxed exactly like known ones (fail closed).
+    delegated_skills = sorted(
+        set(findings["delegated_skills"]) | set(findings["unknown_delegations"])
+    )
 
     # Parse artifact's declared allowed_tools frontmatter (primary SKILL.md only,
     # not references/). Used to filter test-case allowed_tools down to the
@@ -292,6 +353,7 @@ def main() -> int:
         "bash_commands": bash_commands,
         "mcp_tools": mcp_tools,
         "delegated_skills": delegated_skills,
+        "unknown_delegations": findings["unknown_delegations"],
         "action": "dry_run" if args.dry_run else "modified",
         "tests_modified": changes["tests_modified"],
         "tools_removed": changes["tools_removed"],

@@ -6,7 +6,7 @@ Each artifact type has a profile that configures the shared hone loop.
 
 | Property | Value |
 |----------|-------|
-| **Discovery** | `~/.claude/skills/{name}/SKILL.md` (also checks `~/.agents/skills/`, `~/.local/share/ai-skills/`, `~/.codex/skills/`) |
+| **Discovery** | `~/.claude/skills/{name}/SKILL.md` (also checks `~/.agents/skills/`, `~/.local/share/ai-skills/`, `~/.codex/skills/`, plugin installs at `$HONE_DIR/../{name}/` and `~/.claude/plugins/*/skills/{name}/` or `~/.claude/plugins/*/*/skills/{name}/`) |
 | **Eval criteria path** | Resolution order: `{artifact_dir}/evals/eval_criteria.json` → `{artifact_dir}/{name}-evals/eval_criteria.json` → `~/skill-eval/{name}/eval_criteria.json`. The first is **canonical for writes**. If more than one candidate exists, report all of them with their test counts before choosing: divergent suites accumulate at these paths, and scoring against a stale one grades tests the artifact was never evaluated on. |
 | **Edit target** | SKILL.md file |
 | **Default dimensions** | task_completion (0.3), invocation (0.2), efficiency (0.2), best_practices (0.15), business_impact (0.15) |

@@ -158,23 +158,36 @@ def generate_timing(duration_ms, tokens_estimate):
 
 
 def generate_benchmark(results, det_scores, baseline_results, baseline_det):
-    """Generate benchmark.json: with_skill vs without_skill comparison."""
+    """Generate benchmark.json: with_skill vs without_skill comparison.
+
+    The delta is only computed between like metrics: deterministic composite
+    vs deterministic composite, or LLM-average vs LLM-average. The baseline
+    flow does not always run deterministic scoring, and subtracting an LLM
+    average from a deterministic composite (or from an absent baseline score,
+    which used to read as 0) reports a spurious skill benefit.
+    """
 
     def compute_summary(res, det):
         if not res:
             return None
         results_list = res.get("results", [])
-        scores = [r.get("score", 0) for r in results_list if r.get("score") is not None]
+        scores = [r.get("score") for r in results_list if r.get("score") is not None]
         # A deterministic composite of 0.0 is a real (failing) score, not a
         # missing one — only fall back to the LLM average when it is absent.
         det_composite = det.get("composite_score") if det else None
+        avg_score = round(sum(scores) / len(scores), 4) if scores else None
+        if det_composite is not None:
+            composite, metric = det_composite, "deterministic"
+        elif avg_score is not None:
+            composite, metric = avg_score, "llm_avg"
+        else:
+            composite, metric = None, None
         return {
-            "composite": det_composite
-            if det_composite is not None
-            else (sum(scores) / len(scores) if scores else 0),
+            "composite": composite,
+            "composite_metric": metric,
             "test_count": len(results_list),
             "pass_count": sum(1 for s in scores if s >= 0.8),
-            "avg_score": round(sum(scores) / len(scores), 4) if scores else 0,
+            "avg_score": avg_score,
         }
 
     with_skill = compute_summary(results, det_scores)
@@ -184,14 +197,40 @@ def generate_benchmark(results, det_scores, baseline_results, baseline_det):
 
     delta = None
     if with_skill and without_skill:
-        delta = {
-            "composite_delta": round(
+        both_avg = (
+            with_skill["avg_score"] is not None
+            and without_skill["avg_score"] is not None
+        )
+        if (
+            with_skill["composite_metric"] is not None
+            and with_skill["composite_metric"] == without_skill["composite_metric"]
+        ):
+            composite_delta = round(
                 with_skill["composite"] - without_skill["composite"], 4
-            ),
+            )
+            metric = with_skill["composite_metric"]
+        elif both_avg:
+            composite_delta = round(
+                with_skill["avg_score"] - without_skill["avg_score"], 4
+            )
+            metric = "llm_avg"
+        else:
+            composite_delta = None
+            metric = None
+            print(
+                "Warning: with-skill and baseline runs share no common score "
+                "metric; composite delta omitted",
+                file=sys.stderr,
+            )
+        delta = {
+            "composite_delta": composite_delta,
+            "metric": metric,
             "pass_count_delta": with_skill["pass_count"] - without_skill["pass_count"],
             "avg_score_delta": round(
                 with_skill["avg_score"] - without_skill["avg_score"], 4
-            ),
+            )
+            if both_avg
+            else None,
         }
 
     return {
@@ -279,7 +318,13 @@ def main():
         print(f"  Grading pass rate: {grading['summary']['pass_rate']:.1%}")
         if baseline_results:
             delta = benchmark["run_summary"]["delta"]
-            print(f"  Baseline delta: {delta['composite_delta']:+.4f}")
+            if delta and delta["composite_delta"] is not None:
+                print(
+                    f"  Baseline delta: {delta['composite_delta']:+.4f} "
+                    f"({delta['metric']})"
+                )
+            else:
+                print("  Baseline delta: unavailable (no common metric)")
 
 
 if __name__ == "__main__":
