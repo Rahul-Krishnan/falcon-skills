@@ -38,8 +38,11 @@ BASH_SIDE_EFFECTS = [
     # actually create scripts or files during a test run. These are the
     # shapes that showed up in SETUP: blocks and caused flaky eval state.
     (r"\bmkdir\s+(-p\s+)?[^\s]+", "mkdir", "mkdir completed"),
-    (r"\bprintf\s+[^|]*>[>\s]*[^\s]+", "printf > file", "file written"),
-    (r"\becho\s+[^|]*>[>\s]*[^\s]+", "echo > file", "file written"),
+    # [^|\n] keeps the match on a single line: an unrestricted [^|]* spans
+    # newlines and false-positives on a bare `echo`/`printf` mention followed
+    # by any later ">" (e.g. an "->" arrow) anywhere in the document.
+    (r"\bprintf\s+[^|\n]*>[>\s]*[^\s\n]+", "printf > file", "file written"),
+    (r"\becho\s+[^|\n]*>[>\s]*[^\s\n]+", "echo > file", "file written"),
     (r"\bcp\s+[^\s]+\s+[^\s]+", "cp", "file copied"),
 ]
 

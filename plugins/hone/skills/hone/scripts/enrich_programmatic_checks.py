@@ -143,16 +143,18 @@ def enrich_test_case(
     in place -- the caller handles YAML mutation.
     """
     test_id = test_case.get("id", "unknown")
-    category = test_case.get("category", "").lower()
+    # Normalize hyphen/underscore so legacy "error-handling" spellings still
+    # hit the guard; the schema enum's canonical spelling is "error_handling".
+    category = test_case.get("category", "").lower().replace("-", "_")
 
-    if category == "error-handling":
+    if category == "error_handling":
         return {
             "test_id": test_id,
             "added": [],
             "candidates_found": 0,
             "candidates_filtered": 0,
             "skipped": True,
-            "skip_reason": "error-handling category",
+            "skip_reason": "error_handling category",
         }
 
     check_texts = get_check_texts(test_case)
@@ -303,7 +305,7 @@ def main() -> None:
         # additions: error-handling tests are never enriched, so their
         # entries are never enrichment-owned.
         removed: list[str] = []
-        if test_case.get("category", "").lower() != "error-handling":
+        if test_case.get("category", "").lower().replace("-", "_") != "error_handling":
             removed = strip_stale_present(test_case, artifact_content)
 
         result = enrich_test_case(test_case, artifact_content, args.max_per_test)

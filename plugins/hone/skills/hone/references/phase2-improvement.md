@@ -45,7 +45,7 @@ Route based on triage classifications:
 
 This step applies deterministic fixes to eval criteria when tests fail due to test design issues (not skill quality). It uses a pattern table, not an LLM, to avoid self-gaming. The pattern table is append-only during runs; new patterns require human review between runs.
 
-**Anti-gaming boundary:** This step modifies eval criteria, not the artifact. It can only tighten tests (remove tools, add required_absent, clarify runner_context). It cannot weaken tests (lower rubrics, remove semantic_checks, add tools). Semantic checks and rubric scores are untouchable.
+**Anti-gaming boundary:** This step modifies eval criteria, not the artifact. It can only tighten tests (remove tools, add required_absent, clarify runner_context). It cannot weaken tests (lower rubrics, remove `checks` entries, add tools). The `checks` array and rubric scores are untouchable.
 
 **Flow:**
 
@@ -57,7 +57,7 @@ This step applies deterministic fixes to eval criteria when tests fail due to te
 
 2. **For each matched fix, apply via Edit tool:**
    - `allowed_tools` with `action: "remove"`: remove the specified tools from the test's `allowed_tools` list
-   - `required_absent` with `action: "add"`: add the specified strings to the test's `required_absent` list (create the list if it doesn't exist under `quality_criteria`)
+   - `required_absent` with `action: "add"`: add the specified strings to the test's top-level `required_absent` list (create the list if it doesn't exist; `required_present`/`required_absent` live at the top level of the test case, per the criteria schema)
    - `runner_context` with `action: "append"`: append the text to the end of the test's `runner_context` field
    - `allowed_tools` with `action: "add_if_missing"`: add only if the tool isn't already in the list (used sparingly, only for AskUserQuestion on error-handling tests)
 
@@ -76,7 +76,7 @@ This step applies deterministic fixes to eval criteria when tests fail due to te
 6. **Update triage results:** After all repairs, rebuild the `triaged_results` handoff with updated classifications. Tests that were repaired and passed verification move to `excluded` (with reason `criteria_repaired`). Tests that failed verification move to `actionable_failures`.
 
 **Safety constraints (NON-NEGOTIABLE):**
-- NEVER edit `semantic_checks` or `rubric` fields. These define the quality bar.
+- NEVER edit the `checks` array or `rubric` fields. These define the quality bar.
 - NEVER edit `prompt` fields. These define what's being tested.
 - NEVER add tools to `allowed_tools` (except `AskUserQuestion` for error-handling tests via `add_if_missing`).
 - NEVER remove items from `required_absent`.

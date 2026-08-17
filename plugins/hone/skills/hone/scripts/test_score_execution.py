@@ -700,13 +700,11 @@ class TestErrorHandlingDetection(unittest.TestCase):
 
         result = _make_test_result(test_id="TC-007")
         result["test_input"] = {
-            "quality_criteria": {
-                "required_absent": [
-                    "generating eval criteria",
-                    "launching eval runner",
-                    "running structural audit",
-                ]
-            }
+            "required_absent": [
+                "generating eval criteria",
+                "launching eval runner",
+                "running structural audit",
+            ]
         }
         self.assertTrue(_is_error_handling_test(result))
 

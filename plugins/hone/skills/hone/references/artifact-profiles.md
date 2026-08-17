@@ -30,7 +30,7 @@ Each artifact type has a profile that configures the shared hone loop.
 | **Discovery** | `~/.claude/hooks/{name}.sh` or hook entry in `~/.claude/settings.json` |
 | **Eval criteria path** | `~/.claude/hooks/{name}-evals/eval_criteria.json` |
 | **Edit target** | The hook script file |
-| **Default dimensions** | trigger_accuracy (0.3), false_positive_rate (0.25), performance (0.2), output_quality (0.15), resilience (0.1) |
+| **Default dimensions** | trigger_accuracy (0.55, crash-rate proxy — absorbed the former false_positive_rate dimension, which computed the same quantity), performance (0.2), output_quality (0.15), resilience (0.1) |
 | **Eval generator** | Generate inline with hook-specific test patterns (test inputs, expected triggers, expected non-triggers) |
 
 **Hook pre-scan (run during Step 1 discovery, before criteria generation):** When discovering a hook, extract the following metadata from the script before generating any test criteria. This prevents incomplete coverage and avoids shell quoting errors caused by mismatched input schemas:

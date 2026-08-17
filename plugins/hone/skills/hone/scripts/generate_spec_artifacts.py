@@ -69,13 +69,18 @@ def generate_evals(test_cases, results):
         result = results_by_id.get(tc_id, {})
 
         assertions = []
-        for i, sc in enumerate(result.get("semantic_check_scores", [])):
+        # Per-check semantic scores live in details.raw_semantic_scores
+        # (a {check_description: score} dict), the location the rest of the
+        # pipeline writes and reads (see analyze_results.py).
+        details = result.get("details", {})
+        raw_scores = details.get("raw_semantic_scores", {}) if isinstance(details, dict) else {}
+        for i, check in enumerate(raw_scores):
             assertions.append(
                 {
                     "id": f"{tc_id}-A{i + 1}",
                     "type": "semantic",
-                    "description": sc.get("description", sc.get("check", "")),
-                    "weight": sc.get("weight", 1.0),
+                    "description": check,
+                    "weight": 1.0,
                     "threshold": 3.0,
                 }
             )
@@ -106,8 +111,10 @@ def generate_grading(results, det_scores):
         det = det_by_id.get(tc_id, {})
         det_composite = det.get("composite", score)
 
-        for i, sc in enumerate(result.get("semantic_check_scores", [])):
-            sc_score = sc.get("score", 0)
+        # Same location as generate_evals: details.raw_semantic_scores dict.
+        details = result.get("details", {})
+        raw_scores = details.get("raw_semantic_scores", {}) if isinstance(details, dict) else {}
+        for i, (check, sc_score) in enumerate(raw_scores.items()):
             assertion_results.append(
                 {
                     "eval_id": tc_id,
@@ -115,7 +122,7 @@ def generate_grading(results, det_scores):
                     "passed": sc_score >= 3.0,
                     "score": sc_score,
                     "max_score": 5.0,
-                    "evidence": sc.get("description", sc.get("check", "")),
+                    "evidence": check,
                 }
             )
 

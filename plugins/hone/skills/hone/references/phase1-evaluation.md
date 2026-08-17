@@ -191,7 +191,7 @@ This step audits existing eval criteria for common setup and effectiveness issue
 
 3. **Apply fixable findings:** For each finding with `severity == "fixable"`, use the Edit tool to apply the suggested fix to the criteria JSON file on disk. The script identifies the issue and suggests the value; the main thread (session model) applies it via Edit.
 
-4. **LLM classification sub-task (main thread, not subagent):** For each test case's semantic_checks, classify the `question` field as "behavioral" (measures what the skill DOES when invoked) or "keyword" (checks for string presence without measuring actual behavior). This is synthesis work (holistic judgment over the full criteria set), not per-test analysis. The classification does NOT modify the criteria file. It produces labels that feed into the regeneration decision.
+4. **LLM classification sub-task (main thread, not subagent):** For each entry in a test case's `checks` array, classify its `description` field as "behavioral" (measures what the skill DOES when invoked) or "keyword" (checks for string presence without measuring actual behavior). This is synthesis work (holistic judgment over the full criteria set), not per-test analysis. The classification does NOT modify the criteria file. It produces labels that feed into the regeneration decision.
 
 5. **Regeneration decision:** Combine the script's `should_regenerate` flag with the LLM classification results. If >50% of test cases have unfixable issues (missing runner_context warnings + LLM-confirmed keyword-only checks), delete the criteria file and override Step 3's routing to "regenerate" so Step 5 runs. Log: "Criteria audit: >50% of test cases have unfixable issues, regenerating."
 
@@ -204,7 +204,7 @@ This step audits existing eval criteria for common setup and effectiveness issue
 - [ ] All fixable findings were applied via Edit tool
 - [ ] If `should_regenerate`: criteria file was deleted (verified), routing overridden to "regenerate"
 - [ ] If fixes applied: re-read criteria from disk to confirm changes persisted
-- [ ] LLM classification completed for all test cases with semantic_checks
+- [ ] LLM classification completed for all test cases with `checks` entries
 - [ ] Workflow state updated with `criteria_audit` result
 
 **Handoff interface (Step 4 → Step 5 or Step 8):**
@@ -253,7 +253,11 @@ Write to workflow state file. If Step 4 triggers regeneration, Step 5 reads `cri
 
    [Simulated state or script output — JSON blob or command output to treat as real]
 
-   You are executing the [skill name] skill. Read ~/.claude/skills/[name]/SKILL.md.
+   You are executing the [skill name] skill. Read [discovered artifact path]/SKILL.md.
+   (Use the concrete path Step 1 discovery resolved — never hardcode
+   `~/.claude/skills/[name]`, which is wrong for plugin installs. When
+   generating hone's own self-eval criteria, write the literal `{HONE_DIR}`
+   placeholder instead; Step 8 substitutes it at dispatch.)
    [Setup: which steps have completed before the failure point]
 
    The failure condition above has just occurred. Follow what the skill instructs
@@ -293,7 +297,7 @@ Dimensions: task_completion (does it complete the documented workflow?), invocat
 4. **Throttle behavior** — if the hook has throttling, test that it suppresses output on rapid re-invocation.
 5. **Performance** — time the hook execution. It should complete in under 1 second for PostToolUse/Stop hooks (they block the response).
 
-Dimensions: trigger_accuracy (does it fire on the right inputs?), false_positive_rate (does it stay silent on clean inputs?), performance (execution time under budget), output_quality (correct JSON structure in output), resilience (handles malformed input without crashing).
+Dimensions: trigger_accuracy (Bash calls complete without crashing — a crash-rate proxy, since per-test trigger expectations are not available to the scorer), performance (execution time under budget), output_quality (correct JSON structure in output), resilience (handles malformed input without crashing).
 
 Test methodology: Write JSON test inputs to `/tmp/hone_test_input.json` via heredoc, then pipe from file. Do NOT use inline `echo '<json>' |` which causes shell quoting errors. These are unit tests of the script, not eval runner tests.
 
@@ -433,6 +437,14 @@ mkdir -p "$OUTPUT_DIR"
 # Timing capture
 EVAL_START_NS=$(date +%s%N)
 ```
+
+**Placeholder substitution (before spawning):** for each test case, replace every
+literal `{HONE_DIR}` token in `prompt`, `runner_context`, and `target_skills` with
+the resolved `$HONE_DIR` value (see SKILL.md "Script paths"). Hone's shipped
+self-eval criteria use this placeholder because the skill installs at different
+paths as a plugin vs a local skill; hardcoding either path breaks the other.
+Substitute in memory only — do not write the substituted paths back to the
+criteria file on disk.
 
 Spawn one subagent per test case in the eval criteria (parallel, up to `{workers}` concurrent). Each subagent receives:
 - The full artifact content (skill dir or file)

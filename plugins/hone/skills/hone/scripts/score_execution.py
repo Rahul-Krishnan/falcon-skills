@@ -142,8 +142,10 @@ COMMAND_WEIGHTS = {
 }
 
 HOOK_WEIGHTS = {
-    "trigger_accuracy": 0.30,
-    "false_positive_rate": 0.25,
+    # false_positive_rate computed the same quantity (non-error fraction of
+    # Bash calls) and was collapsed into trigger_accuracy at the combined
+    # weight (0.30 + 0.25): a no-op under the weighted geometric mean.
+    "trigger_accuracy": 0.55,
     "performance": 0.20,
     "output_structure": 0.15,
     "error_handling": 0.10,
@@ -277,20 +279,22 @@ def _is_error_handling_test(test_result: dict) -> bool:
     the workflow. Execution dimensions are meaningless for these tests.
 
     Detection uses three signals (any one sufficient):
-    1. test category is "error-handling"
+    1. test category is "error_handling"
     2. required_absent contains 2+ workflow progression keywords
     3. runner_context contains error-handling markers
     """
     test_input = _test_input_dict(test_result)
 
-    # Signal 1: test category
-    category = test_input.get("category", "").lower()
-    if category == "error-handling":
+    # Signal 1: test category (normalize hyphen/underscore; the schema enum's
+    # canonical spelling is "error_handling")
+    category = test_input.get("category", "").lower().replace("-", "_")
+    if category == "error_handling":
         return True
 
-    # Signal 2: required_absent contains workflow progression keywords
-    quality = test_input.get("quality_criteria", {})
-    required_absent = quality.get("required_absent", [])
+    # Signal 2: required_absent contains workflow progression keywords.
+    # required_present/required_absent are top-level test-case fields per the
+    # criteria schema (validate_criteria_schema.py) — the canonical location.
+    required_absent = test_input.get("required_absent", [])
     workflow_blockers = {
         "generating eval criteria",
         "launching eval runner",
@@ -779,11 +783,14 @@ def score_error_handling(timeline: list[dict]) -> dict[str, float | str]:
 def score_trigger_accuracy(
     timeline: list[dict], test_input: dict | None = None
 ) -> dict[str, float | str]:
-    """Score hook trigger accuracy from Bash stdout.
+    """Score hook execution as the non-crashing fraction of Bash calls.
 
-    Checks whether the hook produced non-empty stdout (triggered) on inputs
-    that should trigger it, and empty stdout (silent) on inputs that should not.
-    Falls back to is_error check when stdout is not available.
+    This is a crash-rate proxy, not true trigger/false-positive measurement:
+    the timeline carries no stdout and the criteria carry no per-test trigger
+    expectations, so "should trigger" and "should not trigger" cases cannot be
+    distinguished. Only crashes (is_error=True) are penalized. A previous
+    false_positive_rate dimension computed this same quantity and was
+    collapsed into this one at their combined weight (see HOOK_WEIGHTS).
     """
     tool_uses = _get_tool_uses(timeline)
     bash_calls = [t for t in tool_uses if t.get("tool_name") == "Bash"]
@@ -795,40 +802,12 @@ def score_trigger_accuracy(
     total = len(bash_calls)
     for bash_call in bash_calls:
         if not bash_call.get("is_error"):
-            # Non-crashed call counts as correct. We cannot distinguish
-            # "should trigger" vs "should not trigger" without test-level
-            # expectations, so we only penalize crashes (is_error=True).
             correct += 1
 
     score = correct / max(1, total)
     return {
         "score": round(score, 4),
         "evidence": f"{correct}/{total} Bash calls behaved correctly",
-    }
-
-
-def score_false_positive_rate(
-    timeline: list[dict], test_input: dict | None = None
-) -> dict[str, float | str]:
-    """Score false positive rate for hooks (inverted: 1.0 = no false positives).
-
-    A false positive is when the hook produces non-empty stdout on an input
-    that should NOT trigger it. Detects this by checking for Bash calls that
-    succeeded (exit 0) but produced output when they shouldn't have, indicated
-    by is_error=True on the test expectation side.
-    """
-    tool_uses = _get_tool_uses(timeline)
-    bash_calls = [t for t in tool_uses if t.get("tool_name") == "Bash"]
-
-    if not bash_calls:
-        return {"score": 1.0, "evidence": "No Bash calls to evaluate"}
-
-    false_positives = sum(1 for b in bash_calls if b.get("is_error"))
-    total = max(1, len(bash_calls))
-    score = 1.0 - (false_positives / total)
-    return {
-        "score": round(score, 4),
-        "evidence": f"{false_positives}/{total} false positive(s)",
     }
 
 
@@ -1379,7 +1358,6 @@ def _score_single_test(
     elif artifact_type == "hook":
         dimensions = {
             "trigger_accuracy": score_trigger_accuracy(timeline, test_input),
-            "false_positive_rate": score_false_positive_rate(timeline, test_input),
             "output_structure": score_output_structure(
                 agent_response, artifact_content
             ),

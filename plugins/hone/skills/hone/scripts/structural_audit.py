@@ -1101,6 +1101,16 @@ def audit_autonomous_execution(content: str, artifact_type: str) -> PillarResult
 # Standard Agent Skills spec frontmatter fields (root-level)
 STANDARD_FRONTMATTER_FIELDS = {"name", "description", "version", "author", "license", "metadata"}
 
+# Slash commands accept additional standard root-level frontmatter fields that
+# are functional (allowed-tools grants tool permissions); flagging them as
+# custom would advise moving them under metadata:, which strips their effect.
+COMMAND_FRONTMATTER_FIELDS = STANDARD_FRONTMATTER_FIELDS | {
+    "allowed-tools",
+    "argument-hint",
+    "model",
+    "disable-model-invocation",
+}
+
 
 def audit_spec_compliance(content: str, artifact_type: str) -> PillarResult:
     """Pillar 13: Check Agent Skills spec compliance (warning-only).
@@ -1147,6 +1157,11 @@ def audit_spec_compliance(content: str, artifact_type: str) -> PillarResult:
         )
 
     # Check 3: No root-level custom frontmatter fields
+    allowed_fields = (
+        COMMAND_FRONTMATTER_FIELDS
+        if artifact_type == "command"
+        else STANDARD_FRONTMATTER_FIELDS
+    )
     custom_fields = []
     if fm_match:
         frontmatter = fm_match.group(1)
@@ -1154,7 +1169,7 @@ def audit_spec_compliance(content: str, artifact_type: str) -> PillarResult:
             field_match = re.match(r"^([a-zA-Z][\w-]*):", line)
             if field_match:
                 field_name = field_match.group(1).lower()
-                if field_name not in STANDARD_FRONTMATTER_FIELDS:
+                if field_name not in allowed_fields:
                     custom_fields.append(field_match.group(1))
     if not custom_fields:
         checks_passed += 1
