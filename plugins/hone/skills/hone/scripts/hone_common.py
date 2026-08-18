@@ -246,9 +246,9 @@ def _raw_llm_score(result: dict):
 def resolve_score(
     result: dict,
     det_scores: dict[str, float] | None = None,
-    default: float = 0.0,
+    default: float | None = 0.0,
     prefer_deterministic: bool = True,
-) -> float:
+) -> float | None:
     """Canonical per-test score fallback chain.
 
     Sources, in order:
@@ -258,7 +258,11 @@ def resolve_score(
         runners emit stands in only when the `score` key is absent. An
         explicit `score: null` (judge ran and errored) skips both and
         falls through to the deterministic composite.
-      - `default` (0.0 — a scoreless failing test must not look passing)
+      - `default` (0.0 — a scoreless failing test must not look passing).
+        Callers that need to tell "no usable score" from a real 0.0 pass
+        `default=None` and filter the Nones out; generate_spec_artifacts does
+        this so an unscored test stays out of the average instead of dragging
+        it down.
 
     `prefer_deterministic=True` (analyze_results convention) consults the
     deterministic composite first; False (criteria_self_repair convention)
@@ -373,6 +377,14 @@ GIT_MUTATING_BASH_PATTERNS: list[tuple[str, str]] = [
     (r"\bgit\s+push\s+--force\b", "git push --force"),
     (r"\bgh\s+pr\s+create\b", "gh pr create"),
     (r"\bgh\s+pr\s+merge\b", "gh pr merge"),
+    # Publishing a draft PR notifies reviewers and starts CI, and `gh pr ready`
+    # is how the local pipeline skills do it — more often than `gh pr create`.
+    # The sandbox block is a closed enumeration ("do not execute any of the
+    # following"), so a publishing command missing from it reads to the
+    # executor as permission to run it for real.
+    (r"\bgh\s+pr\s+ready\b", "gh pr ready"),
+    (r"\bgh\s+pr\s+edit\b", "gh pr edit"),
+    (r"\bgh\s+pr\s+comment\b", "gh pr comment"),
     (r"\bgit\s+commit\b", "git commit"),
 ]
 

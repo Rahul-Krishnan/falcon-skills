@@ -3,11 +3,17 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
+import side_effect_guard
+from hone_common import SANDBOX_HEADER
 from side_effect_guard import (
     TOOLS_ABSENT,
     TOOLS_PARSED,
@@ -19,6 +25,8 @@ from side_effect_guard import (
     parse_allowed_tools_frontmatter,
     scan_artifact,
 )
+
+GUARD_PATH = Path(__file__).parent / "side_effect_guard.py"
 
 
 class TestBaseToolName(unittest.TestCase):
@@ -357,6 +365,230 @@ class TestEmptyIntersectionFallback(unittest.TestCase):
         tc = criteria["test_cases"][0]
         self.assertEqual(tc["allowed_tools"], ["Read"])
         self.assertEqual(changes["fallbacks_applied"], 0)
+
+
+class TestPublishingCommandDetection(unittest.TestCase):
+    """The sandbox block is a closed enumeration, so a publishing command it
+    omits reads as permission to run that command for real."""
+
+    def _labels(self, text: str) -> list[str]:
+        return scan_artifact(text)["bash_commands"]
+
+    def test_gh_pr_ready_detected(self) -> None:
+        self.assertIn("gh pr ready", self._labels("Publish with `gh pr ready 123`."))
+
+    def test_gh_pr_edit_and_comment_detected(self) -> None:
+        labels = self._labels("gh pr edit --add-reviewer x\ngh pr comment 4 -b hi\n")
+        self.assertIn("gh pr edit", labels)
+        self.assertIn("gh pr comment", labels)
+
+    def test_sandbox_block_names_gh_pr_ready(self) -> None:
+        block = build_sandbox_context(["gh pr ready"], [])
+        self.assertIn("gh pr ready →", block)
+
+
+class TestMcpBlocklistCoverage(unittest.TestCase):
+    """Coverage, not mechanism: substring matching against tool names was
+    already correct, but the list named three chat tools, so every other
+    write tool in the environment survived into the eval's allowed_tools."""
+
+    WRITE_TOOLS = [
+        "mcp__falcon-memory__memory_delete",
+        "mcp__linear-server__save_issue",
+        "mcp__linear-server__save_comment",
+        "mcp__linear-server__merge_diff",
+        "mcp__linear-server__delete_comment",
+        "mcp__claude_ai_Gmail__trash_message",
+        "mcp__claude_ai_Gmail__trash_thread",
+        "mcp__claude_ai_Gmail__forward",
+        "mcp__claude_ai_Gmail__reply",
+        "mcp__claude_ai_Google_Drive__trash_file",
+        "mcp__claude_ai_Google_Drive__update_file",
+        "mcp__claude_ai_Google_Drive__share_file",
+        "mcp__claude_ai_Supabase__execute_sql",
+        "mcp__claude_ai_Supabase__apply_migration",
+        "mcp__claude_ai_Supabase__delete_branch",
+        "mcp__claude_ai_Google_Calendar__delete_event",
+        "mcp__claude_ai_Google_Calendar__create_event",
+        "mcp__claude_ai_Vercel__deploy_to_vercel",
+        "mcp__claude_ai_Vercel__buy_domain",
+        "mcp__plugin_slack_slack__slack_schedule_message",
+        "mcp__plugin_slack_slack__slack_send_message",
+    ]
+
+    READ_TOOLS = [
+        "mcp__linear-server__list_issues",
+        "mcp__linear-server__get_diff_threads",
+        "mcp__claude_ai_Gmail__search_threads",
+        "mcp__claude_ai_Gmail__get_message",
+        "mcp__claude_ai_Google_Drive__read_file_content",
+        "mcp__claude_ai_Google_Drive__download_file_content",
+        "mcp__claude_ai_Supabase__list_migrations",
+        "mcp__claude_ai_Supabase__get_publishable_keys",
+        "mcp__claude_ai_Vercel__get_deployment",
+        "mcp__claude_ai_Vercel__list_deployments",
+        "mcp__linear-server__get_status_updates",
+        "mcp__claude_ai_Gmail__untrash_message",
+        "Read",
+        "Grep",
+        "Glob",
+    ]
+
+    def test_write_tools_are_removed(self) -> None:
+        criteria = {"test_cases": [{"allowed_tools": list(self.WRITE_TOOLS)}]}
+        changes = guard_criteria(criteria, [], [], [], artifact_allowed_tools=None)
+        # Every one of them goes, which empties the list, so the read-only
+        # fallback stands in (the criteria schema rejects allowed_tools: []).
+        self.assertEqual(changes["tools_removed"], sorted(self.WRITE_TOOLS))
+        self.assertEqual(
+            criteria["test_cases"][0]["allowed_tools"],
+            list(side_effect_guard.SAFE_FALLBACK_TOOLS),
+        )
+
+    def test_read_tools_survive(self) -> None:
+        criteria = {"test_cases": [{"allowed_tools": list(self.READ_TOOLS)}]}
+        guard_criteria(criteria, [], [], [], artifact_allowed_tools=None)
+        self.assertEqual(
+            criteria["test_cases"][0]["allowed_tools"], list(self.READ_TOOLS)
+        )
+
+    def test_verb_fragments_do_not_fire_on_prose(self) -> None:
+        # "_write_" and "_create_" occur in ordinary Python identifiers, and
+        # the scan now reads bundled scripts, so matching them against raw
+        # text would report an MCP write tool for every skill shipping code.
+        findings = scan_artifact("def _write_report(path):\n    _create_dir(path)\n")
+        self.assertEqual(findings["mcp_tools"], [])
+
+    def test_named_tool_in_prose_is_still_detected(self) -> None:
+        findings = scan_artifact("Prunes via mcp__falcon-memory__memory_delete.")
+        self.assertIn("_delete", findings["mcp_tools"])
+
+
+SKILL_MD_FIXTURE = """---
+name: purger
+description: Prunes stale Claude Code state.
+---
+
+# Purger
+
+Delegates the actual cleanup to a bundled script:
+
+```bash
+python3 scripts/purge.py
+```
+"""
+
+DESTRUCTIVE_SCRIPT = """#!/usr/bin/env python3
+import os
+import subprocess
+
+TARGET = os.path.expanduser("~/.claude/projects")
+
+os.system("rm -rf " + TARGET)
+subprocess.run("git push --force", shell=True)
+"""
+
+BENIGN_SCRIPT = """#!/usr/bin/env python3
+print("nothing to see here")
+"""
+
+
+class TestBundledScriptScan(unittest.TestCase):
+    """The standard skill layout keeps the executable work in scripts/, so a
+    scan of SKILL.md and references/*.md read none of it: a SKILL.md whose
+    body was `python3 scripts/purge.py` scanned clean and its unattended eval
+    ran holding a real rm -rf."""
+
+    def _fixture(self, root: Path, script_body: str) -> tuple[Path, Path]:
+        skill_dir = root / "skills" / "purger"
+        (skill_dir / "scripts").mkdir(parents=True)
+        artifact = skill_dir / "SKILL.md"
+        artifact.write_text(SKILL_MD_FIXTURE)
+        (skill_dir / "scripts" / "purge.py").write_text(script_body)
+        criteria = root / "eval_criteria.json"
+        criteria.write_text(
+            json.dumps(
+                {
+                    "test_cases": [
+                        {
+                            "id": "TC-1",
+                            "allowed_tools": ["Bash", "Read"],
+                            "runner_context": "Invoke the skill.",
+                        }
+                    ]
+                }
+            )
+        )
+        return artifact, criteria
+
+    def _run(self, artifact: Path, criteria: Path) -> tuple[int, dict]:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(GUARD_PATH),
+                "--artifact-path",
+                str(artifact),
+                "--criteria-path",
+                str(criteria),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return proc.returncode, json.loads(proc.stdout)
+
+    def test_destructive_bundled_script_is_detected_and_sandboxed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact, criteria = self._fixture(Path(tmp), DESTRUCTIVE_SCRIPT)
+            code, payload = self._run(artifact, criteria)
+
+            self.assertEqual(code, 0)
+            self.assertTrue(payload["side_effects_detected"])
+            self.assertIn("rm", payload["bash_commands"])
+            self.assertIn("git push --force", payload["bash_commands"])
+            self.assertEqual(payload["bundled_files_scanned"], 1)
+
+            written = json.loads(criteria.read_text())
+            context = written["test_cases"][0]["runner_context"]
+            self.assertIn(SANDBOX_HEADER, context)
+            self.assertIn("rm →", context)
+            self.assertIn("git push --force →", context)
+
+    def test_benign_bundled_script_still_scans_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact, criteria = self._fixture(Path(tmp), BENIGN_SCRIPT)
+            code, payload = self._run(artifact, criteria)
+            self.assertEqual(code, 2)
+            self.assertFalse(payload["side_effects_detected"])
+
+    def test_scan_stays_inside_the_artifact_directory(self) -> None:
+        # A file next to the skill directory is somebody else's code; reading
+        # it would sandbox commands the artifact under test never runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact, criteria = self._fixture(Path(tmp), BENIGN_SCRIPT)
+            (artifact.parent.parent / "neighbour.sh").write_text("rm -rf /var/data\n")
+            code, payload = self._run(artifact, criteria)
+            self.assertEqual(code, 2)
+            self.assertFalse(payload["side_effects_detected"])
+
+    def test_symlink_out_of_the_tree_is_not_followed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact, criteria = self._fixture(Path(tmp), BENIGN_SCRIPT)
+            outside = Path(tmp) / "outside.sh"
+            outside.write_text("rm -rf /var/data\n")
+            (artifact.parent / "scripts" / "linked.sh").symlink_to(outside)
+            code, payload = self._run(artifact, criteria)
+            self.assertEqual(code, 2)
+            self.assertFalse(payload["side_effects_detected"])
+
+    def test_file_budget_bounds_the_walk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact, _ = self._fixture(Path(tmp), BENIGN_SCRIPT)
+            for i in range(5):
+                (artifact.parent / "scripts" / f"extra{i}.py").write_text("pass\n")
+            with mock.patch.object(side_effect_guard, "MAX_SCAN_FILES", 2):
+                _, bundled = side_effect_guard.collect_scan_text(artifact)
+            self.assertEqual(len(bundled), 2)
 
 
 if __name__ == "__main__":

@@ -75,7 +75,14 @@ def _check_recursive_timeout(test_result: dict) -> bool:
     """Test timed out because it launched a recursive evaluation run."""
     details = get(test_result, "details", {})
     timeout_analysis = get(details, "timeout_analysis", "")
-    duration = get(test_result, "duration_seconds", 0)
+    # expected=(int, float): get() normalizes an explicit null but not a wrong
+    # type, so a stringified "1200" from the LLM-assembled results.json reached
+    # the `>= 600` comparison below and raised out of match_patterns before it
+    # returned — one malformed field killed the repair pass for every test in
+    # the file. bool is an int subclass, hence the extra check.
+    duration = get(test_result, "duration_seconds", 0, expected=(int, float))
+    if isinstance(duration, bool):
+        duration = 0
     score = get(test_result, "score", 1.0)
 
     # Gate on the failing threshold, not exactly 0.0: on deterministic-only

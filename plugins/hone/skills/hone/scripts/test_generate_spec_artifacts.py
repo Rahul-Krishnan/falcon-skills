@@ -12,7 +12,12 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from generate_spec_artifacts import generate_evals, load_criteria_json
+from generate_spec_artifacts import (
+    generate_benchmark,
+    generate_evals,
+    generate_grading,
+    load_criteria_json,
+)
 
 SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "generate_spec_artifacts.py")
 
@@ -158,6 +163,83 @@ class TestCriteriaLoadFailureExits(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertTrue(os.path.exists(os.path.join(out_dir, "evals.json")))
+
+
+class TestGenerateGradingTypeSlop(unittest.TestCase):
+    """main() builds all four artifacts before writing any of them, so one
+    malformed per-check score cost the entire Step 10 set."""
+
+    def _grading(self, result: dict) -> dict:
+        return generate_grading({"results": [result]}, None)
+
+    def test_list_shaped_raw_semantic_scores(self) -> None:
+        out = self._grading(
+            {
+                "test_id": "TC-1",
+                "score": 0.9,
+                "details": {"raw_semantic_scores": ["check a", "check b"]},
+            }
+        )
+        # No per-check assertions from an unusable payload; the composite
+        # assertion is unaffected and still written.
+        ids = [a["assertion_id"] for a in out["assertion_results"]]
+        self.assertEqual(ids, ["TC-1-composite"])
+
+    def test_null_per_check_score_is_not_a_pass(self) -> None:
+        out = self._grading(
+            {
+                "test_id": "TC-1",
+                "score": 0.9,
+                "details": {"raw_semantic_scores": {"check a": 4, "check b": None}},
+            }
+        )
+        passed = {a["assertion_id"]: a["passed"] for a in out["assertion_results"]}
+        self.assertTrue(passed["TC-1-A1"])
+        self.assertFalse(passed["TC-1-A2"])
+
+    def test_stringified_per_check_score_is_not_a_pass(self) -> None:
+        out = self._grading(
+            {
+                "test_id": "TC-1",
+                "score": 0.9,
+                "details": {"raw_semantic_scores": {"check a": "4"}},
+            }
+        )
+        self.assertFalse(out["assertion_results"][0]["passed"])
+
+
+class TestBenchmarkScoreTypeSlop(unittest.TestCase):
+    """compute_summary filtered on `is not None`, so a stringified score
+    reached sum() and raised before any artifact was written."""
+
+    def _summary(self, results: list) -> dict:
+        out = generate_benchmark({"results": results}, None, None, None)
+        return out["run_summary"]["with_skill"]
+
+    def test_stringified_score_is_excluded_from_the_average(self) -> None:
+        summary = self._summary([{"test_id": "TC-1", "score": "0.9", "details": {}}])
+        self.assertIsNone(summary["avg_score"])
+        self.assertEqual(summary["test_count"], 1)
+        self.assertEqual(summary["pass_count"], 0)
+
+    def test_numeric_scores_still_average(self) -> None:
+        summary = self._summary(
+            [
+                {"test_id": "TC-1", "score": 0.9, "details": {}},
+                {"test_id": "TC-2", "score": 0.5, "details": {}},
+            ]
+        )
+        self.assertEqual(summary["avg_score"], 0.7)
+        self.assertEqual(summary["pass_count"], 1)
+
+    def test_missing_score_stays_out_of_the_average(self) -> None:
+        summary = self._summary(
+            [
+                {"test_id": "TC-1", "score": 0.9, "details": {}},
+                {"test_id": "TC-2", "details": {}},
+            ]
+        )
+        self.assertEqual(summary["avg_score"], 0.9)
 
 
 class TestUsageBlockNamesJsonCriteria(unittest.TestCase):

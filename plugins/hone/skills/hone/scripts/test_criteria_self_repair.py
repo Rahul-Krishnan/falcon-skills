@@ -941,5 +941,45 @@ class TestNonNumericScoreNormalization(unittest.TestCase):
         self.assertEqual(output["unmatched"][0]["score"], 0.42)
 
 
+class TestDurationTypeSlop(unittest.TestCase):
+    """results.json is assembled by an LLM subagent, so duration_seconds
+    arrives stringified. It used to raise TypeError out of match_patterns
+    before it returned, taking every other test's repair down with it."""
+
+    def _data(self, duration, timeout_analysis):
+        return {
+            "results": [
+                {
+                    "test_id": "TC-8",
+                    "score": 0.0,
+                    "duration_seconds": duration,
+                    "agent_response": "ran the pipeline",
+                    "details": {"timeout_analysis": timeout_analysis},
+                }
+            ]
+        }
+
+    def test_stringified_duration_still_matches_on_the_analysis_text(self):
+        out = run_script(
+            self._data(
+                "1200",
+                "Duration: 1200s. Tool calls: 40. Agent launched eval_criteria.",
+            )
+        )
+        self.assertEqual(len(out["matched"]), 1)
+        self.assertEqual(out["matched"][0]["pattern"], "recursive_timeout")
+
+    def test_stringified_duration_without_analysis_text_is_unmatched(self):
+        # The numeric threshold cannot be applied to a string, so the test
+        # falls through to human review rather than crashing the whole pass.
+        out = run_script(self._data("1200", "Agent launched eval_criteria."))
+        self.assertEqual(out["matched"], [])
+        self.assertEqual(len(out["unmatched"]), 1)
+
+    def test_numeric_duration_still_matches_on_the_threshold(self):
+        out = run_script(self._data(900, "run_eval was launched recursively."))
+        self.assertEqual(len(out["matched"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

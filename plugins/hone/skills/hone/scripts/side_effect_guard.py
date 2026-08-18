@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -49,6 +50,9 @@ _SIMULATED_RESPONSES = {
     "git push --force": "Force pushed to remote",
     "gh pr create": "Pull request created: #99",
     "gh pr merge": "Pull request #99 merged",
+    "gh pr ready": "Pull request #99 is marked as ready for review",
+    "gh pr edit": "Pull request #99 updated",
+    "gh pr comment": "Comment posted to pull request #99",
     "git commit": "Created commit abc1234def5",
     "mkdir": "mkdir completed",
     "printf > file": "file written",
@@ -81,13 +85,92 @@ BASH_SIDE_EFFECTS = [
     for pattern, label in BASH_SIDE_EFFECT_PATTERNS
 ]
 
-# MCP tool name patterns to remove from allowed_tools.
-# Matched as substrings against each tool name in the list.
-MCP_TOOL_BLOCKLIST = [
+# MCP tool name patterns to remove from allowed_tools, matched as substrings
+# against each tool name (see scan_artifact for why substrings and not \b
+# regexes).
+#
+# Most entries are underscore-anchored write verbs rather than tool names, so
+# a newly connected server's delete_/deploy_/save_ tools are covered the day
+# it appears instead of the day someone remembers to edit this list. Three
+# properties are load-bearing:
+#   - the leading underscore keeps the fragment matching a tool NAME segment
+#     (mcp__gmail__trash_message, slack_send_message) and not a stray English
+#     word;
+#   - the trailing underscore, where present, is what keeps a read-only
+#     sibling out: "_deploy_" catches deploy_to_vercel but not
+#     get_deployment, "_publish_" catches nothing in get_publishable_keys;
+#   - read-only verbs (list_, get_, search_, read_) are deliberately absent:
+#     this guard narrows what an unattended eval can change, not what it can
+#     look at.
+_MCP_TOOL_BLOCKLIST_BASE = [
+    # Original chat entries, kept as whole names because artifacts name them
+    # in prose without the mcp__ prefix.
     "google_chat",
     "send_message",
     "send_message_as_user",
+    # Deletion and archival: memory_delete, delete_branch, delete_event,
+    # delete_comment, trash_message, trash_thread, trash_file. "_trash"
+    # deliberately does not match untrash_*, which restores rather than
+    # destroys.
+    "_delete",
+    "_trash",
+    "_remove",
+    "_purge",
+    # Outbound messages and comments: send_message, slack_send_message,
+    # schedule_message, Gmail reply/forward, reply_to_toolbar_thread.
+    "_send_",
+    "_post_",
+    "_reply",
+    "_forward",
+    "_schedule_",
+    # Writes to shared state: save_issue, save_comment, save_document,
+    # create_event, create_file, update_file, update_draft, copy_file,
+    # share_file, upload_image, prepare_attachment_upload.
+    "_create_",
+    "_update_",
+    "_save_",
+    "_write_",
+    "_copy_",
+    "_share_",
+    "_upload",
+    # Database and branch mutations: execute_sql, apply_migration,
+    # merge_diff, merge_branch, reset_branch, rebase_branch, restore_project.
+    "_execute_",
+    "_apply_",
+    "_merge_",
+    "_reset_",
+    "_rebase_",
+    "_revert_",
+    "_restore_",
+    "_submit_",
+    "_respond_",
+    # Publishing and spend: deploy_to_vercel, deploy_edge_function,
+    # buy_domain, buy_credits.
+    "_deploy_",
+    "_publish_",
+    "_buy_",
 ]
+
+
+def _blocklist_from_env() -> list[str]:
+    """Extra patterns from HONE_MCP_TOOL_BLOCKLIST (comma-separated).
+
+    Mirrors pipeline_skills.SIDE_EFFECTING_SKILLS' HONE_SIDE_EFFECTING_SKILLS
+    hatch: a server this list has never heard of can be covered without
+    editing the module.
+    """
+    raw = os.environ.get("HONE_MCP_TOOL_BLOCKLIST", "")
+    return [item.strip().lower() for item in raw.split(",") if item.strip()]
+
+
+MCP_TOOL_BLOCKLIST = _MCP_TOOL_BLOCKLIST_BASE + [
+    pattern
+    for pattern in _blocklist_from_env()
+    if pattern not in _MCP_TOOL_BLOCKLIST_BASE
+]
+
+# MCP tool references in artifact text, eg mcp__claude_ai_Gmail__trash_message.
+MCP_TOOL_REF_RE = re.compile(r"mcp__[a-z0-9_.-]+__[a-z0-9_]+")
 
 # The sandbox block appended to each test case's runner_context opens with
 # hone_common.SANDBOX_HEADER (shared so validate_eval_criteria.py can exempt
@@ -102,6 +185,38 @@ HARNESS_TOOLS = frozenset({"skill", "askuserquestion", "toolsearch"})
 # Read-only default used when filtering would otherwise empty a test case's
 # allowed_tools (which the criteria schema rejects as invalid).
 SAFE_FALLBACK_TOOLS = ("Read", "Grep", "Glob")
+
+# File types read during the bundle scan. A skill's destructive work almost
+# never lives in SKILL.md: SKILL.md says "run scripts/purge.py" and purge.py
+# is the file that calls rm -rf. hone, workout, smithy and humanize are all
+# shaped this way, so a scan of the markdown alone reported "no side effects"
+# for exactly the artifacts with the largest blast radius.
+SCANNED_SUFFIXES = frozenset(
+    {".md", ".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".ts", ".rb", ".pl"}
+)
+
+# Directories skipped by the bundle scan: caches, VCS internals, vendored
+# dependencies, and eval output (which holds the criteria this guard writes,
+# sandbox block and all, so scanning it would re-detect the guard's own
+# simulation lines as artifact behaviour).
+SKIPPED_SCAN_DIRS = frozenset(
+    {
+        "__pycache__",
+        "node_modules",
+        "venv",
+        "evals",
+        "eval-output",
+        "eval_output",
+        "eval-results",
+        "results",
+    }
+)
+
+# Bounds. This scan runs before every eval, and an artifact can sit anywhere —
+# a hook checked in next to a whole repo — so the walk stops at a file count
+# and a byte budget instead of reading whatever happens to be beneath it.
+MAX_SCAN_FILES = 200
+MAX_SCAN_BYTES = 2_000_000
 
 # Fail-closed delegation detection: any /slash-command in the artifact that is
 # not a known side-effecting skill is still treated as side-effecting, because
@@ -302,10 +417,23 @@ def scan_artifact(content: str, self_names: frozenset[str] = frozenset()) -> dic
     # underscores are word characters, so \b-bounded regexes never fire inside
     # them (\bsend_message\b cannot match ...slack_send_message). Lookaround
     # boundaries fail the same way on the leading "_".
+    #
+    # Verb fragments are matched against the mcp__server__tool names found in
+    # the text rather than against the prose, because "_write_" and "_create_"
+    # also occur in ordinary Python (`_write_report`), and now that the scan
+    # reads a skill's bundled scripts, matching those against the raw text
+    # would report an MCP write tool for every skill that ships code. Whole
+    # names keep matching the raw text, so an artifact that says "posts to
+    # google_chat" without the mcp__ prefix is still caught.
     content_lower = content.lower()
+    mcp_names = {m.group(0) for m in MCP_TOOL_REF_RE.finditer(content_lower)}
     mcp_hits: list[str] = []
     for tool_pattern in MCP_TOOL_BLOCKLIST:
-        if tool_pattern in content_lower:
+        if tool_pattern.startswith("_"):
+            found = any(tool_pattern in name for name in mcp_names)
+        else:
+            found = tool_pattern in content_lower
+        if found:
             mcp_hits.append(tool_pattern)
 
     # Detect invocations of known side-effecting skills/commands
@@ -495,6 +623,55 @@ def guard_criteria(
     }
 
 
+def collect_scan_text(artifact_path: Path) -> tuple[str, list[str]]:
+    """Artifact text plus every file the artifact ships beside it.
+
+    Returns (combined_text, relative paths of the bundled files read). The
+    walk covers the artifact's own directory tree — scripts/, references/ and
+    any other subdirectory — which is where a skill keeps the code that
+    actually deletes and publishes; the previous scan read SKILL.md and
+    references/*.md only, so a SKILL.md whose whole body was
+    `python3 scripts/purge.py` matched no pattern and scanned clean.
+
+    The walk stays inside artifact_path.parent: symlinks are not followed and
+    any entry resolving outside that root is skipped, so it can never wander
+    up into the operator's home directory. MAX_SCAN_FILES and MAX_SCAN_BYTES
+    bound the cost.
+    """
+    text = artifact_path.read_text(errors="replace")
+    bundled: list[str] = []
+    try:
+        root = artifact_path.parent.resolve()
+        artifact_resolved = artifact_path.resolve()
+    except OSError:
+        return text, bundled
+
+    budget = MAX_SCAN_BYTES
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = sorted(
+            d
+            for d in dirnames
+            if d not in SKIPPED_SCAN_DIRS and not d.startswith(".")
+        )
+        for name in sorted(filenames):
+            if len(bundled) >= MAX_SCAN_FILES or budget <= 0:
+                return text, bundled
+            path = Path(dirpath) / name
+            if path.suffix.lower() not in SCANNED_SUFFIXES or path.is_symlink():
+                continue
+            try:
+                resolved = path.resolve()
+                if resolved == artifact_resolved or not resolved.is_relative_to(root):
+                    continue
+                blob = path.read_text(errors="replace")
+            except OSError:
+                continue
+            budget -= len(blob)
+            text += "\n" + blob
+            bundled.append(str(resolved.relative_to(root)))
+    return text, bundled
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact-path", required=True, help="Path to artifact file")
@@ -521,13 +698,10 @@ def main() -> int:
         print(f"Error: criteria not found: {criteria_path}", file=sys.stderr)
         return 1
 
-    artifact_content = artifact_path.read_text()
-
-    # Also scan referenced files (references/ directory for skills)
-    refs_dir = artifact_path.parent / "references"
-    if refs_dir.is_dir():
-        for ref_file in refs_dir.glob("*.md"):
-            artifact_content += "\n" + ref_file.read_text()
+    # Scan the artifact and everything it ships alongside it: scripts/,
+    # references/ at any depth, and non-markdown reference files, all of which
+    # the old references/*.md glob missed.
+    artifact_content, bundled_files = collect_scan_text(artifact_path)
 
     # Scan for side effects. The artifact's own names never count as
     # delegations (a skill quoting its own invocation is the eval's entry
@@ -610,6 +784,7 @@ def main() -> int:
         "unknown_delegations": findings["unknown_delegations"],
         "allowed_tools_status": tools_status,
         "declared_destructive": declared_destructive,
+        "bundled_files_scanned": len(bundled_files),
         "action": "dry_run" if args.dry_run else "modified",
         "tests_modified": changes["tests_modified"],
         "tools_removed": changes["tools_removed"],

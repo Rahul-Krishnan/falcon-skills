@@ -28,7 +28,7 @@ import sys
 
 # Shared null-tolerant getter and the authoritative pass threshold (Phase 1
 # exit gate; see hone_common.py).
-from hone_common import ACTIONABLE_THRESHOLD, get
+from hone_common import ACTIONABLE_THRESHOLD, get, resolve_score
 
 
 def load_json(path):
@@ -136,15 +136,23 @@ def generate_grading(results, det_scores):
             det_composite = None
 
         # Same location as generate_evals: details.raw_semantic_scores dict.
-        # get() tolerates explicit nulls for both details and the scores dict.
-        details = get(result, "details", {})
-        raw_scores = get(details, "raw_semantic_scores", {})
+        # expected=dict as in generate_evals: a judge that returned a list of
+        # check descriptions instead of a mapping raised AttributeError on
+        # .items(), and main() builds all four artifacts before writing any of
+        # them, so one malformed field cost the whole Step 10 set.
+        details = get(result, "details", {}, expected=dict)
+        raw_scores = get(details, "raw_semantic_scores", {}, expected=dict)
         for i, (check, sc_score) in enumerate(raw_scores.items()):
+            # Same reason the det_composite guard above exists: a per-check
+            # score of null (or a stringified one) reached `>= 3.0` and raised
+            # TypeError. An unusable score is not a pass.
+            if not isinstance(sc_score, (int, float)) or isinstance(sc_score, bool):
+                sc_score = None
             assertion_results.append(
                 {
                     "eval_id": tc_id,
                     "assertion_id": f"{tc_id}-A{i + 1}",
-                    "passed": sc_score >= 3.0,
+                    "passed": sc_score is not None and sc_score >= 3.0,
                     "score": sc_score,
                     "max_score": 5.0,
                     "evidence": check,
@@ -206,7 +214,19 @@ def generate_benchmark(results, det_scores, baseline_results, baseline_det):
         if not res:
             return None
         results_list = res.get("results", [])
-        scores = [r.get("score") for r in results_list if r.get("score") is not None]
+        # resolve_score is the canonical type-tolerant score reader; a raw
+        # r["score"] let a stringified "0.9" past the `is not None` filter and
+        # into sum(), losing the whole Step 10 set to a TypeError. default=None
+        # keeps a genuinely missing score out of the average instead of
+        # counting it as a failing 0.0.
+        scores = [
+            s
+            for s in (
+                resolve_score(r, default=None, prefer_deterministic=False)
+                for r in results_list
+            )
+            if s is not None
+        ]
         # A deterministic composite of 0.0 is a real (failing) score, not a
         # missing one — only fall back to the LLM average when it is absent.
         det_composite = det.get("composite_score") if det else None
