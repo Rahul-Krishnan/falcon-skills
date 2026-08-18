@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""Analyze eval runner results.json and produce a structured summary.
+
+Usage:
+    python3 analyze_results.py <path_to_results.json>           # human-readable
+    python3 analyze_results.py <path_to_results.json> --triage   # JSON triage to stdout
+
+Outputs a concise analysis to stdout that can be consumed by the LLM
+for faster Phase 2 analysis (no need to parse raw JSON).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+
+# Shared helpers: null-tolerant access, canonical score fallback chain,
+# deterministic_scores.json loaders, and the authoritative thresholds
+# (ACTIONABLE_THRESHOLD = Phase 1 exit gate, CRITERIA_BUG_THRESHOLD =
+# run-wide "the criteria are suspect" bar). See hone_common.py docstrings.
+from hone_common import (
+    ACTIONABLE_THRESHOLD,
+    CRITERIA_BUG_THRESHOLD,
+    DIMENSION_FLOOR,
+    at_score_floor,
+    extract_results,
+    get,
+    load_deterministic_scores,
+    load_inconclusive_ids,
+    resolve_score,
+)
+
+
+def _dict_results(results: list) -> list[dict]:
+    """Drop non-dict entries, warning once per entry.
+
+    score_from_results already tolerates a malformed record and keeps going
+    (score_execution.py, the `isinstance(test_result, dict)` guard). Both
+    scripts read the same file through extract_results, so they must agree
+    about malformed entries too: `result.get(...)` on a bare string aborted
+    triage and analyze with an AttributeError on a file score_execution graded
+    without complaint.
+    """
+    kept = []
+    for entry in results:
+        if isinstance(entry, dict):
+            kept.append(entry)
+        else:
+            print(
+                f"WARNING: skipping non-object result entry: {type(entry).__name__}",
+                file=sys.stderr,
+            )
+    return kept
+
+
+def classify_failure(score: float, all_scores: list[float]) -> str:
+    """Deterministic failure classification.
+
+    Classification priority (evaluated in order, first match wins):
+    1. All scores at the floor -> criteria are broken, not the artifact
+    2. This score at the floor but others passed -> agent variance
+    3. Score below threshold -> genuine quality gap
+    4. Score at or above threshold -> passing
+
+    "At the floor" is `at_score_floor`, not `== 0.0`. score_execution clamps
+    every dimension to DIMENSION_FLOOR before the weighted geometric mean, so
+    the worst composite a deterministic run can produce is 0.05 and an exact
+    0.0 never appears. Written against 0.0, bands 1 and 2 were dead on
+    deterministic-only runs — the documented primary mode, since resolve_score
+    prefers the deterministic composite — and `variance` could never be
+    returned at all.
+
+    Args:
+        score: the score for this specific test (0.0-1.0, may be from
+            deterministic or LLM source depending on caller)
+        all_scores: scores for ALL tests in the same run (used for
+            criteria_bug detection). May mix score sources when
+            deterministic_scores.json is only partially available.
+
+    The actionable threshold matches SKILL.md's Phase 1 exit gate ("any test
+    scored below 0.8"). Keeping triage on a lower bar than the gate produced a
+    contradiction: a test could be reported as `pass` here while the gate
+    counted it as an actionable failure worth a full Phase 2 round.
+
+    Returns: "criteria_bug" | "variance" | "real_issue" | "pass"
+    """
+    if all_scores and all(at_score_floor(s) for s in all_scores):
+        return "criteria_bug"
+    if all(s < CRITERIA_BUG_THRESHOLD for s in all_scores) and len(all_scores) > 1:
+        return "criteria_bug"
+    if at_score_floor(score) and any(s > CRITERIA_BUG_THRESHOLD for s in all_scores):
+        return "variance"
+    if score < ACTIONABLE_THRESHOLD:
+        return "real_issue"
+    return "pass"
+
+
+def triage(path: str) -> dict:
+    """Deterministic triage. Returns JSON-serializable dict."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"error": str(exc), "classifications": [], "summary": {}}
+
+    # Same key resolution as score_execution (hone_common.extract_results):
+    # reading only `results` reported a skill-creator-format file as a zero-test
+    # run right after score_execution had graded it a D.
+    results, _key = extract_results(data)
+    results = _dict_results(results)
+    if not results:
+        return {
+            "classifications": [],
+            "summary": {"criteria_bug": 0, "variance": 0, "real_issue": 0, "pass": 0},
+        }
+
+    det_per_test = load_deterministic_scores(path)
+    inconclusive_ids = load_inconclusive_ids(path)
+
+    # Inconclusive tests were never scored; they must not contribute a
+    # phantom 0.0 to the criteria_bug / variance population checks.
+    all_scores = []
+    for result in results:
+        test_id = result.get("test_id", "unknown")
+        if test_id in inconclusive_ids:
+            continue
+        all_scores.append(resolve_score(result, det_per_test))
+
+    classifications = []
+    counts: dict[str, int] = {
+        "criteria_bug": 0,
+        "variance": 0,
+        "real_issue": 0,
+        "pass": 0,
+        "inconclusive": 0,
+    }
+
+    for result in results:
+        test_id = result.get("test_id", "unknown")
+        if test_id in inconclusive_ids:
+            classifications.append(
+                {
+                    "test_id": test_id,
+                    "classification": "inconclusive",
+                    "score": None,
+                    "score_source": "deterministic",
+                }
+            )
+            counts["inconclusive"] += 1
+            continue
+        source = "deterministic" if test_id in det_per_test else "llm_judge"
+        score = resolve_score(result, det_per_test)
+
+        classification = classify_failure(score, all_scores)
+        classifications.append(
+            {
+                "test_id": test_id,
+                "classification": classification,
+                "score": round(score, 4),
+                "score_source": source,
+            }
+        )
+        counts[classification] = counts.get(classification, 0) + 1
+
+    return {"classifications": classifications, "summary": counts}
+
+
+def analyze(path: str) -> None:
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"ERROR: Failed to read {path}: {e}\n"
+            f"  -> check that the eval run wrote results.json to that directory",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    results, _key = extract_results(data)
+    results = _dict_results(results)
+    summary = data.get("summary", {})
+    dims = data.get("dimension_aggregation", {})
+
+    # Overall summary
+    total = len(results)
+    if total == 0:
+        print("=== RESULTS SUMMARY (0 tests) ===")
+        print(
+            "No test results found. eval runner may have crashed before completing any tests."
+        )
+        return
+
+    det_per_test = load_deterministic_scores(path)
+    inconclusive_ids = load_inconclusive_ids(path)
+
+    def score_of(result: dict) -> float:
+        """Deterministic composite when available, else the LLM judge score."""
+        return resolve_score(result, det_per_test)
+
+    # Inconclusive tests were never scored; keep them out of pass/avg math
+    # so "nothing was observed" does not read as a 0.0 failure.
+    conclusive = [
+        r for r in results if r.get("test_id", "unknown") not in inconclusive_ids
+    ]
+
+    score_source = "deterministic" if det_per_test else "llm_judge"
+    # PASS/FAIL here must agree with classify_failure's triage band: a test
+    # below ACTIONABLE_THRESHOLD is a real_issue, so it must not be reported
+    # as passing in the operator summary.
+    passed = sum(1 for r in conclusive if score_of(r) >= ACTIONABLE_THRESHOLD)
+    denom = len(conclusive)
+    avg_score = sum(score_of(r) for r in conclusive) / denom if denom else 0.0
+
+    print(f"=== RESULTS SUMMARY ({total} tests) ===")
+    if inconclusive_ids:
+        print(f"Inconclusive (excluded from scoring): {len(results) - denom}/{total}")
+    if denom:
+        print(f"Passed: {passed}/{denom} ({passed / denom * 100:.0f}%)")
+        print(f"Composite: {avg_score:.3f} (source: {score_source})")
+    else:
+        print("No conclusive tests; nothing to score.")
+    print()
+
+    # Triage
+    # Floor-aware, matching classify_failure: a deterministic composite bottoms
+    # out at DIMENSION_FLOOR, so `== 0.0` never fired on a deterministic run.
+    all_zero = denom > 0 and all(at_score_floor(score_of(r)) for r in conclusive)
+    some_zero = any(at_score_floor(score_of(r)) for r in conclusive) and not all_zero
+
+    if all_zero:
+        print(f"TRIAGE: ALL TESTS AT THE SCORING FLOOR ({DIMENSION_FLOOR:.2f})")
+        print(
+            "  -> This is almost certainly an eval criteria bug (required_present/required_absent)"
+        )
+        print("  -> Fix eval criteria, do NOT edit SKILL.md")
+        print()
+    elif some_zero:
+        zero_ids = [
+            r.get("test_id", "?") for r in conclusive if at_score_floor(score_of(r))
+        ]
+        print(
+            f"TRIAGE: {len(zero_ids)} test(s) at the scoring floor "
+            f"({DIMENSION_FLOOR:.2f}): {', '.join(zero_ids)}"
+        )
+        print(
+            "  -> Likely agent variance (skill misidentification) or eval criteria issue"
+        )
+        print("  -> Check agent_response for these tests")
+        print()
+
+    # Per-test breakdown
+    print("=== PER-TEST BREAKDOWN ===")
+    for r in results:
+        tid = r.get("test_id", "unknown")
+        suite = r.get("suite") or r.get("test_profile") or "unknown"
+        score = score_of(r)
+        details = r.get("details", {})
+        tool_errors = r.get("tool_call_error_count", 0)
+
+        if tid in inconclusive_ids:
+            status, score_label = "INCONCLUSIVE", "score=n/a"
+        else:
+            status = "PASS" if score >= ACTIONABLE_THRESHOLD else "FAIL"
+            score_label = f"score={score:.3f}"
+        print(f"\n--- {tid} [{suite}] {status} ({score_label}) ---")
+
+        if isinstance(details, dict):
+            # Programmatic checks
+            prog = get(details, "programmatic_checks", [])
+            failed_prog = [p for p in prog if not p.get("passed", True)]
+            if failed_prog:
+                print("  FAILED programmatic checks:")
+                for p in failed_prog:
+                    print(f'    {p.get("id", "?")}: "{p.get("value", "")}" not found')
+
+            # Semantic scores
+            raw = get(details, "raw_semantic_scores", {}, expected=dict)
+            if raw:
+                print("  Semantic scores:")
+                for q, s in raw.items():
+                    indicator = "LOW" if s <= 3.0 else "OK" if s <= 4.0 else "GOOD"
+                    print(f"    [{indicator}] {s}/5 - {q[:80]}")
+
+            # Overall feedback (truncated)
+            feedback = details.get("overall_feedback", "")
+            if feedback:
+                truncated = feedback[:300]
+                suffix = "..." if len(feedback) > 300 else ""
+                print(f"  Judge feedback: {truncated}{suffix}")
+
+        if tool_errors:
+            print(f"  Tool call errors: {tool_errors}")
+
+    # Dimension summary
+    print("\n=== DIMENSION SUMMARY ===")
+    print(f"{'Dimension':<20} {'Score':>6} {'1-5':>5} {'Status':>8}")
+    print("-" * 45)
+
+    for r in results:
+        details = r.get("details", {})
+        if isinstance(details, dict):
+            cat = get(details, "category", r.get("suite", "unknown"), expected=str)
+            composite = get(details, "composite_1_5", 0)
+            # An inconclusive test was never scored. Printing score_of's 0.0
+            # default reported it as `0.000 FAIL`, contradicting the PER-TEST
+            # BREAKDOWN two lines above with exactly the "nothing was observed
+            # reads as a failure" conclusion the rest of this file prevents.
+            if r.get("test_id", "unknown") in inconclusive_ids:
+                print(f"{cat:<20} {'n/a':>6} {composite:>5.1f} {'INCONCL':>8}")
+                continue
+            score = score_of(r)
+            status = "PASS" if score >= ACTIONABLE_THRESHOLD else "FAIL"
+            print(f"{cat:<20} {score:>6.3f} {composite:>5.1f} {status:>8}")
+
+    # Actionable recommendations
+    print("\n=== RECOMMENDED ACTIONS ===")
+    low_dims = []
+    for r in results:
+        details = r.get("details", {})
+        if isinstance(details, dict):
+            # typed get, not dict.get: an explicit `"raw_semantic_scores": null`
+            # is a real shape from a judge that returned no per-question scores,
+            # and dict.get hands back that None for a present key. `.items()` on
+            # it aborted analyze() with a traceback here -- after the summary,
+            # per-test breakdown and dimension summary had already printed, so
+            # the operator got a report that looked complete minus its
+            # RECOMMENDED ACTIONS section.
+            raw = get(details, "raw_semantic_scores", {}, expected=dict)
+            cat = get(details, "category", r.get("suite", "unknown"), expected=str)
+            for q, s in raw.items():
+                if s <= 3.0:
+                    low_dims.append((cat, q, s))
+
+    if low_dims:
+        print("Low-scoring semantic checks (<=3.0/5, target for SKILL.md improvement):")
+        for cat, q, s in low_dims:
+            print(f"  [{cat}] {s}/5: {q}")
+    else:
+        print(
+            "No semantic scores <=3.0. Skill is performing well across all dimensions."
+        )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Analyze eval runner results.json")
+    parser.add_argument("results_json", help="Path to results.json")
+    parser.add_argument(
+        "--triage",
+        action="store_true",
+        help="Output deterministic failure triage as JSON to stdout",
+    )
+    args = parser.parse_args()
+
+    if args.triage:
+        result = triage(args.results_json)
+        json.dump(result, sys.stdout, indent=2)
+        print()
+    else:
+        analyze(args.results_json)
