@@ -23,6 +23,7 @@ from pathlib import Path
 # and a wrong-typed value, as absent, as the validators already do.
 from hone_common import (
     DIMENSION_FLOOR,
+    HALT_SEQUENCE_STEPS,
     SANDBOX_HEADER,
     extract_results,
     get as typed_get,
@@ -127,9 +128,15 @@ ECHOED_GATE_CAP = 0.7
 # or "validate_handoff.py" is discussing gates, and the bare-stem \b anchors
 # missed all three (\bgate\b fails on "gates", \bvalidate\b fails on
 # "validation" and on "validate_handoff").
+# No closing anchor at all was too loose, though: the stems then matched
+# "gateway", "stopwatch", and "stopped", and the legacy fallback divides the
+# match count by expected_gates, so a halt narrative saying "stopping" hit the
+# 0.7 keyword ceiling with no gate evidence. `(?![^\W_])` closes that without
+# \b's failure mode: `_` is a word char, so \b would put "validate_handoff"
+# back out of reach.
 GATE_KEYWORDS = re.compile(
     r"\b(?:gates?|checklists?|validat(?:e|es|ed|ing|ion|ions|or|ors)"
-    r"|STOP|rubrics?|interaction schema)",
+    r"|STOP|rubrics?|interaction schema)(?![^\W_])",
     re.IGNORECASE,
 )
 
@@ -711,11 +718,20 @@ def score_gate_compliance(
             # terminal, so requiring terminality marked the detecting event
             # non-compliant on every correct halt -- and an executor that
             # emitted one more truthful fail event scored lower than one that
-            # emitted fewer. Forward progress is a later `pass` on some step
-            # other than the exit itself; the exit is the halt, not progress.
-            halted = not any(
-                later.get("result") == "pass" and later.get("step") != "workflow_exit"
-                for later in gates[idx + 1 :]
+            # emitted fewer.
+            #
+            # The test is positive evidence of a halt, not the absence of
+            # evidence of progress: the tail has to reach workflow_exit, and
+            # everything in it has to belong to the halt sequence. Defining it
+            # as "no later pass on some step other than the exit" let a run
+            # that failed a gate, carried on through the whole workflow, and
+            # simply stopped emitting passing gates score that fail as a halt,
+            # which rewards emitting fewer events than an honest run emits.
+            later_gates = gates[idx + 1 :]
+            halted = any(
+                later.get("step") == "workflow_exit" for later in later_gates
+            ) and all(
+                later.get("step") in HALT_SEQUENCE_STEPS for later in later_gates
             )
             if terminal or repaired or halted:
                 compliant += 1

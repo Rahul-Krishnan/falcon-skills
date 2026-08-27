@@ -32,7 +32,17 @@ Ledger shape:
                              "file": str, "summary": str,
                              "status": "open"|"fixed"|"rejected"}]}]}
 
-Exit codes: 0 converged, 1 escalate or capped, 2 usage error.
+Exit codes: 0 converged, 1 anything else (escalate, capped, or in_progress),
+2 usage error.
+
+**The exit code is not the verdict.** `in_progress` -- the ordinary mid-run
+state, where rounds remain and the loop should continue -- exits 1 alongside
+`escalate` and `capped`, because only `converged` is a finished, successful
+run. A caller that branches on the exit code alone reads a healthy round as a
+failure and halts the loop. Read `verdict` from the `--json` output and branch
+on that; treat exit 1 as "not converged yet", not as an error. Exit 2 is the
+only genuine failure (missing or unparseable ledger).
+
 Stdlib only. Read-only.
 """
 

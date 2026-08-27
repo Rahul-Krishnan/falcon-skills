@@ -135,5 +135,50 @@ class TestVerify(unittest.TestCase):
         self.assertEqual(report["verdict"], "clean")
 
 
+class TestGitPathNamespace(unittest.TestCase):
+    """git status paths are repo-root-relative; the manifest is --root-relative."""
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        # Guarded tree sits one level below the repo root, which is the
+        # documented shape: --root ~/.claude/skills inside a repo at ~/.claude.
+        self.root = self.repo / "skills"
+        (self.root / "hone").mkdir(parents=True)
+        (self.root / "hone" / "SKILL.md").write_text("in scope\n")
+        (self.root / "other").mkdir()
+        (self.root / "other" / "g.md").write_text("out of scope\n")
+        (self.repo / "outside.md").write_text("above the guarded tree\n")
+
+        def fake_git(root, *args):
+            if args[:2] == ("rev-parse", "--show-toplevel"):
+                return str(self.repo) + "\n"
+            return (
+                " M skills/hone/SKILL.md\n"
+                " M skills/other/g.md\n"
+                " M outside.md\n"
+            )
+
+        self._real_git = check_scope._git
+        check_scope._git = fake_git
+
+    def tearDown(self):
+        check_scope._git = self._real_git
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def test_git_paths_are_rebased_onto_root(self):
+        self.assertEqual(
+            check_scope._git_changed(self.root),
+            ["hone/SKILL.md", "other/g.md"],
+        )
+
+    def test_edited_in_scope_file_is_not_reported_preexisting(self):
+        manifest = build_manifest(self.root)
+        (self.root / "hone" / "SKILL.md").write_text("edited by this run\n")
+        report = verify(self.root, manifest, ["hone"])
+        self.assertEqual(report["verdict"], "clean")
+        self.assertEqual(report["preexisting_dirty_out_of_scope"], ["other/g.md"])
+        self.assertNotIn("hone/SKILL.md", report["preexisting_dirty_out_of_scope"])
+
+
 if __name__ == "__main__":
     unittest.main()

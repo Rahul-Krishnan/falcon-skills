@@ -119,23 +119,41 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int) -> dict:
 def _scores_by_id(results: dict) -> dict[str, float]:
     """Extract per-test composite scores from a results or scoring payload.
 
-    Accepts the shapes hone actually produces: a top-level `per_test` mapping,
-    a `test_results` list, or a bare list of test result objects.
+    Accepts the shapes hone actually produces. `score_from_results` emits
+    `per_test` as a **list** of records carrying `test_id` and `composite`,
+    and that scoring payload is exactly what `--before`/`--after` are pointed
+    at, so the list has to reach the entry loop below. Treating `per_test` as
+    a mapping only, as this did, sent every hone scoring payload down the
+    raw-results branch, which found no matching key and returned `{}`: zero
+    paired cases and an `underpowered` verdict on every comparison.
+
+    A `per_test` mapping is still accepted (id -> score, or id -> record) but
+    is normalised into entries so it shares the loop's type guards. The old
+    mapping branch called `float()` on the record itself whenever the record
+    carried no `"score"` key -- which is every hone record, since hone names
+    that field `"composite"` -- and raised an uncaught TypeError.
     """
     if isinstance(results, list):
         entries = results
-    elif isinstance(results.get("per_test"), dict):
-        return {
-            str(k): float(v.get("score", v) if isinstance(v, dict) else v)
-            for k, v in results["per_test"].items()
-        }
     else:
-        entries = (
-            results.get("test_results")
-            or results.get("results")
-            or results.get("tests")
-            or []
-        )
+        per_test = results.get("per_test")
+        if isinstance(per_test, dict):
+            entries = [
+                {"test_id": key, **value}
+                if isinstance(value, dict)
+                else {"test_id": key, "score": value}
+                for key, value in per_test.items()
+            ]
+        else:
+            entries = (
+                per_test
+                or results.get("test_results")
+                or results.get("results")
+                or results.get("tests")
+                or []
+            )
+    if not isinstance(entries, list):
+        return {}
 
     scores: dict[str, float] = {}
     for entry in entries:

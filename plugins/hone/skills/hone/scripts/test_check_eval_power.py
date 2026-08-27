@@ -108,6 +108,41 @@ class TestCompare(unittest.TestCase):
         report = check_compare(before, after, 0.05)
         self.assertEqual(report["wins"], 2)
 
+    def test_scorer_per_test_list_shape_is_paired(self):
+        # score_from_results emits per_test as a LIST of records keyed by
+        # test_id/composite, and that payload is what --before/--after are
+        # pointed at. Treating per_test as a mapping only sent it down the
+        # raw-results branch, which paired nothing.
+        def scored(scores):
+            return {
+                "composite_score": 0.5,
+                "per_test": [
+                    {"test_id": tid, "status": "scored", "composite": value}
+                    for tid, value in scores.items()
+                ],
+            }
+
+        before = scored({f"tc{i}": 0.4 for i in range(6)})
+        after = scored({f"tc{i}": 0.9 for i in range(6)})
+        report = check_compare(before, after, 0.05)
+        self.assertEqual(report["paired_cases"], 6)
+        self.assertEqual(report["wins"], 6)
+
+    def test_inconclusive_records_are_dropped_not_crashed(self):
+        before = {"per_test": [{"test_id": "tc0", "composite": None}]}
+        after = {"per_test": [{"test_id": "tc0", "composite": None}]}
+        report = check_compare(before, after, 0.05)
+        self.assertEqual(report["paired_cases"], 0)
+
+    def test_mapping_of_records_without_score_key_does_not_raise(self):
+        # hone names the field "composite"; the old mapping branch called
+        # float() on the record itself and raised TypeError.
+        before = {"per_test": {"tc0": {"composite": 0.4}}}
+        after = {"per_test": {"tc0": {"composite": 0.9}}}
+        report = check_compare(before, after, 0.05)
+        self.assertEqual(report["paired_cases"], 1)
+        self.assertEqual(report["wins"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -122,6 +122,15 @@ RUN_SHAPE_ACTIVE_STEPS: dict[str, frozenset[str]] = {
 }
 
 
+# Steps that may legitimately follow a failing gate without contradicting the
+# claim that the run halted there: `convergence` is the check the failure
+# capped, `workflow_exit` is the stop itself. Anything else after a fail is
+# forward progress, and a fail followed by forward progress is not a halt.
+# Shared so validate_gates.py's warning and score_execution.py's score read
+# the same halt shape.
+HALT_SEQUENCE_STEPS: frozenset[str] = frozenset({"convergence", "workflow_exit"})
+
+
 def derive_run_shape(steps: object) -> str:
     """Run shape derived from the state file's steps{} map.
 

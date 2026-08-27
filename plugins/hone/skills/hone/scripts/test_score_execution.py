@@ -1125,6 +1125,71 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
         result = _score_written_gates([self._gate("phase1_to_phase2", "enter_phase2")])
         self.assertLess(result["score"], 1.0)
 
+    def test_documented_halt_sequence_is_compliant(self):
+        # The detecting fail, the convergence check it capped, then the exit.
+        result = _score_written_gates(
+            [
+                self._gate("phase3_exit", "fail"),
+                self._gate("convergence", "fail"),
+                self._gate("workflow_exit", "fail"),
+            ]
+        )
+        self.assertEqual(result["score"], 1.0)
+
+    def test_fail_then_silence_is_not_a_halt(self):
+        # No later pass, but no workflow_exit either: the run failed a gate
+        # and kept going without recording anything. Absence of forward
+        # progress is not evidence of a halt.
+        result = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "fail"),
+                self._gate("phase2_to_phase3", "fail"),
+                self._gate("phase3_exit", "fail"),
+            ]
+        )
+        self.assertLess(result["score"], 1.0)
+
+    def test_honest_later_pass_does_not_score_worse_than_silence(self):
+        silent = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "fail"),
+                self._gate("phase2_to_phase3", "fail"),
+            ]
+        )
+        honest = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "fail"),
+                self._gate("phase2_to_phase3", "pass"),
+            ]
+        )
+        self.assertLessEqual(silent["score"], honest["score"])
+
+
+class TestGateKeywordAnchoring(unittest.TestCase):
+    """The keyword fallback must not fire on words that merely start the same."""
+
+    def _matches(self, text):
+        from score_execution import GATE_KEYWORDS
+
+        return GATE_KEYWORDS.findall(text)
+
+    def test_inflected_forms_still_match(self):
+        for text in ("gates[]", "validate_handoff.py", "validation", "validators",
+                     "checklists", "rubrics"):
+            self.assertTrue(self._matches(text), text)
+
+    def test_prefix_collisions_do_not_match(self):
+        for text in ("gateway", "stopwatch", "stopped", "stopping",
+                     "gate2", "validationErrors"):
+            self.assertEqual(self._matches(text), [], text)
+
+    def test_halt_narrative_does_not_reach_the_keyword_ceiling(self):
+        from score_execution import score_gate_compliance
+
+        narrative = "Stopped. Stopping now. It stopped again, stopping there."
+        result = score_gate_compliance([], narrative)
+        self.assertEqual(result["score"], 0.0)
+
 
 class TestRequiredAbsentNegation(unittest.TestCase):
     """required_absent must not fire on phrases inside an explicit denial."""

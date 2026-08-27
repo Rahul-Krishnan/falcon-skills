@@ -386,14 +386,41 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 3. **Step 3: Fresh-Eyes Analysis** -- Parallel fresh-eyes subagent (inherits session model) for independent improvement proposals.
 4. **Step 4: Reconcile + Analyze** -- Merge main thread + fresh-eyes findings, performance audit.
 5. **Step 5: Improvement Plan** -- Table of proposed changes with fix type and source. When multiple preferences apply to the same change, note any tension between them and state which takes precedence.
-5a. **Step 5a: Scope Snapshot** -- Before any edit, run `check_scope.py --root ~/.claude/skills --manifest /tmp/scope-${RUN_ID}.json --snapshot` (preference 21).
+5a. **Step 5a: Scope Snapshot** -- Before any edit, derive the guarded tree from the artifact path Step 1 discovered, then snapshot it (preference 21):
+
+   ```bash
+   ARTIFACT_DIR="$(cd "$(dirname "<discovered artifact path>")" && pwd)"
+   SCOPE_ROOT="$(dirname "$ARTIFACT_DIR")"
+   SCOPE_NAME="$(basename "$ARTIFACT_DIR")"
+   check_scope.py --root "$SCOPE_ROOT" --manifest /tmp/scope-${RUN_ID}.json --snapshot
+   ```
+
+   Never hardcode `--root ~/.claude/skills`. Hone routinely operates on artifacts installed elsewhere (`$CLAUDE_PLUGIN_ROOT/skills/...`, `~/.claude/plugins/*/skills/...`), and a root that does not contain the edited file snapshots a tree nothing in the round touches, so `--verify` reports `clean` no matter what changed. For a single-file artifact (a hook or a script rather than a skill directory), `SCOPE_ROOT` is the containing directory and `SCOPE_NAME` is the file name.
 6. **Step 6: Apply Edits** -- Stale-write guard, apply edits, generate companion validators if needed.
-6a. **Step 6a: Scope Verify** -- Run `check_scope.py --root ~/.claude/skills --manifest /tmp/scope-${RUN_ID}.json --scope <artifact-dir> --verify`. On a violation: revert **only** the paths listed in `violations`, emit a `fail` gate event for `scope_verify`, and halt the round.
+6a. **Step 6a: Scope Verify** -- Run `check_scope.py --root "$SCOPE_ROOT" --manifest /tmp/scope-${RUN_ID}.json --scope "$SCOPE_NAME" --verify`, reusing the same `$SCOPE_ROOT` Step 5a snapshotted. On a violation: revert **only** the paths listed in `violations`, emit a `fail` gate event for `scope_verify`, and halt the round.
 
    Revert nothing listed under `preexisting_dirty_out_of_scope`. Those files were already uncommitted when the run started and are byte-identical to the snapshot, so reverting them destroys someone else's work rather than undoing yours. Only the hash manifest can attribute a change to this run; a git diff cannot tell your edit from the one already sitting there.
 6b. **Step 6b: Constraint Ablation** -- For each constraint flagged as possible dead weight (preference 22), remove it, re-run the existing criteria, and restore it only if a test regresses. Record each ablation and its outcome in the ledger. Skip constraints guarding irreversible actions.
 7. **Step 7: Description Trigger Testing** -- Test whether the description triggers correctly on realistic prompts.
-8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json` with `id`, `severity`, `file`, `summary`, and `status` (`open`, `fixed`, or `rejected`). The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence.
+8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`. The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence.
+
+   Findings are nested under the round that produced them, and `check_convergence.py` reads that wrapper. A bare array of findings, or findings appended at the top level, parses as zero rounds: the verdict is `in_progress` with `rounds_run: 0` on every round, forever, and the script reports no error. Write exactly this shape:
+
+   ```json
+   {
+     "artifact": "{name}",
+     "max_rounds": 3,
+     "rounds": [
+       {"round": 1,
+        "findings": [
+          {"id": "F1", "severity": "critical", "file": "SKILL.md",
+           "summary": "Step 4 has no stated exit condition", "status": "open"}
+        ]}
+     ]
+   }
+   ```
+
+   `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones the convergence check counts); `status` is `open`, `fixed`, or `rejected`. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged -- that repetition is what lets the check see a finding stay open across rounds.
 
 ## Phase 3: Re-Evaluate
 
@@ -405,7 +432,7 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 2. Run deterministic scoring on re-eval results.
 3. Compare before/after per-dimension. A drop > 0.1 in any dimension flags a regression, but resample first: re-run the tests feeding that dimension twice more and take the median. Auto-revert only if the median still shows the drop. If `score_execution.py` changed this round, re-score the prior round's results with the updated scorer before comparing, so a measurement change is not read as an artifact change.
 4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid. Check mechanical exit gate.
-5. Run `check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json`. It returns `converged`, `capped`, `escalate`, or `in_progress`. On `escalate` the loop is not converging (a finding open three rounds, blocking count flat, or a finding closed in one file reopened in another): halt, emit a `fail` gate event for `convergence`, and report the finding ids. On `capped`, report it as **capped, not converged**, and list the open blocking findings. Never present a capped run as success.
+5. Run `check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json`. It returns `converged`, `capped`, `escalate`, or `in_progress`. **Branch on the JSON `verdict`, not the exit code:** only `converged` exits 0, so `in_progress` -- the ordinary continue case in step 6 below -- exits 1 alongside the two halt verdicts. Treat exit 1 as "not converged yet" and read the verdict; only exit 2 (missing or unparseable ledger) is a real failure. On `escalate` the loop is not converging (a finding open three rounds, blocking count flat, or a finding closed in one file reopened in another): halt, emit a `fail` gate event for `convergence`, and report the finding ids. On `capped`, report it as **capped, not converged**, and list the open blocking findings. Never present a capped run as success.
 6. If rounds remain, the verdict is `in_progress`, and the score is improving: loop back to Phase 2.
 
 **Mechanical exit gate** decides when to stop (state file, not LLM judgment). See Phase 3 reference for full BLOCKED/ALLOWED conditions.
@@ -414,7 +441,9 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 
 1. **Printing text instead of using AskUserQuestion.** When the STOP section says "Call AskUserQuestion", you must call the tool. Text output does NOT satisfy the gate.
 2. **Proceeding past a STOP gate.** When a gate says "STOP immediately", no further workflow steps should execute.
-3. **Narrating the workflow in an error stop.** When stopping on a validation error, the error message and its options are the whole response. Say what is wrong and what the valid choices are, then stop. This applies to every halt, not just argument validation: on a corrupt state file or any mid-run error halt, report the failure, the file path, and how to resume. Do not inventory the work you are declining to do. Listing the steps you did not reach ("does not run the structural audit, does not generate criteria") reads as workflow narration and scores as a forbidden-phrase violation, even when phrased as a denial.
+3. **Narrating the workflow in an error stop.** When stopping on a validation error, the error message and its options are the whole response. Say what is wrong and what the valid choices are, then stop. This applies to every halt, not just argument validation: on a corrupt state file or any mid-run error halt, report the failure, the file path, and how to resume. Do not inventory the work you are declining to do: a list of the steps you did not reach is workflow narration in an error stop, where the error and the options are the whole response.
+
+   A denial is not itself the violation. `score_execution.py` scopes each negation cue to the clause it governs and walks back through commas, so a single denial covering a comma-separated list ("did not reach the audit, criteria generation, or the eval runner") is read as one denial and is not scored as a forbidden phrase. What still scores as a violation is the phrase appearing outside a denial, and a semicolon is a hard clause break: "did not run the audit; proceeded to Phase 2" negates only the first clause.
 4. **Naming internal machinery in fallback output.** When AskUserQuestion is unavailable and the fallback fires, the response is the question and its options and nothing else. Internal section names, step names, and script names belong in the state file, not in a user-facing stop message — a response that names them fails even when the question itself is correct.
 5. **Sequential reads for independent files.** When a phase starts by reading multiple unrelated files (artifact, reference file, state file), issuing them one at a time is a latency violation. Batch all independent Read calls into a single parallel tool-use turn.
 6. **Wrong result values in gate events.** Gate events only accept `"result": "pass"` or `"result": "fail"`. Using `"enter_phase2"`, `"enter_phase3"`, `"exit"`, `"continue"`, or any other value is a schema violation and causes gate_compliance to score 0.0. Use `"pass"` for all successful phase transitions.

@@ -272,12 +272,18 @@ improvement_plan: {
 
 ### Step 5a: Scope Snapshot (before any edit)
 
-Preference 11 stops hone clobbering someone else's change; nothing stops hone changing a file nobody asked it to touch. Snapshot before the first edit:
+Preference 11 stops hone clobbering someone else's change; nothing stops hone changing a file nobody asked it to touch. Derive the guarded tree from the artifact path Step 1 discovered, then snapshot before the first edit:
 
 ```bash
-python3 <skill-dir>/scripts/check_scope.py --root ~/.claude/skills \
+ARTIFACT_DIR="$(cd "$(dirname "{artifact_path}")" && pwd)"
+SCOPE_ROOT="$(dirname "$ARTIFACT_DIR")"
+SCOPE_NAME="$(basename "$ARTIFACT_DIR")"
+
+python3 <skill-dir>/scripts/check_scope.py --root "$SCOPE_ROOT" \
   --manifest /tmp/scope-${RUN_ID}.json --snapshot --json
 ```
+
+`--root` is derived, never hardcoded. Hone discovers artifacts under `~/.claude/skills/`, `$CLAUDE_PLUGIN_ROOT/skills/`, `~/.claude/plugins/*/skills/`, and the other roots in `references/artifact-profiles.md`; a root that does not contain the edited file snapshots a tree the round never touches, and `--verify` then reports `clean` however much was changed. For a single-file artifact (hook or script), `SCOPE_ROOT` is the containing directory and `SCOPE_NAME` is the file name.
 
 ### Step 6: Apply Edits
 
@@ -340,9 +346,11 @@ Write `artifact_before_snapshot` (pre-edit file content) to the workflow state f
 ### Step 6a: Scope Verify (after edits)
 
 ```bash
-python3 <skill-dir>/scripts/check_scope.py --root ~/.claude/skills \
-  --manifest /tmp/scope-${RUN_ID}.json --scope {artifact_dir_name} --verify --json
+python3 <skill-dir>/scripts/check_scope.py --root "$SCOPE_ROOT" \
+  --manifest /tmp/scope-${RUN_ID}.json --scope "$SCOPE_NAME" --verify --json
 ```
+
+Reuse the `$SCOPE_ROOT` and `$SCOPE_NAME` Step 5a derived. Verifying against a different root than the one snapshotted compares two unrelated trees.
 
 On `scope_violation`: revert **only** the paths listed under `violations`, emit a `fail` gate event for `scope_verify`, and halt the round.
 

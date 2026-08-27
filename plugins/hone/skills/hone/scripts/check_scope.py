@@ -83,21 +83,68 @@ def build_manifest(root: Path, exclude: set[Path] | None = None) -> dict:
     }
 
 
-def _git_changed(root: Path) -> list[str] | None:
-    """Paths git reports as modified, or None when root is not a git repo."""
+def _git(root: Path, *args: str) -> str | None:
+    """Run git in `root` and return stdout, or None when git cannot answer."""
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "status", "--porcelain"],
+            ["git", "-C", str(root), *args],
             capture_output=True, text=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
+    return result.stdout
+
+
+def _git_toplevel(root: Path) -> Path | None:
+    """Repository root containing `root`, or None when root is not in a repo."""
+    out = _git(root, "rev-parse", "--show-toplevel")
+    if out is None:
+        return None
+    line = out.strip()
+    return Path(line) if line else None
+
+
+def _git_changed(root: Path) -> list[str] | None:
+    """Paths git reports as dirty, relative to `root`, or None outside a repo.
+
+    `git status --porcelain` prints paths relative to the *repository* root,
+    never to `--root`. The manifest, `--scope`, and `_in_scope` all speak
+    root-relative paths, so comparing the two namespaces directly matched
+    nothing whenever root sits below the repo root -- which is the documented
+    invocation (`--root ~/.claude/skills` inside a repo rooted at
+    `~/.claude`). Every dirty file then looked both unchanged by this run and
+    out of scope, so the report listed all of them, including the in-scope
+    file the run had just legitimately edited, under
+    `preexisting_dirty_out_of_scope` next to "do not revert them".
+
+    Rebase each path onto `root` and drop the ones that fall outside it.
+    """
+    stdout = _git(root, "status", "--porcelain")
+    if stdout is None:
+        return None
+    toplevel = _git_toplevel(root)
+    if toplevel is None:
+        return None
+    try:
+        root_resolved = root.resolve()
+        toplevel_resolved = toplevel.resolve()
+    except OSError:
+        return None
+
     paths = []
-    for line in result.stdout.splitlines():
-        if len(line) > 3:
-            paths.append(line[3:].strip().strip('"'))
+    for line in stdout.splitlines():
+        if len(line) <= 3:
+            continue
+        entry = line[3:].strip().strip('"')
+        try:
+            relative = (toplevel_resolved / entry).relative_to(root_resolved)
+        except ValueError:
+            # Dirty, but outside the guarded tree entirely. Not this run's
+            # business either way, and reporting it would be noise.
+            continue
+        paths.append(str(relative))
     return paths
 
 

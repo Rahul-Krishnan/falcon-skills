@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import unittest
 
-from validate_gates import validate_gates
+from validate_gates import derive_edits_applied, validate_gates
 
 
 def gate(step, result="pass", judge="self-check"):
@@ -15,6 +15,7 @@ def gate(step, result="pass", judge="self-check"):
 NORMAL_RUN = [
     gate("phase1_to_phase2"),
     gate("phase2_to_phase3"),
+    gate("convergence"),
     gate("phase3_exit"),
     gate("workflow_exit"),
 ]
@@ -145,6 +146,7 @@ class TestCompleteness(unittest.TestCase):
         gates = [
             gate("fixonly_entry"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit"),
         ]
@@ -165,6 +167,7 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit", result="fail"),
         ]
@@ -178,6 +181,7 @@ class TestFailSemantics(unittest.TestCase):
             gate("handoff_eval_results", result="pass"),
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit"),
         ]
@@ -189,6 +193,7 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2", result="fail"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit"),
         ]
@@ -214,6 +219,7 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit", result="fail"),
             gate("workflow_exit"),
         ]
@@ -260,6 +266,7 @@ class TestModeDerivation(unittest.TestCase):
             "gates": [
                 gate("fixonly_entry"),
                 gate("phase2_to_phase3"),
+                gate("convergence"),
                 gate("phase3_exit"),
                 gate("workflow_exit"),
             ],
@@ -365,6 +372,80 @@ class TestCliStateFileGuards(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
 
+class TestConvergenceIsRequired(unittest.TestCase):
+    """SKILL.md's gate table marks `convergence` mandatory; so does this script."""
+
+    def test_normal_run_without_convergence_is_invalid(self):
+        gates = [g for g in NORMAL_RUN if g["step"] != "convergence"]
+        report = validate_gates(gates, "normal")
+        self.assertFalse(report["valid"])
+        self.assertIn("convergence", report["missing_steps"])
+
+    def test_fix_only_run_without_convergence_is_invalid(self):
+        gates = [
+            gate("fixonly_entry"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("workflow_exit"),
+        ]
+        self.assertIn("convergence", validate_gates(gates, "fix-only")["missing_steps"])
+
+    def test_phase_3_never_ran_so_convergence_is_not_expected(self):
+        gates = [gate("phase1_to_phase2"), gate("workflow_exit")]
+        self.assertTrue(validate_gates(gates, "no-improvement")["valid"])
+        self.assertTrue(
+            validate_gates([gate("workflow_exit", result="fail")], "error-halt")["valid"]
+        )
+
+
+class TestScopeVerifyIsConditional(unittest.TestCase):
+    """`scope_verify` is mandatory exactly when the run applied edits."""
+
+    def test_required_when_edits_were_applied(self):
+        report = validate_gates(NORMAL_RUN, "normal", edits_applied=True)
+        self.assertFalse(report["valid"])
+        self.assertIn("scope_verify", report["missing_steps"])
+
+    def test_satisfied_by_the_event(self):
+        gates = NORMAL_RUN + [gate("scope_verify")]
+        self.assertTrue(validate_gates(gates, "normal", edits_applied=True)["valid"])
+
+    def test_not_required_when_no_edits_were_applied(self):
+        self.assertTrue(validate_gates(NORMAL_RUN, "normal")["valid"])
+
+
+class TestDeriveEditsApplied(unittest.TestCase):
+    """The condition comes from the state file, never from a caller flag."""
+
+    def test_positive_edit_count(self):
+        self.assertTrue(derive_edits_applied({"applied_edits": {"edit_count": 2}}))
+
+    def test_zero_edit_count(self):
+        self.assertFalse(derive_edits_applied({"applied_edits": {"edit_count": 0}}))
+
+    def test_absent_or_malformed(self):
+        for state in ({}, {"applied_edits": None}, {"applied_edits": {}},
+                      {"applied_edits": {"edit_count": "2"}},
+                      {"applied_edits": {"edit_count": True}}, None, []):
+            self.assertFalse(derive_edits_applied(state), state)
+
+
+class TestHaltSequenceTail(unittest.TestCase):
+    """A fail followed by convergence + workflow_exit is a halt, not progress."""
+
+    def test_convergence_in_the_tail_does_not_warn(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("convergence", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["warnings"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -381,6 +462,7 @@ class TestResumedRuns(unittest.TestCase):
         return [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit"),
         ]
@@ -399,5 +481,6 @@ class TestResumedRuns(unittest.TestCase):
 
     def test_resumed_is_orthogonal_to_mode(self):
         gates = [gate("resume"), gate("fixonly_entry"), gate("phase2_to_phase3"),
+                 gate("convergence"),
                  gate("phase3_exit"), gate("workflow_exit")]
         self.assertTrue(validate_gates(gates, "fix-only", resumed=True)["valid"])

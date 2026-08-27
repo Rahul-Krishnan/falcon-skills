@@ -22,6 +22,10 @@ What it checks:
      when non-done, non-skipped steps remain) — the executor does not get
      to pick the gate set it is graded against. --mode is an explicit
      override; a contradiction with the derived mode draws a warning.
+     `scope_verify` is required exactly when the state file records applied
+     edits (applied_edits.edit_count > 0), matching SKILL.md's "mandatory
+     when edits were applied"; that condition is derived from the state
+     file too, never from a caller flag.
   3. Fail semantics: a "fail" event is legitimate when it is terminal —
      the pipeline halted there, followed at most by the mandated final
      workflow_exit event(s) — or when a later "pass" for the same step
@@ -40,7 +44,7 @@ import json
 import sys
 from pathlib import Path
 
-from hone_common import derive_gate_mode
+from hone_common import HALT_SEQUENCE_STEPS, derive_gate_mode
 
 VALID_RESULTS = ("pass", "fail")
 
@@ -84,9 +88,19 @@ VALID_JUDGES = _load_valid_judges()
 
 # Events required for each run mode. Handoff events (handoff_<name>) are
 # emitted per validation attempt and are not part of a fixed expected set.
+#
+# `convergence` sits in the two modes that reach Phase 3. SKILL.md's gate
+# table marks it mandatory, and a gate the table calls mandatory that this
+# script does not check is prose: nothing stops a run from omitting it.
 REQUIRED_STEPS = {
-    "normal": ("phase1_to_phase2", "phase2_to_phase3", "phase3_exit", "workflow_exit"),
-    "fix-only": ("fixonly_entry", "phase2_to_phase3", "phase3_exit", "workflow_exit"),
+    "normal": (
+        "phase1_to_phase2", "phase2_to_phase3", "convergence",
+        "phase3_exit", "workflow_exit",
+    ),
+    "fix-only": (
+        "fixonly_entry", "phase2_to_phase3", "convergence",
+        "phase3_exit", "workflow_exit",
+    ),
     "error-halt": ("workflow_exit",),
     # Phase 1 found nothing to improve, so Phase 2 and Phase 3 never ran.
     "no-improvement": ("phase1_to_phase2", "workflow_exit"),
@@ -139,17 +153,46 @@ def _rubric_errors(index: int, rubric: object) -> list[str]:
     return errors
 
 
-def _expected_steps(mode: str, resumed: bool = False) -> tuple[str, ...]:
-    """Expected event set for a mode, plus 'resume' when the run was resumed.
+def _expected_steps(
+    mode: str, resumed: bool = False, edits_applied: bool = False
+) -> tuple[str, ...]:
+    """Expected event set for a mode, plus the two conditional events.
 
     Resumption is orthogonal to mode (any mode can be resumed), so it is a
-    flag rather than a fifth mode.
+    flag rather than a fifth mode. `scope_verify` is the same shape: SKILL.md
+    marks it mandatory "when edits were applied", which is a property of the
+    run, not of its mode. Both are derived from the state file in main() and
+    never taken from a caller flag -- an executor allowed to declare "no edits
+    applied" could switch off the check that catches its out-of-scope edits.
     """
     steps = REQUIRED_STEPS.get(mode, ())
-    return steps + ("resume",) if resumed else steps
+    if edits_applied:
+        steps = steps + ("scope_verify",)
+    if resumed:
+        steps = steps + ("resume",)
+    return steps
 
 
-def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
+def derive_edits_applied(state: object) -> bool:
+    """Whether the run applied at least one Phase 2 edit, per the state file.
+
+    Reads `applied_edits.edit_count`, the field validate_handoff.py already
+    requires of the phase2_apply handoff.
+    """
+    if not isinstance(state, dict):
+        return False
+    applied = state.get("applied_edits")
+    if not isinstance(applied, dict):
+        return False
+    count = applied.get("edit_count")
+    if isinstance(count, bool) or not isinstance(count, (int, float)):
+        return False
+    return count > 0
+
+
+def validate_gates(
+    gates: list, mode: str, resumed: bool = False, edits_applied: bool = False
+) -> dict:
     """Return a report dict describing schema, completeness, and fail-semantics."""
     errors: list[str] = []
     warnings: list[str] = []
@@ -159,10 +202,13 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
             "valid": False,
             "mode": mode,
             "resumed": resumed,
+            "edits_applied": edits_applied,
             "gate_count": 0,
             "errors": ["gates is not a list"],
             "warnings": [],
-            "missing_steps": list(_expected_steps(mode, resumed)),
+            "missing_steps": list(
+                _expected_steps(mode, resumed, edits_applied)
+            ),
         }
 
     for index, gate in enumerate(gates):
@@ -226,15 +272,19 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
     # Fail semantics: terminal, or repaired by a later pass for the same
     # step. "Terminal" means the pipeline halted at that fail: SKILL.md
     # mandates a final workflow_exit event before ANY exit, so a legitimate
-    # halt (error halt, regression auto-revert) is followed by workflow_exit
-    # event(s), never by unrelated forward progress. Requiring the literal
-    # last index flagged every documented halt shape and invited the
+    # halt (error halt, regression auto-revert) is followed by the rest of
+    # the halt sequence, never by unrelated forward progress. Requiring the
+    # literal last index flagged every documented halt shape and invited the
     # executor to append a fabricated repair pass to silence the warning.
+    # `convergence` joins workflow_exit in that tail: it is the check the
+    # failure capped, and score_execution.score_gate_compliance scores the
+    # same shape the same way.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
         terminal = all(
-            isinstance(later, dict) and later.get("step") == "workflow_exit"
+            isinstance(later, dict)
+            and later.get("step") in HALT_SEQUENCE_STEPS
             for later in gates[index + 1 :]
         )
         repaired = any(
@@ -256,7 +306,11 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
         for g in gates
         if isinstance(g, dict) and isinstance(g.get("step"), str)
     }
-    missing = [step for step in _expected_steps(mode, resumed) if step not in emitted]
+    missing = [
+        step
+        for step in _expected_steps(mode, resumed, edits_applied)
+        if step not in emitted
+    ]
     for step in missing:
         if step == "resume":
             errors.append(
@@ -270,6 +324,7 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
         "valid": not errors,
         "mode": mode,
         "resumed": resumed,
+        "edits_applied": edits_applied,
         "gate_count": len(gates),
         "errors": errors,
         "warnings": warnings,
@@ -339,7 +394,10 @@ def main() -> None:
     else:
         mode = "normal"
 
-    report = validate_gates(state.get("gates", []), mode, args.resumed)
+    edits_applied = derive_edits_applied(state)
+    report = validate_gates(
+        state.get("gates", []), mode, args.resumed, edits_applied
+    )
 
     if (
         args.mode is not None
