@@ -107,9 +107,23 @@ STEP_PATTERNS = [
 ECHOED_GATE_CAP = 0.7
 
 # Gate/validation keywords
+# Inflected forms must match: a response discussing "gates[]", "validation",
+# or "validate_handoff.py" is discussing gates, and the bare-stem \b anchors
+# missed all three (\bgate\b fails on "gates", \bvalidate\b fails on
+# "validation" and on "validate_handoff").
 GATE_KEYWORDS = re.compile(
-    r"\b(?:gate|checklist|validate|STOP|rubric|interaction schema)\b",
+    r"\b(?:gates?|checklists?|validat(?:e|es|ed|ing|ion|ions|or|ors)"
+    r"|STOP|rubrics?|interaction schema)",
     re.IGNORECASE,
+)
+
+# A leading interrogative closed by a question mark is a clarification request
+# whatever nouns it uses. Without it, the documented argument-validation
+# fallback ("What artifact type do you want to hone? ...") matched no
+# clarification phrase and scored as no communication at all.
+INTERROGATIVE_OPENER = re.compile(
+    r"^\s*(?:what|which|who|where|how)\b[^?]{0,200}\?",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # State file path patterns
@@ -143,7 +157,14 @@ USER_NOUN_PATTERN = re.compile(r"\busers?\b")
 ERROR_INDICATOR_PATTERN = re.compile(
     r"\b(?:file not found|not found|no files|no uncommitted changes|no changes"
     r"|empty|too complex|stop|error|cannot|requires|verify the path"
-    r"|missing|invalid|failed|arguments)"
+    r"|missing|invalid|failed|arguments"
+    # Vocabulary of the argument-validation fallbacks skills must emit
+    # verbatim when AskUserQuestion is unavailable. "not a valid" is not
+    # caught by "invalid", and "conflict" was absent entirely, so a
+    # correct halt scored 0.0 for using the exact wording its own skill
+    # body mandates.
+    r"|not a valid|is not valid|conflict|choose one|must be one of"
+    r"|unrecognized|not recognized)"
 )
 
 # Patterns for content that should be excluded from voice compliance scoring
@@ -481,6 +502,20 @@ def _extract_steps_from_artifact(artifact_content: str) -> list[str]:
     return [text for _pos, text in sorted(positioned)]
 
 
+def _tool_input(entry: dict) -> dict:
+    """Return a timeline entry's tool_input as a mapping, whatever it holds.
+
+    `entry.get("tool_input") or {}` guards None but not a string: a non-empty
+    string is truthy, so it survives the `or` and raises AttributeError on the
+    next .get. The caller swallows that into composite 0.0, so a summary
+    string in one field read as total artifact failure across every dimension
+    of that test. Hand-recorded and third-party traces carry strings here
+    routinely.
+    """
+    value = entry.get("tool_input")
+    return value if isinstance(value, dict) else {}
+
+
 def _tool_name(entry: dict) -> str:
     """The tool name on a timeline entry, under either key the runners emit.
 
@@ -570,7 +605,7 @@ def _extract_gate_events(
             continue
         # `or {}` / `or ""` (not .get defaults): tool_use entries can carry an
         # explicit tool_input: null, which the default would pass through.
-        tool_input = entry.get("tool_input") or {}
+        tool_input = _tool_input(entry)
         file_path = tool_input.get("file_path") or ""
         if not STATE_FILE_PATTERN.search(file_path):
             continue
@@ -732,13 +767,13 @@ def score_state_persistence(timeline: list[dict]) -> dict[str, float | str]:
         tool_name = _tool_name(entry)
         if tool_name in ("Write", "Edit"):
             # `or {}` / `or ""`: tool_use entries can carry explicit nulls.
-            tool_input = entry.get("tool_input") or {}
+            tool_input = _tool_input(entry)
             file_path = tool_input.get("file_path") or ""
             if STATE_FILE_PATTERN.search(file_path):
                 return {"score": 1.0, "evidence": f"State file written: {file_path}"}
         elif tool_name == "Bash":
             # Check for cat/echo/heredoc writes to state files in the command
-            command = (entry.get("tool_input") or {}).get("command") or ""
+            command = _tool_input(entry).get("command") or ""
             if STATE_FILE_PATTERN.search(command) and any(
                 redirect in command for redirect in (">", "cat >", "tee ", ">>")
             ):
@@ -889,35 +924,69 @@ def score_parallel_efficiency(timeline: list[dict]) -> dict[str, float | str]:
     }
 
 
-def score_error_handling(timeline: list[dict]) -> dict[str, float | str]:
-    """Score error recovery: errors followed by diagnostic tool calls."""
-    error_entries = []
-    for index, entry in enumerate(timeline):
-        if entry.get("is_error"):
-            error_entries.append(index)
+# Vocabulary that separates a reported halt from silent abandonment.
+REPORTS_ERROR = re.compile(
+    r"\b(?:error|invalid|not valid|corrupt(?:ed|ion)?|malformed|unparse\w*"
+    r"|cannot|can't|unable|fail(?:ed|ure|s)?|halt(?:ing|ed)?|stopping|stopped"
+    r"|missing|truncat\w*|decode\w*|JSONDecodeError|abort\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def score_error_handling(
+    timeline: list[dict], agent_response: str = ""
+) -> dict[str, float | str]:
+    """Score error handling: investigate the recoverable, halt on the fatal.
+
+    Two responses to an error are correct, and both score:
+
+      1. Investigate, the error is followed by diagnostic tool calls.
+      2. Halt and report, the executor stops and says what broke.
+
+    Only the third response, continuing as though nothing happened, fails.
+    Counting solely case 1 inverted the score on every artifact whose
+    documented response to a fatal condition is to stop: hone's own
+    corrupt-state rule is "halt with an error message including the file
+    path. Do not proceed", so an executor that obeyed it scored 0.0 while one
+    that ignored it and kept reading files scored 1.0.
+    """
+    error_entries = [i for i, entry in enumerate(timeline) if entry.get("is_error")]
 
     if not error_entries:
         return {"score": 1.0, "evidence": "No errors encountered"}
 
-    recovered = 0
     diagnostic_tools = {"Read", "Bash", "Grep", "Glob"}
+    handled = 0
+    halted = 0
 
     for error_idx in error_entries:
-        for follow_idx in range(error_idx + 1, min(error_idx + 4, len(timeline))):
-            follow = timeline[follow_idx]
-            if (
-                follow.get("step_type") == "tool_use"
-                and _tool_name(follow) in diagnostic_tools
-            ):
-                recovered += 1
-                break
+        rest = timeline[error_idx + 1 :]
+
+        investigated = any(
+            entry.get("step_type") == "tool_use"
+            and _tool_name(entry) in diagnostic_tools
+            for entry in rest[:3]
+        )
+        if investigated:
+            handled += 1
+            continue
+
+        # A halt: no further tool use, and the executor named the problem.
+        # Trailing text alone is not enough, since abandoning the task
+        # ("I gave up.") is the failure this dimension exists to catch.
+        no_further_tool_use = not any(e.get("step_type") == "tool_use" for e in rest)
+        said = " ".join(
+            e.get("content", "") for e in rest if e.get("step_type") == "text"
+        )
+        if no_further_tool_use and REPORTS_ERROR.search(f"{said} {agent_response}"):
+            handled += 1
+            halted += 1
 
     total_errors = max(1, len(error_entries))
-    score = recovered / total_errors
-    return {
-        "score": round(score, 4),
-        "evidence": f"{recovered}/{total_errors} errors recovered from",
-    }
+    evidence = f"{handled}/{total_errors} errors handled"
+    if halted:
+        evidence += f" ({halted} by halting and reporting)"
+    return {"score": round(handled / total_errors, 4), "evidence": evidence}
 
 
 def score_trigger_accuracy(
@@ -1045,7 +1114,7 @@ def score_early_termination(timeline: list[dict]) -> dict[str, float | str]:
     # `or {}` / `or ""`: tool_use entries can carry explicit nulls.
     wrote_state = any(
         _tool_name(t) in ("Write", "Edit")
-        and STATE_FILE_PATTERN.search((t.get("tool_input") or {}).get("file_path") or "")
+        and STATE_FILE_PATTERN.search(_tool_input(t).get("file_path") or "")
         for t in tool_uses
     )
 
@@ -1157,8 +1226,10 @@ def score_user_communication(
         asks_the_user = bool(ASK_VERB_PATTERN.search(response_lower)) and bool(
             USER_NOUN_PATTERN.search(response_lower)
         )
-        asks_user = "askuserquestion" in response_lower or (
-            "?" in agent_response and (asks_the_user or clarification_phrase)
+        asks_user = (
+            "askuserquestion" in response_lower
+            or ("?" in agent_response and (asks_the_user or clarification_phrase))
+            or bool(INTERROGATIVE_OPENER.search(agent_response))
         )
         if asks_user:
             return {
@@ -1242,8 +1313,20 @@ def score_quality_checks(
         else:
             violations.append(f"MISSING: '{phrase}'")
 
+    # required_absent asks what the executor SAID, not what it looked at.
+    # Scanning tool_result content penalizes an executor for reading a file
+    # containing the phrase, and the file it is told to read is the very
+    # artifact the forbidden vocabulary comes from, so a correct halt fails
+    # the moment its timeline is recorded.
+    authored = agent_response
+    for entry in timeline:
+        if entry.get("step_type") == "text":
+            content = entry.get("content", "")
+            if content:
+                authored += " " + content
+
     for phrase in required_absent:
-        if not _has_unnegated_occurrence(phrase, combined):
+        if not _has_unnegated_occurrence(phrase, authored):
             checks_passed += 1
         else:
             violations.append(f"FORBIDDEN present: '{phrase}'")
@@ -1284,7 +1367,7 @@ def _is_artifact_write_entry(entry: dict) -> bool:
     simulation-mode entries describe the write in prose under "content".
     Check both so state-file writes are excluded in either shape.
     """
-    tool_input = entry.get("tool_input") or {}
+    tool_input = _tool_input(entry)
     file_path = tool_input.get("file_path", "") if isinstance(tool_input, dict) else ""
     if file_path:
         # A real path is authoritative: classify on it alone. Content sniffing
@@ -1479,7 +1562,7 @@ def _score_single_test(
             # the dimension stays visible as evidence, and semantic judgment
             # belongs to the LLM judge until a KE-specific deterministic
             # dimension exists to score.
-            dimensions["error_handling"] = score_error_handling(timeline)
+            dimensions["error_handling"] = score_error_handling(timeline, agent_response)
             partial_scoring = True
             inconclusive = True
             active_weights = {}
@@ -1510,7 +1593,7 @@ def _score_single_test(
             dimensions["gate_compliance"] = score_gate_compliance(
                 timeline, agent_response, artifact_content
             )
-            dimensions["error_handling"] = score_error_handling(timeline)
+            dimensions["error_handling"] = score_error_handling(timeline, agent_response)
             dimensions["quality_checks"] = score_quality_checks(
                 agent_response, timeline, required_present, required_absent
             )
@@ -1535,7 +1618,7 @@ def _score_single_test(
             dimensions["gate_compliance"] = score_gate_compliance(
                 timeline, agent_response, artifact_content
             )
-            dimensions["error_handling"] = score_error_handling(timeline)
+            dimensions["error_handling"] = score_error_handling(timeline, agent_response)
             dimensions["quality_checks"] = score_quality_checks(
                 agent_response, timeline, required_present, required_absent
             )
@@ -1565,7 +1648,7 @@ def _score_single_test(
             dimensions["output_structure"] = score_output_structure(
                 agent_response, artifact_content
             )
-            dimensions["error_handling"] = score_error_handling(timeline)
+            dimensions["error_handling"] = score_error_handling(timeline, agent_response)
             dimensions["quality_checks"] = score_quality_checks(
                 agent_response, timeline, required_present, required_absent
             )
@@ -1588,7 +1671,7 @@ def _score_single_test(
             partial_scoring = True
             inconclusive = True
             dimensions["voice_compliance"] = score_voice_compliance(agent_response)
-            dimensions["error_handling"] = score_error_handling(timeline)
+            dimensions["error_handling"] = score_error_handling(timeline, agent_response)
             active_weights = {}
 
     elif artifact_type == "hook":
@@ -1597,7 +1680,7 @@ def _score_single_test(
             "output_structure": score_output_structure(
                 agent_response, artifact_content
             ),
-            "error_handling": score_error_handling(timeline),
+            "error_handling": score_error_handling(timeline, agent_response),
         }
         # Untimed results (no duration_seconds key) and runs without a
         # declared performance_budget_seconds skip the performance dimension
@@ -1622,7 +1705,7 @@ def _score_single_test(
             "output_structure": score_output_structure(
                 agent_response, artifact_content
             ),
-            "error_handling": score_error_handling(timeline),
+            "error_handling": score_error_handling(timeline, agent_response),
         }
         if duration is not None and perf_budget:
             dimensions["performance"] = score_performance(duration, perf_budget)

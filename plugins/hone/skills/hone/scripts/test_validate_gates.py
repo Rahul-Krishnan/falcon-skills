@@ -367,3 +367,37 @@ class TestCliStateFileGuards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestResumedRuns(unittest.TestCase):
+    """A resumed run must record that it resumed (regression: TC-011).
+
+    The compaction-resume path was the one documented recovery path with no
+    gate event, so a correct resume left no trace and scored 0.0 on
+    gate_compliance.
+    """
+
+    def _normal(self):
+        return [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("workflow_exit"),
+        ]
+
+    def test_resumed_without_resume_event_is_invalid(self):
+        report = validate_gates(self._normal(), "normal", resumed=True)
+        self.assertFalse(report["valid"])
+        self.assertIn("resume", report["missing_steps"])
+
+    def test_resumed_with_resume_event_is_valid(self):
+        report = validate_gates([gate("resume")] + self._normal(), "normal", resumed=True)
+        self.assertTrue(report["valid"])
+
+    def test_resume_not_required_when_not_resumed(self):
+        self.assertTrue(validate_gates(self._normal(), "normal", resumed=False)["valid"])
+
+    def test_resumed_is_orthogonal_to_mode(self):
+        gates = [gate("resume"), gate("fixonly_entry"), gate("phase2_to_phase3"),
+                 gate("phase3_exit"), gate("workflow_exit")]
+        self.assertTrue(validate_gates(gates, "fix-only", resumed=True)["valid"])

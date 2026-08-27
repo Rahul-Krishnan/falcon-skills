@@ -166,7 +166,7 @@ If both `--auto` and `--confirm` are present: **STOP.** You MUST call `AskUserQu
 - `{reuse}` — `--reuse-criteria` to skip test case generation
 - `{fix_only}` — `--fix-only` to skip eval and jump to reading latest results
 - `{no_visualize}` — `--no-visualize` to skip HTML report
-- `{workers}` — `--workers N` (default 2) parallel eval runner workers
+- `{workers}` — `--workers N` (default 6) parallel eval runner workers. A 12-case suite at 2 workers runs as 6 sequential waves, and wall clock is set by the slowest case in each wave rather than by total work. Lower it only for a documented resource constraint (rate limit, memory), never to economize on tokens.
 - `{with_baseline}` — `--with-baseline` to run without-skill baseline comparison
 - `{skip_trigger}` — `--skip-trigger-test` to skip description trigger testing
 
@@ -179,6 +179,12 @@ If both `--auto` and `--confirm` are present: **STOP.** You MUST call `AskUserQu
 RUN_ID="hone-{name}-$(date +%Y%m%d-%H%M)"   # eg hone-recap-20260713-0022
 ```
 The state file is keyed per RUN, not per session. Two `/hone` runs in one session, which is what happens when you sweep several artifacts back to back, would otherwise collide on a single session-keyed file and overwrite each other's scores.
+
+**Resume protocol (after compaction, or across sessions).** If the glob below returns a path, you are resuming. Re-read this SKILL.md and the active phase's reference file, resume at the first step not marked `done`, and emit the `resume` gate event. Do **not** re-emit events already on disk; they survived, the resume is what did not. A resume that records nothing is indistinguishable from a skipped one. Validate with `--resumed`:
+
+```bash
+python3 <skill-dir>/scripts/validate_gates.py "$STATE_FILE" --resumed --json
+```
 
 **Recovering RUN_ID after compaction:** the timestamp is not reconstructible from memory, so do not try to recompute it. Recover the path by globbing for the most recent match:
 ```bash
@@ -256,7 +262,19 @@ Emit `fail` on each failed validation and `pass` on the re-validation that clear
 17. **Constraint compilation.** When improving a multi-step artifact, scan for MUST/CRITICAL/NEVER/ALWAYS/MANDATORY keywords. For each, ask: could this be a deterministic post-hoc check instead of an LLM instruction? If yes, add a validator script, gate checklist, or bash assertion. Skip judgment constraints that genuinely require LLM reasoning (eg "MUST write clear summaries"). The heuristic: if the constraint can be verified by checking tool call traces, file existence, output format, or numeric limits, it should be a check, not an instruction.
 18. **Auto mode where autonomy is plausible.** Skills that could run unattended document `--auto` (or an explicit reject-at-entry with a reason). Attended-only skills may omit it entirely. Hooks and scripts are exempt (no argument interface).
 
+19. **Eval power, not just eval score.** A score is only actionable if the criteria set could have produced a verdict. Before scoring, run `check_eval_power.py` on the criteria: fewer than 5 distinct test cases means the run is `underpowered`, which is neither a pass nor a regression. When comparing rounds, the same script runs an exact one-sided sign test over discordant (non-tied) cases; ties hold the discordant count down rather than being discarded. Median-of-three resampling (Phase 3) controls variance and cannot substitute for power.
+
+    **Difficulty calibration.** A case that every model tier passes, and one that every tier fails, both carry zero ranking signal. Run the suite against a cheap and an expensive tier: if both agree on a case, it is not discriminating and its cost buys nothing. A suite saturating near 1.0 is not evidence of a good artifact, it is evidence the suite stopped measuring. Replace saturated cases with ones drawn from observed failures rather than adding more of what already passes.
+20. **Criteria measure outcomes, not recitation.** Criteria derived from the artifact test whether the artifact was recited, so an artifact that grows a section and a matching check scores better every round while behaving identically. Run `check_overfit.py` after criteria generation or enrichment: it classifies each scored item as `outcome`, `technique`, or `vocabulary` and fails over the ratio threshold. Rewrite flagged items to describe the result the user needed, never the procedure or the artifact's wording. `required_absent` lists are exempt by construction (they assert the vocabulary must NOT appear).
+21. **Edits stay inside the artifact.** Preference 11 stops hone clobbering someone else's change; it does not stop hone changing a file nobody asked it to touch. Snapshot before Phase 2 edits and verify after, with `check_scope.py`. Git diff alone is insufficient in both directions: an untracked file produces no diff, and a file already dirty before the run shows one it did not cause. Only the content-hash manifest can attribute a change to this run. A violation halts the round.
+22. **Retire constraints, not just add them.** Preference 17 only ever compiles constraints in, so artifacts grow monotonically and nothing removes a rule that stopped earning its context. When a constraint looks like dead weight, ablate it: remove it, re-run the existing criteria, and keep it only if a test regresses. An ablation that changes no score is evidence the constraint was inert, and removing it is an improvement under preference 6 (the artifact gets cheaper to follow at identical quality).
+
+    **Start with scaffolding written against an older model.** Verification nudges ("include a final verification step", "use a subagent to verify"), retry ladders, and elaborate task decomposition were written for models that under-verified. Current models over-verify when told to, to the point of stalling in self-verification loops, so these instructions now cost accuracy as well as tokens. Ablate them first, one at a time, and re-run. Deterministic checks are not in this category: a script that reads a file back is a gate, not a nudge, and stays.
+
 **Preference interactions:** When proposing improvements, certain preferences pull in opposite directions. Surface and resolve these tensions explicitly in the Phase 2 improvement plan:
+- **Quality vs Efficiency (6 vs 19):** Raising the case count to clear the power floor costs eval wall-clock. Resolve in favor of 19: a fast verdict that cannot distinguish improvement from noise is not a cheaper answer, it is no answer.
+- **Constraint-compilation vs Constraint-ablation (17 vs 22):** These pull in opposite directions by design. Resolve by direction of evidence: compile a constraint in when a failure was observed, ablate one out when removing it moves no test. Never ablate a constraint that guards an irreversible action, regardless of score.
+- **Programmatic enrichment vs Outcome criteria (Phase 1 Step 6 vs 20):** Enrichment derives checks from the artifact, which is exactly what 20 flags. Resolve by keeping enrichment for `required_absent` (exempt) and routing enriched positive checks through `check_overfit.py` before they enter the criteria set.
 - **Quality vs Efficiency (6 vs 5):** Adding quality checks adds latency. Resolve by adding checks only where they gate irreversible actions (edits, publishes, pushes).
 - **Never-reduce-parallelism vs Constraint-compilation (2 vs 17):** Converting an LLM instruction to a deterministic check may serialize previously parallel steps. Resolve by running checks in parallel with independent steps where possible, or document the sequential dependency.
 - **Never-fewer-tokens vs Description-guardrails (3 vs 12):** Anti-pattern guidance adds tokens to descriptions. Resolve by treating guardrail additions as quality improvements (pref 6 overrides pref 3 when the token increase directly serves output quality).
@@ -265,11 +283,16 @@ Document your tension resolution in the improvement plan table (Phase 2 Step 5).
 
 ## Model Selection
 
-- **Main thread:** the session model (Fable 5) for synthesis, improvement strategy, edit design.
-- **Per-test analysis:** Sonnet subagents (`model: "sonnet"`) for individual test case analysis.
-- **eval runner:** Uses its own configured model.
+Name tiers, never specific models. Model names go stale within a release or two, and a hardcoded name silently pins this skill to whatever was current when the line was written.
 
-**Python dependency note:** The `structural_audit.py`, `score_execution.py`, and `analyze_results.py` scripts use only stdlib and work with system Python. The `validate_eval_criteria.py` script also uses only stdlib (no PyYAML required since criteria are now JSON).
+- **Main thread:** the session model, inherited. Synthesis, improvement strategy, and edit design are the highest-judgment work in the pipeline, so this is the one place not to economize.
+- **Subagents:** inherit unless there is a reason to pin. Reach for **reasoning effort before model choice**: every current model exposes a graded effort ladder, and dropping effort on a mechanical stage is cheaper and less disruptive than swapping tiers. Manual thinking-token budgets have been removed from current models, so effort is the knob that still exists.
+- **Fan-out stages** (per-test analysis, per-finding verification) are the candidates for a lower tier or lower effort. **Fresh-eyes analysis is not**: its whole value is independent judgment quality.
+- **eval runner:** uses its own configured model.
+
+Effort tiers and their token cost are worth measuring on your own suite rather than assumed. Escalating effort on uncertainty buys accuracy at *extra* token cost rather than saving any, so escalate deliberately.
+
+**Python dependency note:** Every bundled script is stdlib-only and works with system Python, including `structural_audit.py`, `score_execution.py`, `analyze_results.py`, `validate_eval_criteria.py` (no PyYAML required since criteria are JSON), and the four preference-19-to-22 checks: `check_eval_power.py`, `check_overfit.py`, `check_scope.py`, `check_convergence.py`. Each has a `test_*.py` beside it; run `python3 -m unittest discover -s <skill-dir>/scripts` after changing any of them.
 
 ## Execution Efficiency Rules
 
@@ -279,7 +302,7 @@ Apply these to every phase and every step. Violations are latency bugs.
 
 **Batch independent Bash calls.** The multi-type artifact search already specifies a single Bash call for all type checks. Apply the same rule everywhere: if multiple Bash or Glob operations are independent, combine them into one tool-use turn.
 
-**Parallel subagents.** When spawning multiple eval subagents in Step 8, launch all of them concurrently in a single message — not in a sequential loop.
+**Parallel subagents.** When spawning multiple eval subagents in Step 8, launch all of them concurrently in a single message — not in a sequential loop. Say the width you want explicitly; models do not fan out wide on their own and default to a couple of calls per turn unless asked. **Turn count, not token count, is what drives wall clock**, so collapsing fifteen sequential turns into five wide ones is the single largest latency win available here.
 
 **These rules apply WITHIN steps, not BETWEEN phases.** Execution efficiency rules govern HOW to run tool calls inside a step — they do not replace phase-level gate events. After any phase boundary parallel operations, still append the phase transition gate event to `gates[]` in the workflow state file before proceeding. Demonstrating parallel reads without a corresponding gate event scores 0.0 on gate_compliance.
 
@@ -291,10 +314,13 @@ Emit these flat, with keys in this order, and `result` set to `"pass"` or `"fail
 
 | `step` | When emitted | Typical `result` | Mandatory |
 |---|---|---|---|
+| `resume` | resuming a run from an existing state file (after compaction, or across sessions) | `pass` | yes, on any resume |
 | `phase1_to_phase2` | entering Phase 2 after evaluation | `pass` | yes, unless `--fix-only` |
 | `fixonly_entry` | `--fix-only` run, in place of `phase1_to_phase2` | `pass` | yes, on `--fix-only` |
 | `handoff_<name>` | each handoff validation attempt | `fail` then `pass` on repair | yes, when validation runs |
 | `phase2_to_phase3` | entering Phase 3 after edits | `pass` | yes |
+| `scope_verify` | after Phase 2 edits | `pass`, or **`fail` on out-of-scope change** | yes, when edits were applied |
+| `convergence` | after the Phase 3 convergence check | `pass`, or **`fail` on escalate or capped** | yes |
 | `phase3_exit` | leaving Phase 3 | `pass`, or **`fail` on regression auto-revert** | yes |
 | `workflow_exit` | before any exit | `pass`, or **`fail` on error halt** | yes |
 
@@ -330,9 +356,12 @@ Load before Step 1 (Discover). Skip this phase entirely if `--fix-only` flag is 
 4. **Step 4: Criteria Audit** -- Audit existing criteria for setup issues (skills/commands only).
 5. **Step 5: Generate criteria** -- Create eval test cases per artifact type profile.
 6. **Step 6: Programmatic Enrichment** -- Add deterministic `required_present` checks from artifact.
+6a. **Step 6a: Overfit Classification** -- Run `check_overfit.py <criteria> --artifact <path> --json` (preference 20). Rewrite every `technique` and `vocabulary` item as an outcome before proceeding. Enrichment derives checks from the artifact, so this is not optional after Step 6 runs.
+6b. **Step 6b: Power Check** -- Run `check_eval_power.py <criteria> --json` (preference 19). Below the distinct-case floor, add cases discriminating a different property; never add repeats to clear the floor.
 7. **Step 7: Side-Effect Guard** -- Sandbox dangerous commands (git push, gh pr create, external messaging) in eval criteria.
 8. **Step 8: Run eval runner** -- Pre-launch `validate_eval_criteria.py` gate (mandatory), then execute evaluation.
 9. **Step 9: Deterministic Scoring** -- Run `score_execution.py` on results.
+9a. **Step 9a: Power Verdict** -- Re-run `check_eval_power.py` with `--before`/`--after` when a prior round exists. Record `power_verdict` (`powered`, `underpowered`, `improved`, `regressed`, `inconclusive`) in the state file alongside the composite. A composite without a power verdict is a number, not a result. An `underpowered` run is neither a pass nor a regression: fix the criteria set, then re-run Phase 1. Report it as `underpowered`, never as a pass.
 10. **Step 10: Spec Artifacts** -- Generate evals.json, grading.json, timing.json, benchmark.json.
 11. **Step 11: Reference Validation** -- Check all file/script/skill references exist on disk.
 12. **Step 12: Report** -- Generate score report and HTML visualization.
@@ -357,8 +386,14 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 3. **Step 3: Fresh-Eyes Analysis** -- Parallel fresh-eyes subagent (inherits session model) for independent improvement proposals.
 4. **Step 4: Reconcile + Analyze** -- Merge main thread + fresh-eyes findings, performance audit.
 5. **Step 5: Improvement Plan** -- Table of proposed changes with fix type and source. When multiple preferences apply to the same change, note any tension between them and state which takes precedence.
+5a. **Step 5a: Scope Snapshot** -- Before any edit, run `check_scope.py --root ~/.claude/skills --manifest /tmp/scope-${RUN_ID}.json --snapshot` (preference 21).
 6. **Step 6: Apply Edits** -- Stale-write guard, apply edits, generate companion validators if needed.
+6a. **Step 6a: Scope Verify** -- Run `check_scope.py --root ~/.claude/skills --manifest /tmp/scope-${RUN_ID}.json --scope <artifact-dir> --verify`. On a violation: revert **only** the paths listed in `violations`, emit a `fail` gate event for `scope_verify`, and halt the round.
+
+   Revert nothing listed under `preexisting_dirty_out_of_scope`. Those files were already uncommitted when the run started and are byte-identical to the snapshot, so reverting them destroys someone else's work rather than undoing yours. Only the hash manifest can attribute a change to this run; a git diff cannot tell your edit from the one already sitting there.
+6b. **Step 6b: Constraint Ablation** -- For each constraint flagged as possible dead weight (preference 22), remove it, re-run the existing criteria, and restore it only if a test regresses. Record each ablation and its outcome in the ledger. Skip constraints guarding irreversible actions.
 7. **Step 7: Description Trigger Testing** -- Test whether the description triggers correctly on realistic prompts.
+8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json` with `id`, `severity`, `file`, `summary`, and `status` (`open`, `fixed`, or `rejected`). The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence.
 
 ## Phase 3: Re-Evaluate
 
@@ -370,7 +405,8 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 2. Run deterministic scoring on re-eval results.
 3. Compare before/after per-dimension. A drop > 0.1 in any dimension flags a regression, but resample first: re-run the tests feeding that dimension twice more and take the median. Auto-revert only if the median still shows the drop. If `score_execution.py` changed this round, re-score the prior round's results with the updated scorer before comparing, so a measurement change is not read as an artifact change.
 4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid. Read back the state file to verify. Check mechanical exit gate.
-5. If rounds remain and score is improving: loop back to Phase 2.
+5. Run `check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json`. It returns `converged`, `capped`, `escalate`, or `in_progress`. On `escalate` the loop is not converging (a finding open three rounds, blocking count flat, or a finding closed in one file reopened in another): halt, emit a `fail` gate event for `convergence`, and report the finding ids. On `capped`, report it as **capped, not converged**, and list the open blocking findings. Never present a capped run as success.
+6. If rounds remain, the verdict is `in_progress`, and the score is improving: loop back to Phase 2.
 
 **Mechanical exit gate** decides when to stop (state file, not LLM judgment). See Phase 3 reference for full BLOCKED/ALLOWED conditions.
 

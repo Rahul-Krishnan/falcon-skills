@@ -235,7 +235,11 @@ class TestGateCompliance(unittest.TestCase):
             _make_timeline_entry(1, "tool_result"),
             _make_timeline_entry(2, "text", content="I did the thing. Moving on."),
         ]
-        result = score_gate_compliance(timeline, "Just did it, no validation.")
+        # The fixture must contain no gate vocabulary at all, negated or not:
+        # the legacy fallback is a substring counter, not a parser, so
+        # "no validation" reads as a validation mention. It is capped at
+        # 0.7 precisely because it is that crude.
+        result = score_gate_compliance(timeline, "Just did it and moved on.")
         self.assertEqual(result["score"], 0.0)
 
 
@@ -2031,6 +2035,88 @@ class TestUserCommunicationWordBoundaries(unittest.TestCase):
 
         self.assertIsNone(ERROR_INDICATOR_PATTERN.search("the backstop held firm"))
         self.assertIsNotNone(ERROR_INDICATOR_PATTERN.search("stopped before step 2"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestMergedRegressions(unittest.TestCase):
+    """Regressions carried forward from the local fork (2026-08-26 hone run)."""
+
+    TC004 = "'widget' is not a valid artifact type. Choose one: skill, command, hook, script."
+    TC005 = ("--auto and --confirm conflict. Choose one: --auto (run unattended) "
+             "or --confirm (approve each step).")
+    TC003 = ("What artifact type do you want to hone? (e.g. /hone skill recap)\n"
+             "- skill: Evaluate a skill\n- command: Evaluate a command\n\n"
+             "What is the artifact name?")
+
+    def test_mandated_fallbacks_are_recognized_as_communication(self):
+        from score_execution import score_user_communication
+        for name, text in (("TC-003", self.TC003), ("TC-004", self.TC004), ("TC-005", self.TC005)):
+            with self.subTest(case=name):
+                self.assertGreater(score_user_communication([], text)["score"], 0.0)
+
+    def test_silence_is_still_not_communication(self):
+        from score_execution import score_user_communication
+        self.assertEqual(score_user_communication([], "Done.")["score"], 0.0)
+
+    def test_gate_keywords_match_inflections(self):
+        from score_execution import score_gate_compliance
+        for text in ("Any gates[] events already appended survive on disk.",
+                     "I re-ran validate_handoff.py and confirmed validation passed.",
+                     "The validator reported zero errors."):
+            with self.subTest(text=text):
+                self.assertGreater(score_gate_compliance([], text)["score"], 0.0)
+
+    def test_required_absent_ignores_tool_results(self):
+        from score_execution import score_quality_checks
+        timeline = [{"step_type": "tool_result",
+                     "content": "## Phase 1: Evaluate\nRun the eval runner...", "is_error": False}]
+        r = score_quality_checks("'widget' is not a valid artifact type.", timeline,
+                                 [], ["Phase 1", "eval runner"])
+        self.assertEqual(r["score"], 1.0)
+
+    def test_required_absent_still_catches_what_executor_said(self):
+        from score_execution import score_quality_checks
+        timeline = [{"step_type": "text", "content": "Proceeding to Phase 1 now."}]
+        self.assertLess(score_quality_checks("Halting.", timeline, [], ["Phase 1"])["score"], 1.0)
+
+    def test_reported_halt_counts_as_error_handling(self):
+        from score_execution import score_error_handling
+        timeline = [
+            {"step_type": "tool_use", "tool_name": "Read",
+             "tool_input": {"file_path": "/tmp/w.json"}, "is_error": False},
+            {"step_type": "tool_result", "content": "truncated -- JSONDecodeError", "is_error": True},
+            {"step_type": "text", "content": "Halting: the state file at /tmp/w.json is corrupt."},
+        ]
+        r = score_error_handling(timeline)
+        self.assertEqual(r["score"], 1.0)
+        self.assertIn("halting", r["evidence"].lower())
+
+    def test_silent_abandonment_still_scores_zero(self):
+        from score_execution import score_error_handling
+        timeline = [
+            {"step_type": "tool_use", "tool_name": "Bash",
+             "tool_input": {"command": "x"}, "is_error": True},
+            {"step_type": "tool_result", "content": "failed", "is_error": True},
+            {"step_type": "text", "content": "I gave up."},
+        ]
+        self.assertEqual(score_error_handling(timeline)["score"], 0.0)
+
+    def test_string_tool_input_does_not_zero_the_test(self):
+        from score_execution import _score_single_test
+        record = {
+            "test_id": "TC-X",
+            "agent_response": "## Result\nDid the work.",
+            "execution_timeline": [
+                {"step_type": "tool_use", "tool_name": "Bash",
+                 "tool_input": "python3 something.py", "is_error": False},
+                {"step_type": "text", "content": "done"},
+            ],
+        }
+        scored = _score_single_test(record, "skill", "", None)
+        self.assertIsNotNone(scored.get("composite"))
 
 
 if __name__ == "__main__":

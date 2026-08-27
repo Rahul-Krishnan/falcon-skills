@@ -139,7 +139,17 @@ def _rubric_errors(index: int, rubric: object) -> list[str]:
     return errors
 
 
-def validate_gates(gates: list, mode: str) -> dict:
+def _expected_steps(mode: str, resumed: bool = False) -> tuple[str, ...]:
+    """Expected event set for a mode, plus 'resume' when the run was resumed.
+
+    Resumption is orthogonal to mode (any mode can be resumed), so it is a
+    flag rather than a fifth mode.
+    """
+    steps = REQUIRED_STEPS.get(mode, ())
+    return steps + ("resume",) if resumed else steps
+
+
+def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
     """Return a report dict describing schema, completeness, and fail-semantics."""
     errors: list[str] = []
     warnings: list[str] = []
@@ -148,10 +158,11 @@ def validate_gates(gates: list, mode: str) -> dict:
         return {
             "valid": False,
             "mode": mode,
+            "resumed": resumed,
             "gate_count": 0,
             "errors": ["gates is not a list"],
             "warnings": [],
-            "missing_steps": list(REQUIRED_STEPS.get(mode, ())),
+            "missing_steps": list(_expected_steps(mode, resumed)),
         }
 
     for index, gate in enumerate(gates):
@@ -245,13 +256,20 @@ def validate_gates(gates: list, mode: str) -> dict:
         for g in gates
         if isinstance(g, dict) and isinstance(g.get("step"), str)
     }
-    missing = [step for step in REQUIRED_STEPS.get(mode, ()) if step not in emitted]
+    missing = [step for step in _expected_steps(mode, resumed) if step not in emitted]
     for step in missing:
-        errors.append(f"missing required gate event '{step}' for mode '{mode}'")
+        if step == "resume":
+            errors.append(
+                "missing required gate event 'resume': the run resumed from a "
+                "state file but never recorded that it did"
+            )
+        else:
+            errors.append(f"missing required gate event '{step}' for mode '{mode}'")
 
     return {
         "valid": not errors,
         "mode": mode,
+        "resumed": resumed,
         "gate_count": len(gates),
         "errors": errors,
         "warnings": warnings,
@@ -273,6 +291,15 @@ def main() -> None:
             "default the mode is derived from the state file's steps{} map "
             "(hone_common.derive_gate_mode); a contradiction between the "
             "override and the derived mode draws a warning."
+        ),
+    )
+    parser.add_argument(
+        "--resumed",
+        action="store_true",
+        help=(
+            "The run resumed from an existing state file (after compaction or "
+            "across sessions). Requires a 'resume' event in addition to the "
+            "mode's normal set. Orthogonal to --mode."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")
@@ -312,7 +339,7 @@ def main() -> None:
     else:
         mode = "normal"
 
-    report = validate_gates(state.get("gates", []), mode)
+    report = validate_gates(state.get("gates", []), mode, args.resumed)
 
     if (
         args.mode is not None

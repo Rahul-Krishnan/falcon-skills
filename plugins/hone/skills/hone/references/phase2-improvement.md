@@ -191,7 +191,7 @@ json.dump(state.get('fresh_eyes', {}), open('$OUTPUT_DIR/fresh_eyes.json', 'w'),
 
 **Pre-step validation:** Verify `triaged_results` from Step 1: `actionable_failures` is an array (may be empty), each entry has `test_id` and `score` fields. `structural_findings` is an array. If Step 3 ran, verify `fresh_eyes.proposals` is an array. If shape is malformed: STOP, report "P2 Step 4 handoff validation failed."
 
-**Main thread analysis:** For 3+ failing tests, use parallel sonnet subagents. For 1-2, analyze inline. Map each failure to a specific section of the artifact. Classify fix type.
+**Main thread analysis:** For 3+ failing tests, fan out to parallel subagents (inheriting the session model, reduced effort: per-test analysis is bounded work against a single failure). For 1-2, analyze inline. Map each failure to a specific section of the artifact. Classify fix type.
 
 **Reconciliation (when fresh-eyes ran):** Compare the main thread's findings against `fresh_eyes.proposals`:
 
@@ -270,6 +270,15 @@ improvement_plan: {
 }
 ```
 
+### Step 5a: Scope Snapshot (before any edit)
+
+Preference 11 stops hone clobbering someone else's change; nothing stops hone changing a file nobody asked it to touch. Snapshot before the first edit:
+
+```bash
+python3 <skill-dir>/scripts/check_scope.py --root ~/.claude/skills \
+  --manifest /tmp/scope-${RUN_ID}.json --snapshot --json
+```
+
 ### Step 6: Apply Edits
 
 **Pre-step validation:** Verify `improvement_plan` from Step 5: `edits` is a non-empty array, each entry has `id`, `target_section`, and `change` fields, `total_approved >= 1`. If shape is malformed: STOP, report "P2 Step 6 handoff validation failed."
@@ -327,6 +336,17 @@ applied_edits: {
 }
 ```
 Write `artifact_before_snapshot` (pre-edit file content) to the workflow state file before applying edits. Phase 3 reads this for auto-revert on regression.
+
+### Step 6a: Scope Verify (after edits)
+
+```bash
+python3 <skill-dir>/scripts/check_scope.py --root ~/.claude/skills \
+  --manifest /tmp/scope-${RUN_ID}.json --scope {artifact_dir_name} --verify --json
+```
+
+On `scope_violation`: revert **only** the paths listed under `violations`, emit a `fail` gate event for `scope_verify`, and halt the round.
+
+**Revert nothing listed under `preexisting_dirty_out_of_scope`.** Those files were already uncommitted when the run started and are byte-identical to the snapshot, so this run did not touch them. Reverting them destroys whatever uncommitted work was sitting there. Git reports a file dirty relative to HEAD; the manifest reports it relative to this run's start, and only the manifest can attribute a change to you.
 
 ### Step 7: Description Trigger Testing (skills and commands only)
 
