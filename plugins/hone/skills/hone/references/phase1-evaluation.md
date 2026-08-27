@@ -211,7 +211,6 @@ This step audits existing eval criteria for common setup and effectiveness issue
 - [ ] Audit script ran and produced valid JSON output (parseable, has `findings` array)
 - [ ] All fixable findings were applied via Edit tool
 - [ ] If `should_regenerate`: criteria file was deleted (verified), routing overridden to "regenerate"
-- [ ] If fixes applied: re-read criteria from disk to confirm changes persisted
 - [ ] LLM classification completed for all test cases with `checks` entries
 - [ ] Workflow state updated with `criteria_audit` result
 

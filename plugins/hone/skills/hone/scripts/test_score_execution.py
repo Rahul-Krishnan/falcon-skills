@@ -2121,3 +2121,142 @@ class TestMergedRegressions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCoordinatedListDenial(unittest.TestCase):
+    """A single denial covering a comma-separated list excuses every item."""
+
+    HALT = (
+        "Halted: workflow state file is corrupt. Emitted the workflow_exit fail "
+        "event and stopped without proceeding to structural audit, criteria "
+        "generation, or the eval runner."
+    )
+
+    def test_first_list_item_is_negated(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(_has_unnegated_occurrence("structural audit", self.HALT))
+
+    def test_middle_list_item_is_negated(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(_has_unnegated_occurrence("criteria generation", self.HALT))
+
+    def test_last_list_item_is_negated(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(_has_unnegated_occurrence("eval runner", self.HALT))
+
+    def test_clean_halt_scores_full_quality_checks(self):
+        from score_execution import score_quality_checks
+
+        result = score_quality_checks(
+            self.HALT,
+            [],
+            [],
+            ["structural audit", "criteria generation", "eval runner"],
+        )
+        self.assertEqual(result["score"], 1.0)
+
+    def test_semicolon_still_scopes_a_second_clause(self):
+        from score_execution import _has_unnegated_occurrence
+
+        text = "I did not read the file; running the structural audit now."
+        self.assertTrue(_has_unnegated_occurrence("structural audit", text))
+
+    def test_conjunction_after_denial_still_violates(self):
+        from score_execution import _has_unnegated_occurrence
+
+        text = "Skipping the audit and proceeding to Phase 2 now."
+        self.assertTrue(_has_unnegated_occurrence("proceeding to Phase 2", text))
+
+    def test_cue_in_a_previous_sentence_does_not_excuse(self):
+        from score_execution import _has_unnegated_occurrence
+
+        text = "It does not run the audit. Now running the structural audit."
+        self.assertTrue(_has_unnegated_occurrence("structural audit", text))
+
+
+class TestHaltSequenceGateCompliance(unittest.TestCase):
+    """A fail followed only by the halt is the documented outcome, not a lapse."""
+
+    @staticmethod
+    def _resp(gates):
+        return "\n".join(json.dumps(g) for g in gates)
+
+    def test_detecting_fail_before_exit_is_compliant(self):
+        from score_execution import score_gate_compliance
+
+        gates = [
+            {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
+            {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
+        ]
+        from score_execution import ECHOED_GATE_CAP
+
+        result = score_gate_compliance([], self._resp(gates))
+        self.assertEqual(result["score"], ECHOED_GATE_CAP)
+
+    def test_extra_truthful_fail_does_not_lower_the_score(self):
+        from score_execution import score_gate_compliance
+
+        two = [
+            {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
+            {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
+        ]
+        three = [
+            {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
+            {"step": "convergence", "judge": "automated", "result": "fail"},
+            {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
+        ]
+        self.assertEqual(
+            score_gate_compliance([], self._resp(three))["score"],
+            score_gate_compliance([], self._resp(two))["score"],
+        )
+
+    def test_fail_followed_by_forward_progress_is_still_non_compliant(self):
+        from score_execution import score_gate_compliance
+
+        gates = [
+            {"step": "phase1_to_phase2", "judge": "self-check", "result": "fail"},
+            {"step": "phase2_to_phase3", "judge": "self-check", "result": "pass"},
+            {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
+        ]
+        self.assertLess(score_gate_compliance([], self._resp(gates))["score"], 1.0)
+
+
+class TestRequireTimelineGate(unittest.TestCase):
+    """--require-timeline names the records with no recorded tool call."""
+
+    def test_records_with_tool_calls_have_no_gaps(self):
+        from score_execution import find_timeline_gaps
+
+        records = [
+            {
+                "test_id": "TC-001",
+                "execution_timeline": [
+                    {"step_type": "tool_use", "tool_name": "Read", "tool_input": {}}
+                ],
+            }
+        ]
+        self.assertEqual(find_timeline_gaps(records), [])
+
+    def test_missing_timeline_is_a_gap(self):
+        from score_execution import find_timeline_gaps
+
+        self.assertEqual(find_timeline_gaps([{"test_id": "TC-002"}]), ["TC-002"])
+
+    def test_text_only_timeline_is_a_gap(self):
+        from score_execution import find_timeline_gaps
+
+        records = [
+            {
+                "test_id": "TC-003",
+                "execution_timeline": [{"step_type": "text", "content": "I would run it"}],
+            }
+        ]
+        self.assertEqual(find_timeline_gaps(records), ["TC-003"])
+
+    def test_non_object_record_is_a_gap(self):
+        from score_execution import find_timeline_gaps
+
+        self.assertEqual(find_timeline_gaps(["oops"]), ["<non-object record>"])

@@ -42,7 +42,13 @@ NEGATION_CUES = re.compile(
 )
 
 # How far back to look for a negation cue preceding a forbidden-phrase match.
-NEGATION_WINDOW = 40
+# Wide enough to span a coordinated list under one denial ("did not reach the
+# audit, criteria generation, or the eval runner"): at 40 the cue fell outside
+# the window for every item after the first, so a correct halt that enumerated
+# what it skipped scored as if it had done those things. The sentence-break
+# trim below, not this constant, is what stops a cue in a previous sentence
+# from excusing the current one.
+NEGATION_WINDOW = 160
 
 # Clause boundaries inside a sentence. A negation only excuses the clause it
 # governs: "Skipping the audit and proceeding to Phase 2" negates the audit,
@@ -56,6 +62,14 @@ CLAUSE_BREAK_RE = re.compile(
     r",|;|\bthen\b|\band\b|\bbut\b|\bbefore\b|\bafter\b|\bwhile\b",
     re.IGNORECASE,
 )
+
+# A comma inside a denial is a list separator far more often than a clause
+# boundary, so the scan walks back through commas and stops at the first
+# non-comma break. Same rationale as "or" above: "did not reach A, B, or C" is
+# one denial covering three items, and resetting at each comma left every item
+# after the first with a cue-free window. A semicolon remains a hard break, so
+# a genuine two-clause statement still has punctuation that scopes it.
+COMMA_BREAK_RE = re.compile(r"^,$")
 
 
 def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
@@ -71,9 +85,11 @@ def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
             _head, sep, tail = window.rpartition(breaker)
             if sep:
                 window = tail
-        clause_breaks = list(CLAUSE_BREAK_RE.finditer(window))
-        if clause_breaks:
-            window = window[clause_breaks[-1].end() :]
+        for brk in reversed(list(CLAUSE_BREAK_RE.finditer(window))):
+            if COMMA_BREAK_RE.match(brk.group()):
+                continue
+            window = window[brk.end() :]
+            break
         if not NEGATION_CUES.search(window):
             return True
     return False
@@ -689,7 +705,19 @@ def score_gate_compliance(
                 and later.get("result") == "pass"
                 for later in gates[idx + 1 :]
             )
-            if terminal or repaired:
+            # A halt sequence is several events long: the step that detected the
+            # failure, optionally the convergence check it capped, then
+            # workflow_exit recording the stop. Only the last of those is
+            # terminal, so requiring terminality marked the detecting event
+            # non-compliant on every correct halt -- and an executor that
+            # emitted one more truthful fail event scored lower than one that
+            # emitted fewer. Forward progress is a later `pass` on some step
+            # other than the exit itself; the exit is the halt, not progress.
+            halted = not any(
+                later.get("result") == "pass" and later.get("step") != "workflow_exit"
+                for later in gates[idx + 1 :]
+            )
+            if terminal or repaired or halted:
                 compliant += 1
                 expected_fail += 1
 
@@ -1919,6 +1947,24 @@ def score_from_results(
     }
 
 
+def find_timeline_gaps(results: list) -> list[str]:
+    """Test ids whose record carries no recorded tool call.
+
+    Every timeline-derived dimension defaults high on an empty list, so a
+    record with no `execution_timeline` -- or one made up entirely of `text`
+    entries -- scores vacuous passes rather than failing loudly. The bar is
+    recorded tool calls, matching the inconclusive guard in _score_single_test.
+    """
+    gaps = []
+    for entry in results:
+        if not isinstance(entry, dict):
+            gaps.append("<non-object record>")
+            continue
+        if not _get_tool_uses(entry.get("execution_timeline") or []):
+            gaps.append(str(entry.get("test_id", "unknown")))
+    return gaps
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Deterministic scoring of eval runner execution data"
@@ -1943,6 +1989,11 @@ def main() -> None:
     parser.add_argument(
         "--json", action="store_true", help="Output JSON (default: human-readable)"
     )
+    parser.add_argument(
+        "--require-timeline",
+        action="store_true",
+        help="Exit non-zero, naming the test ids, if any record has no recorded tool call",
+    )
     args = parser.parse_args()
 
     artifact_content = ""
@@ -1953,6 +2004,26 @@ def main() -> None:
                 artifact_content = artifact_path.read_text()
             except OSError as exc:
                 print(f"WARNING: Could not read artifact: {exc}", file=sys.stderr)
+
+    if args.require_timeline:
+        try:
+            with open(args.results_json) as handle:
+                raw = json.load(handle)
+        except (json.JSONDecodeError, OSError) as exc:
+            print(f"ERROR: --require-timeline could not read {args.results_json}: {exc}", file=sys.stderr)
+            sys.exit(2)
+        records, _key = extract_results(raw)
+        gaps = find_timeline_gaps(records)
+        if not records:
+            print("ERROR: --require-timeline found no test records", file=sys.stderr)
+            sys.exit(2)
+        if gaps:
+            print(
+                "ERROR: --require-timeline: no recorded tool calls for "
+                + ", ".join(gaps),
+                file=sys.stderr,
+            )
+            sys.exit(2)
 
     criteria_index = _load_criteria_index(args.criteria_path)
     try:

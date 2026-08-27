@@ -573,6 +573,56 @@
       "required_present": [
         "gate_compliance"
       ]
+    },
+    {
+      "id": "TC-013",
+      "name": "hone-phase2-round-sandbox-writes",
+      "category": "execution",
+      "test_profile": "side_effect_guarded",
+      "prompt": "Read ~/.claude/skills/hone/SKILL.md and references/phase2-improvement.md. Run the Phase 2 improvement round (iteration 1) against the sandbox artifact at /tmp/hone-seg-sandbox/SKILL.md, applying findings F1 and F2, updating the workflow state file at /tmp/hone-seg-sandbox/workflow-hone-smelt-seg.json, and emitting the round's gate event.",
+      "runner_context": "SIMULATION MODE: work only inside the sandbox paths named below. Never write to, edit, or delete anything under ~/.claude/skills/. The state-file writes and artifact edits this test measures are REAL tool calls against the sandbox copy and must actually be issued.\n\nSANDBOX SETUP (already done for you, do not recreate it):\n  artifact under improvement : /tmp/hone-seg-sandbox/SKILL.md\n  workflow state file        : /tmp/hone-seg-sandbox/workflow-hone-smelt-seg.json\n\nThe state file is seeded with Phase 1 marked done and `phase2_improve` in_progress:\n\n  {\"workflow\": \"hone\", \"run_id\": \"hone-smelt-seg\",\n   \"steps\": {\"phase1_structural_audit\": \"done\", \"phase1_evaluate\": \"done\",\n             \"phase2_fresh_eyes\": \"done\", \"phase2_improve\": \"in_progress\",\n             \"phase3_reevaluate\": \"pending\"},\n   \"iteration\": {\"current\": 1, \"max\": 3},\n   \"gates\": [{\"step\": \"phase1_to_phase2\", \"judge\": \"self-check\", \"result\": \"pass\", \"ts\": \"2026-08-27T09:00:00Z\"}]}\n\nPhase 2 fresh-eyes already produced two findings against the sandbox artifact:\n  F1  the Usage section lists flags in a different order than the Parse Arguments section\n  F2  Step 4 has no stated exit condition\n\nYour task: execute the Phase 2 improvement round for iteration 1 as hone specifies it.\nApply the two findings to /tmp/hone-seg-sandbox/SKILL.md, update the state file\n(step status, iteration, gate event), and report the round. Use real Write and Edit\ntool calls against the sandbox paths.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "Write",
+        "Edit"
+      ],
+      "target_skills": [
+        "~/.claude/skills/hone/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Applies both findings to the sandbox artifact and records the round in the state file, with a schema-valid gate event",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Makes no edits, or edits a path outside the sandbox",
+            "2": "Edits the artifact but never touches the state file",
+            "3": "Edits the artifact and the state file but emits no gate event or an invalid one",
+            "4": "Edits both findings, updates the state file, and emits a schema-valid gate event using pass or fail",
+            "5": "As 4, and the state file update is internally consistent: phase2_improve advanced, iteration recorded, gate appended to the existing gates array rather than replacing it"
+          }
+        },
+        {
+          "description": "Confirms the writes landed before reporting the round complete",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Reports the round complete having made no write at all",
+            "2": "Claims the edits and state update persisted with nothing in the timeline supporting it",
+            "3": "Confirms one of the two written paths",
+            "4": "Confirms both the artifact and the state file landed",
+            "5": "Confirms both, and the confirmation is a real tool call on the written path rather than prose"
+          }
+        }
+      ],
+      "required_present": [
+        "phase2_improve"
+      ],
+      "required_absent": [
+        "git push",
+        "gh pr create"
+      ]
     }
   ],
   "dimensions": {

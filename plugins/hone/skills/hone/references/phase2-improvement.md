@@ -292,7 +292,7 @@ Re-read the artifact from disk and compare its content to the `artifact_content`
 
 This prevents the exact failure mode where two CC sessions edit the same artifact and last-write-wins silently destroys the other session's work.
 
-Edit the artifact at `{edit_path}`. After all edits, re-read from disk to confirm they persisted.
+Edit the artifact at `{edit_path}`.
 
 **Validator Generation (multi-phase skills and commands only):**
 

@@ -196,7 +196,7 @@ Write state to `/tmp/workflow-${RUN_ID}.json` at start:
 ```json
 {"workflow": "hone", "steps": {"phase1_structural_audit": "pending", "phase1_criteria_audit": "pending", "phase1_evaluate": "pending", "phase1_spec_artifacts": "pending", "phase1_reference_validation": "pending", "phase2_fresh_eyes": "pending", "phase2_trigger_test": "pending", "phase2_improve": "pending", "phase3_reevaluate": "pending"}, "iteration": {"current": 0, "target": <max_rounds>}}
 ```
-Every key in this template maps to a step contract in `scripts/validate_handoff.py` `STEP_CONTRACTS` (including `phase1_spec_artifacts`, Phase 1 Step 10, and `phase2_trigger_test`, Phase 2 Step 7); seed all of them — the Mechanical Exit Gate iterates only keys present in `steps`, so an unseeded step can silently never run. Update each step to `"in_progress"` then `"done"` as you go. **After every Write or Edit to any file (state file, artifact, or eval criteria), immediately Read it back to verify the write persisted.** Before any exit, re-read the file: if steps remain non-done or iterations remain, keep going.
+Every key in this template maps to a step contract in `scripts/validate_handoff.py` `STEP_CONTRACTS` (including `phase1_spec_artifacts`, Phase 1 Step 10, and `phase2_trigger_test`, Phase 2 Step 7); seed all of them — the Mechanical Exit Gate iterates only keys present in `steps`, so an unseeded step can silently never run. Update each step to `"in_progress"` then `"done"` as you go. Before any exit, re-read the file: if steps remain non-done or iterations remain, keep going.
 
 **Corrupt state file:** If the state file cannot be parsed (corrupt or truncated JSON), emit
 
@@ -340,7 +340,7 @@ Use `"fail"` for a gate that did not clear (entering Phase 2 with nothing to imp
 **STOP. You MUST read [references/phase1-evaluation.md](references/phase1-evaluation.md) before executing any step below.** The bullets below are a navigation map only — the actual instructions, handoff schemas, gate checklists, and execution commands are in the reference file. Do not execute from this summary.
 
 Load before Step 1 (Discover). Skip this phase entirely if `--fix-only` flag is set. **When skipping due to `--fix-only`, follow these steps in order:**
-1. Mark all Phase 1 steps as `"skipped"` in the state file. Immediately Read back the state file to verify the write persisted.
+1. Mark all Phase 1 steps as `"skipped"` in the state file.
 2. Append a gate event to `gates[]`:
    ```json
    {"step": "fixonly_entry", "judge": "self-check", "result": "pass", "reason": "prior evaluation reused", "ts": "<ISO8601>"}
@@ -373,7 +373,7 @@ Load before Step 1 (Discover). Skip this phase entirely if `--fix-only` flag is 
 
 **Skip Phase 2** only when all three are false. Scores alone do not clear this gate: an artifact can score grade A while referencing a script that no longer exists, and a broken reference means the artifact is functionally broken regardless of its text quality. Check `reference_validation.broken` in the state file before deciding to skip.
 
-Before entering Phase 2, write a gate event to `gates[]` in the workflow state file. Gate events for successful transitions MUST use `result: "pass"` — the schema only accepts `"pass"` or `"fail"` (never `"enter_phase2"`, `"continue"`, or any other value). Read back the state file after writing to verify the gate event persisted.
+Before entering Phase 2, write a gate event to `gates[]` in the workflow state file. Gate events for successful transitions MUST use `result: "pass"` — the schema only accepts `"pass"` or `"fail"` (never `"enter_phase2"`, `"continue"`, or any other value).
 
 ## Phase 2: Improve
 
@@ -404,7 +404,7 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 1. Re-run eval runner with same criteria (blind evaluation — no mention of improvements).
 2. Run deterministic scoring on re-eval results.
 3. Compare before/after per-dimension. A drop > 0.1 in any dimension flags a regression, but resample first: re-run the tests feeding that dimension twice more and take the median. Auto-revert only if the median still shows the drop. If `score_execution.py` changed this round, re-score the prior round's results with the updated scorer before comparing, so a measurement change is not read as an artifact change.
-4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid. Read back the state file to verify. Check mechanical exit gate.
+4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid. Check mechanical exit gate.
 5. Run `check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json`. It returns `converged`, `capped`, `escalate`, or `in_progress`. On `escalate` the loop is not converging (a finding open three rounds, blocking count flat, or a finding closed in one file reopened in another): halt, emit a `fail` gate event for `convergence`, and report the finding ids. On `capped`, report it as **capped, not converged**, and list the open blocking findings. Never present a capped run as success.
 6. If rounds remain, the verdict is `in_progress`, and the score is improving: loop back to Phase 2.
 
@@ -417,10 +417,9 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 3. **Narrating the workflow in an error stop.** When stopping on a validation error, the error message and its options are the whole response. Say what is wrong and what the valid choices are, then stop. This applies to every halt, not just argument validation: on a corrupt state file or any mid-run error halt, report the failure, the file path, and how to resume. Do not inventory the work you are declining to do. Listing the steps you did not reach ("does not run the structural audit, does not generate criteria") reads as workflow narration and scores as a forbidden-phrase violation, even when phrased as a denial.
 4. **Naming internal machinery in fallback output.** When AskUserQuestion is unavailable and the fallback fires, the response is the question and its options and nothing else. Internal section names, step names, and script names belong in the state file, not in a user-facing stop message — a response that names them fails even when the question itself is correct.
 5. **Sequential reads for independent files.** When a phase starts by reading multiple unrelated files (artifact, reference file, state file), issuing them one at a time is a latency violation. Batch all independent Read calls into a single parallel tool-use turn.
-6. **Claiming verification without Read tool calls.** After every Write or Edit to any file, you MUST issue an actual Read tool call on the written path before proceeding. The scorer checks the tool call timeline, not the agent_response text. Describing verification in prose without an actual Read tool call is a hard failure for the verify_actions dimension.
-7. **Wrong result values in gate events.** Gate events only accept `"result": "pass"` or `"result": "fail"`. Using `"enter_phase2"`, `"enter_phase3"`, `"exit"`, `"continue"`, or any other value is a schema violation and causes gate_compliance to score 0.0. Use `"pass"` for all successful phase transitions.
-8. **Writing state file after reading reference files.** The state file MUST be written as the very first action. The Phase 1 STOP to read `phase1-evaluation.md` governs what you read before executing Phase 1 steps — it does NOT override state initialization. State file written after references = sequencing violation.
-9. **Omitting gate events when demonstrating parallel operations.** The Execution Efficiency Rules describe parallelism optimization for tool calls within steps — they do not replace inter-phase gate events. In SIMULATION MODE, include the corresponding gate event as JSON inline in your response. An executor showing parallel reads with no gate event scores 0.0 on gate_compliance.
+6. **Wrong result values in gate events.** Gate events only accept `"result": "pass"` or `"result": "fail"`. Using `"enter_phase2"`, `"enter_phase3"`, `"exit"`, `"continue"`, or any other value is a schema violation and causes gate_compliance to score 0.0. Use `"pass"` for all successful phase transitions.
+7. **Writing state file after reading reference files.** The state file MUST be written as the very first action. The Phase 1 STOP to read `phase1-evaluation.md` governs what you read before executing Phase 1 steps — it does NOT override state initialization. State file written after references = sequencing violation.
+8. **Omitting gate events when demonstrating parallel operations.** The Execution Efficiency Rules describe parallelism optimization for tool calls within steps — they do not replace inter-phase gate events. In SIMULATION MODE, include the corresponding gate event as JSON inline in your response. An executor showing parallel reads with no gate event scores 0.0 on gate_compliance.
 
 ## Context Compaction Protection
 
