@@ -22,6 +22,10 @@ What it checks:
      when non-done, non-skipped steps remain) — the executor does not get
      to pick the gate set it is graded against. --mode is an explicit
      override; a contradiction with the derived mode draws a warning.
+     `resume` is required exactly when the state file records
+     `"resumed": true`. That condition is read off the state file, so it
+     cannot be switched off by the caller; --resumed can only turn the
+     resume requirement on.
   3. Fail semantics: a "fail" event is legitimate when it is terminal —
      the pipeline halted there, followed at most by the mandated final
      workflow_exit event(s) — or when a later "pass" for the same step
@@ -40,7 +44,7 @@ import json
 import sys
 from pathlib import Path
 
-from hone_common import derive_gate_mode
+from hone_common import derive_gate_mode, is_halt_tail
 
 VALID_RESULTS = ("pass", "fail")
 
@@ -85,8 +89,14 @@ VALID_JUDGES = _load_valid_judges()
 # Events required for each run mode. Handoff events (handoff_<name>) are
 # emitted per validation attempt and are not part of a fixed expected set.
 REQUIRED_STEPS = {
-    "normal": ("phase1_to_phase2", "phase2_to_phase3", "phase3_exit", "workflow_exit"),
-    "fix-only": ("fixonly_entry", "phase2_to_phase3", "phase3_exit", "workflow_exit"),
+    "normal": (
+        "phase1_to_phase2", "phase2_to_phase3",
+        "phase3_exit", "workflow_exit",
+    ),
+    "fix-only": (
+        "fixonly_entry", "phase2_to_phase3",
+        "phase3_exit", "workflow_exit",
+    ),
     "error-halt": ("workflow_exit",),
     # Phase 1 found nothing to improve, so Phase 2 and Phase 3 never ran.
     "no-improvement": ("phase1_to_phase2", "workflow_exit"),
@@ -139,7 +149,39 @@ def _rubric_errors(index: int, rubric: object) -> list[str]:
     return errors
 
 
-def validate_gates(gates: list, mode: str) -> dict:
+def _expected_steps(mode: str, resumed: bool = False) -> tuple[str, ...]:
+    """Expected event set for a mode, plus the one conditional event.
+
+    Resumption is orthogonal to mode (any mode can be resumed), so it is a
+    flag rather than a fifth mode.
+
+    It is derived from the state file in main(), never read off a caller
+    flag that could switch it off -- an executor allowed to declare "not a
+    resume" would turn off the check that catches its unrecorded
+    resumption. `--resumed` survives only as a one-way override: it can add
+    the requirement, never remove the one the state file established.
+    """
+    steps = REQUIRED_STEPS.get(mode, ())
+    if resumed:
+        steps = steps + ("resume",)
+    return steps
+
+
+def derive_resumed(state: object) -> bool:
+    """Whether the run resumed from an existing state file, per the state file.
+
+    Reads `resumed`, which SKILL.md's resume protocol sets alongside the
+    `resume` gate event. Deriving it here is what makes the requirement
+    enforceable: the exit gate runs `validate_gates.py` with no flags, so a
+    resumption recorded only by a caller-supplied `--resumed` was never
+    checked at the one point where checking is mandatory. Two records of the
+    same fact also means dropping either one is a detectable error rather
+    than a silent one.
+    """
+    return isinstance(state, dict) and state.get("resumed") is True
+
+
+def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
     """Return a report dict describing schema, completeness, and fail-semantics."""
     errors: list[str] = []
     warnings: list[str] = []
@@ -148,10 +190,11 @@ def validate_gates(gates: list, mode: str) -> dict:
         return {
             "valid": False,
             "mode": mode,
+            "resumed": resumed,
             "gate_count": 0,
             "errors": ["gates is not a list"],
             "warnings": [],
-            "missing_steps": list(REQUIRED_STEPS.get(mode, ())),
+            "missing_steps": list(_expected_steps(mode, resumed)),
         }
 
     for index, gate in enumerate(gates):
@@ -215,17 +258,19 @@ def validate_gates(gates: list, mode: str) -> dict:
     # Fail semantics: terminal, or repaired by a later pass for the same
     # step. "Terminal" means the pipeline halted at that fail: SKILL.md
     # mandates a final workflow_exit event before ANY exit, so a legitimate
-    # halt (error halt, regression auto-revert) is followed by workflow_exit
-    # event(s), never by unrelated forward progress. Requiring the literal
-    # last index flagged every documented halt shape and invited the
+    # halt (error halt, regression auto-revert) is followed by the rest of
+    # the halt sequence, never by unrelated forward progress. Requiring the
+    # literal last index flagged every documented halt shape and invited the
     # executor to append a fabricated repair pass to silence the warning.
+    # `convergence` joins workflow_exit in that tail: it is the check the
+    # failure capped, and Phase 3 emits it after `phase3_exit`, so the failing
+    # step goes to the helper along with the tail. Both files call
+    # hone_common.is_halt_tail, so "the same shape" is now one function rather
+    # than two hand-copied conditions that had already drifted apart.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
-        terminal = all(
-            isinstance(later, dict) and later.get("step") == "workflow_exit"
-            for later in gates[index + 1 :]
-        )
+        terminal = is_halt_tail(gates[index + 1 :], gate.get("step"))
         repaired = any(
             isinstance(later, dict)
             and later.get("step") == gate.get("step")
@@ -245,13 +290,24 @@ def validate_gates(gates: list, mode: str) -> dict:
         for g in gates
         if isinstance(g, dict) and isinstance(g.get("step"), str)
     }
-    missing = [step for step in REQUIRED_STEPS.get(mode, ()) if step not in emitted]
+    missing = [
+        step
+        for step in _expected_steps(mode, resumed)
+        if step not in emitted
+    ]
     for step in missing:
-        errors.append(f"missing required gate event '{step}' for mode '{mode}'")
+        if step == "resume":
+            errors.append(
+                "missing required gate event 'resume': the run resumed from a "
+                "state file but never recorded that it did"
+            )
+        else:
+            errors.append(f"missing required gate event '{step}' for mode '{mode}'")
 
     return {
         "valid": not errors,
         "mode": mode,
+        "resumed": resumed,
         "gate_count": len(gates),
         "errors": errors,
         "warnings": warnings,
@@ -273,6 +329,17 @@ def main() -> None:
             "default the mode is derived from the state file's steps{} map "
             "(hone_common.derive_gate_mode); a contradiction between the "
             "override and the derived mode draws a warning."
+        ),
+    )
+    parser.add_argument(
+        "--resumed",
+        action="store_true",
+        help=(
+            "Force the 'resume' event requirement on. Normally derived from "
+            "the state file's `resumed` field, so passing this is only needed "
+            "for a run that resumed without recording it. One-way: it can add "
+            "the requirement, never remove one the state file established. "
+            "Orthogonal to --mode."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")
@@ -312,7 +379,8 @@ def main() -> None:
     else:
         mode = "normal"
 
-    report = validate_gates(state.get("gates", []), mode)
+    resumed = derive_resumed(state) or args.resumed
+    report = validate_gates(state.get("gates", []), mode, resumed)
 
     if (
         args.mode is not None

@@ -211,7 +211,6 @@ This step audits existing eval criteria for common setup and effectiveness issue
 - [ ] Audit script ran and produced valid JSON output (parseable, has `findings` array)
 - [ ] All fixable findings were applied via Edit tool
 - [ ] If `should_regenerate`: criteria file was deleted (verified), routing overridden to "regenerate"
-- [ ] If fixes applied: re-read criteria from disk to confirm changes persisted
 - [ ] LLM classification completed for all test cases with `checks` entries
 - [ ] Workflow state updated with `criteria_audit` result
 
@@ -454,6 +453,41 @@ paths as a plugin vs a local skill; hardcoding either path breaks the other.
 Substitute in memory only — do not write the substituted paths back to the
 criteria file on disk.
 
+**Fixture provisioning (before spawning):** a test case that measures real writes
+needs the files it writes against to exist. Any case carrying a `fixture_setup`
+block declares them, and **you** materialise it — in the parent, before that
+case's subagent starts — not the subagent:
+
+```json
+"fixture_setup": {
+  "root": "/tmp/<sandbox-dir>",
+  "reset": true,
+  "files": [{"path": "/tmp/<sandbox-dir>/<name>", "content": "<literal file content>"}]
+}
+```
+
+`reset: true` means delete `root` and recreate it, so each round starts from the
+same state rather than inheriting the previous round's edits. Write each `files`
+entry verbatim, then confirm every path exists before spawning. Placeholder
+substitution applies to `fixture_setup` paths and content too.
+
+The block is also what tells the scorer where the artifact under test lives.
+`verify_actions` and `research_first` ignore writes to scratch directories, and
+a sandbox under `/tmp` would otherwise be scratch: declaring it here exempts it,
+so a real `Edit` of `<root>/SKILL.md` is measured as an artifact write. Writes
+whose *file name* marks them as bookkeeping (`workflow-state*.json`,
+`state.json`, `eval_criteria.json`) stay excluded wherever they sit, including
+inside the sandbox. A case that measures real writes but declares no
+`fixture_setup` gets neither: its writes look like scratch and both dimensions
+return a free 1.0.
+
+Provisioning belongs in the parent for two reasons. A `runner_context` that told
+the subagent to create its own sandbox would fail the Step 4 hygiene audit, which
+rejects setup blocks and filesystem-mutating commands in `runner_context`. And the
+setup writes would land in the subagent's `execution_timeline`, where
+`state_persistence` and `gate_compliance` would score the fixture the runner
+handed it as work it did.
+
 Spawn one subagent per test case in the eval criteria (parallel, up to `{workers}` concurrent). Each subagent receives:
 - The full artifact content (skill dir or file)
 - The `runner_context` from the test case
@@ -504,6 +538,8 @@ Run the same subagent evaluation without loading the skill context. Write result
 ```bash
 python3 <skill-dir>/scripts/score_execution.py "$BASELINE_DIR/results.json" --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --json
 ```
+
+**No `--require-timeline` on the baseline.** Step 9 uses the flag because a skill-loaded run that produced no tool call is a harness defect. The baseline is run *without* the skill context, where a case the agent declines or answers in prose alone is a legitimate baseline outcome and the exact thing the delta is meant to measure. Requiring a timeline there turns that outcome into a non-zero exit with no documented response.
 
 The script writes `$BASELINE_DIR/deterministic_scores.json` next to the results file.
 
@@ -556,8 +592,10 @@ Step 9 validates: `completed` is true, `results_path` file exists on disk, `test
 After eval runner completes, run deterministic scoring on the same execution data:
 
 ```bash
-python3 <skill-dir>/scripts/score_execution.py $OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --json
+python3 <skill-dir>/scripts/score_execution.py $OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --require-timeline --json
 ```
+
+**`--require-timeline` is not optional on a suite that expects real tool calls.** Without it a record with no recorded tool call is scored silently: the test is marked `inconclusive` and dropped from the composite, so an eval that produced no evidence at all reports a clean composite over the cases that survived. The flag exits non-zero naming the test ids instead. Drop it only when every case in the suite is SIMULATION MODE with no real tool calls expected, and record `"require_timeline_waived": true` with the reason in the workflow state file when you do.
 
 Output written to: `$OUTPUT_DIR/deterministic_scores.json`
 

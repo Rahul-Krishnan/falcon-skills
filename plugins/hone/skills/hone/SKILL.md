@@ -166,7 +166,7 @@ If both `--auto` and `--confirm` are present: **STOP.** You MUST call `AskUserQu
 - `{reuse}` — `--reuse-criteria` to skip test case generation
 - `{fix_only}` — `--fix-only` to skip eval and jump to reading latest results
 - `{no_visualize}` — `--no-visualize` to skip HTML report
-- `{workers}` — `--workers N` (default 2) parallel eval runner workers
+- `{workers}` — `--workers N` (default 6) parallel eval runner workers. A 12-case suite at 2 workers runs as 6 sequential waves, and wall clock is set by the slowest case in each wave rather than by total work. Lower it only for a documented resource constraint (rate limit, memory), never to economize on tokens.
 - `{with_baseline}` — `--with-baseline` to run without-skill baseline comparison
 - `{skip_trigger}` — `--skip-trigger-test` to skip description trigger testing
 
@@ -180,6 +180,15 @@ RUN_ID="hone-{name}-$(date +%Y%m%d-%H%M)"   # eg hone-recap-20260713-0022
 ```
 The state file is keyed per RUN, not per session. Two `/hone` runs in one session, which is what happens when you sweep several artifacts back to back, would otherwise collide on a single session-keyed file and overwrite each other's scores.
 
+**Resume protocol (after compaction, or across sessions).** If the glob below returns a path, you are resuming. Re-read this SKILL.md and the active phase's reference file, resume at the first step not marked `done`, then record the resumption in two places:
+
+1. Set `"resumed": true` at the top level of the state file.
+2. Emit the `resume` gate event.
+
+Do **not** re-emit events already on disk; they survived, the resume is what did not. A resume that records nothing is indistinguishable from a skipped one.
+
+Both records matter. The `resumed` field is what makes the `resume` event *required*: the exit gate below runs `validate_gates.py` with no flags, and it reads that field to decide whether to demand the event. Setting the field and omitting the event fails the exit gate, which is the point. Do not run the gate check here — mid-run, steps are still `pending`, the derived mode is `error-halt`, and its only required event is the `workflow_exit` you have not reached yet, so it reports a failure every time. Validate at the exit gate, once, like every other run.
+
 **Recovering RUN_ID after compaction:** the timestamp is not reconstructible from memory, so do not try to recompute it. Recover the path by globbing for the most recent match:
 ```bash
 STATE_FILE=$(ls -t /tmp/workflow-hone-{name}-*.json 2>/dev/null | head -1)
@@ -190,7 +199,7 @@ Write state to `/tmp/workflow-${RUN_ID}.json` at start:
 ```json
 {"workflow": "hone", "steps": {"phase1_structural_audit": "pending", "phase1_criteria_audit": "pending", "phase1_evaluate": "pending", "phase1_spec_artifacts": "pending", "phase1_reference_validation": "pending", "phase2_fresh_eyes": "pending", "phase2_trigger_test": "pending", "phase2_improve": "pending", "phase3_reevaluate": "pending"}, "iteration": {"current": 0, "target": <max_rounds>}}
 ```
-Every key in this template maps to a step contract in `scripts/validate_handoff.py` `STEP_CONTRACTS` (including `phase1_spec_artifacts`, Phase 1 Step 10, and `phase2_trigger_test`, Phase 2 Step 7); seed all of them — the Mechanical Exit Gate iterates only keys present in `steps`, so an unseeded step can silently never run. Update each step to `"in_progress"` then `"done"` as you go. **After every Write or Edit to any file (state file, artifact, or eval criteria), immediately Read it back to verify the write persisted.** Before any exit, re-read the file: if steps remain non-done or iterations remain, keep going.
+Every key in this template maps to a step contract in `scripts/validate_handoff.py` `STEP_CONTRACTS` (including `phase1_spec_artifacts`, Phase 1 Step 10, and `phase2_trigger_test`, Phase 2 Step 7); seed all of them — the Mechanical Exit Gate iterates only keys present in `steps`, so an unseeded step can silently never run. Update each step to `"in_progress"` then `"done"` as you go. Before any exit, re-read the file: if steps remain non-done or iterations remain, keep going.
 
 **Corrupt state file:** If the state file cannot be parsed (corrupt or truncated JSON), emit
 
@@ -256,7 +265,12 @@ Emit `fail` on each failed validation and `pass` on the re-validation that clear
 17. **Constraint compilation.** When improving a multi-step artifact, scan for MUST/CRITICAL/NEVER/ALWAYS/MANDATORY keywords. For each, ask: could this be a deterministic post-hoc check instead of an LLM instruction? If yes, add a validator script, gate checklist, or bash assertion. Skip judgment constraints that genuinely require LLM reasoning (eg "MUST write clear summaries"). The heuristic: if the constraint can be verified by checking tool call traces, file existence, output format, or numeric limits, it should be a check, not an instruction.
 18. **Auto mode where autonomy is plausible.** Skills that could run unattended document `--auto` (or an explicit reject-at-entry with a reason). Attended-only skills may omit it entirely. Hooks and scripts are exempt (no argument interface).
 
+19. **Retire constraints, not just add them.** Preference 17 only ever compiles constraints in, so artifacts grow monotonically and nothing removes a rule that stopped earning its context. When a constraint looks like dead weight, ablate it: remove it, re-run the existing criteria, and keep it only if a test regresses. An ablation that changes no score is evidence the constraint was inert, and removing it is an improvement under preference 6 (the artifact gets cheaper to follow at identical quality).
+
+    **Start with scaffolding written against an older model.** Verification nudges ("include a final verification step", "use a subagent to verify"), retry ladders, and elaborate task decomposition were written for models that under-verified. Current models over-verify when told to, to the point of stalling in self-verification loops, so these instructions now cost accuracy as well as tokens. Ablate them first, one at a time, and re-run. Deterministic checks are not in this category: a script that reads a file back is a gate, not a nudge, and stays.
+
 **Preference interactions:** When proposing improvements, certain preferences pull in opposite directions. Surface and resolve these tensions explicitly in the Phase 2 improvement plan:
+- **Constraint-compilation vs Constraint-ablation (17 vs 19):** These pull in opposite directions by design. Resolve by direction of evidence: compile a constraint in when a failure was observed, ablate one out when removing it moves no test. Never ablate a constraint that guards an irreversible action, regardless of score.
 - **Quality vs Efficiency (6 vs 5):** Adding quality checks adds latency. Resolve by adding checks only where they gate irreversible actions (edits, publishes, pushes).
 - **Never-reduce-parallelism vs Constraint-compilation (2 vs 17):** Converting an LLM instruction to a deterministic check may serialize previously parallel steps. Resolve by running checks in parallel with independent steps where possible, or document the sequential dependency.
 - **Never-fewer-tokens vs Description-guardrails (3 vs 12):** Anti-pattern guidance adds tokens to descriptions. Resolve by treating guardrail additions as quality improvements (pref 6 overrides pref 3 when the token increase directly serves output quality).
@@ -265,11 +279,16 @@ Document your tension resolution in the improvement plan table (Phase 2 Step 5).
 
 ## Model Selection
 
-- **Main thread:** the session model (Fable 5) for synthesis, improvement strategy, edit design.
-- **Per-test analysis:** Sonnet subagents (`model: "sonnet"`) for individual test case analysis.
-- **eval runner:** Uses its own configured model.
+Name tiers, never specific models. Model names go stale within a release or two, and a hardcoded name silently pins this skill to whatever was current when the line was written.
 
-**Python dependency note:** The `structural_audit.py`, `score_execution.py`, and `analyze_results.py` scripts use only stdlib and work with system Python. The `validate_eval_criteria.py` script also uses only stdlib (no PyYAML required since criteria are now JSON).
+- **Main thread:** the session model, inherited. Synthesis, improvement strategy, and edit design are the highest-judgment work in the pipeline, so this is the one place not to economize.
+- **Subagents:** inherit unless there is a reason to pin. Reach for **reasoning effort before model choice**: every current model exposes a graded effort ladder, and dropping effort on a mechanical stage is cheaper and less disruptive than swapping tiers. Manual thinking-token budgets have been removed from current models, so effort is the knob that still exists.
+- **Fan-out stages** (per-test analysis, per-finding verification) are the candidates for a lower tier or lower effort. **Fresh-eyes analysis is not**: its whole value is independent judgment quality.
+- **eval runner:** uses its own configured model.
+
+Effort tiers and their token cost are worth measuring on your own suite rather than assumed. Escalating effort on uncertainty buys accuracy at *extra* token cost rather than saving any, so escalate deliberately.
+
+**Python dependency note:** Every bundled script is stdlib-only and works with system Python, including `structural_audit.py`, `score_execution.py`, `analyze_results.py`, `validate_eval_criteria.py` (no PyYAML required since criteria are JSON). Each has a `test_*.py` beside it; run `python3 -m unittest discover -s <skill-dir>/scripts` after changing any of them.
 
 ## Execution Efficiency Rules
 
@@ -279,7 +298,7 @@ Apply these to every phase and every step. Violations are latency bugs.
 
 **Batch independent Bash calls.** The multi-type artifact search already specifies a single Bash call for all type checks. Apply the same rule everywhere: if multiple Bash or Glob operations are independent, combine them into one tool-use turn.
 
-**Parallel subagents.** When spawning multiple eval subagents in Step 8, launch all of them concurrently in a single message — not in a sequential loop.
+**Parallel subagents.** When spawning multiple eval subagents in Step 8, launch all of them concurrently in a single message — not in a sequential loop. Say the width you want explicitly; models do not fan out wide on their own and default to a couple of calls per turn unless asked. **Turn count, not token count, is what drives wall clock**, so collapsing fifteen sequential turns into five wide ones is the single largest latency win available here.
 
 **These rules apply WITHIN steps, not BETWEEN phases.** Execution efficiency rules govern HOW to run tool calls inside a step — they do not replace phase-level gate events. After any phase boundary parallel operations, still append the phase transition gate event to `gates[]` in the workflow state file before proceeding. Demonstrating parallel reads without a corresponding gate event scores 0.0 on gate_compliance.
 
@@ -291,6 +310,7 @@ Emit these flat, with keys in this order, and `result` set to `"pass"` or `"fail
 
 | `step` | When emitted | Typical `result` | Mandatory |
 |---|---|---|---|
+| `resume` | resuming a run from an existing state file (after compaction, or across sessions) | `pass` | yes, on any resume |
 | `phase1_to_phase2` | entering Phase 2 after evaluation | `pass` | yes, unless `--fix-only` |
 | `fixonly_entry` | `--fix-only` run, in place of `phase1_to_phase2` | `pass` | yes, on `--fix-only` |
 | `handoff_<name>` | each handoff validation attempt | `fail` then `pass` on repair | yes, when validation runs |
@@ -314,7 +334,7 @@ Use `"fail"` for a gate that did not clear (entering Phase 2 with nothing to imp
 **STOP. You MUST read [references/phase1-evaluation.md](references/phase1-evaluation.md) before executing any step below.** The bullets below are a navigation map only — the actual instructions, handoff schemas, gate checklists, and execution commands are in the reference file. Do not execute from this summary.
 
 Load before Step 1 (Discover). Skip this phase entirely if `--fix-only` flag is set. **When skipping due to `--fix-only`, follow these steps in order:**
-1. Mark all Phase 1 steps as `"skipped"` in the state file. Immediately Read back the state file to verify the write persisted.
+1. Mark all Phase 1 steps as `"skipped"` in the state file.
 2. Append a gate event to `gates[]`:
    ```json
    {"step": "fixonly_entry", "judge": "self-check", "result": "pass", "reason": "prior evaluation reused", "ts": "<ISO8601>"}
@@ -344,7 +364,7 @@ Load before Step 1 (Discover). Skip this phase entirely if `--fix-only` flag is 
 
 **Skip Phase 2** only when all three are false. Scores alone do not clear this gate: an artifact can score grade A while referencing a script that no longer exists, and a broken reference means the artifact is functionally broken regardless of its text quality. Check `reference_validation.broken` in the state file before deciding to skip.
 
-Before entering Phase 2, write a gate event to `gates[]` in the workflow state file. Gate events for successful transitions MUST use `result: "pass"` — the schema only accepts `"pass"` or `"fail"` (never `"enter_phase2"`, `"continue"`, or any other value). Read back the state file after writing to verify the gate event persisted.
+Before entering Phase 2, write a gate event to `gates[]` in the workflow state file. Gate events for successful transitions MUST use `result: "pass"` — the schema only accepts `"pass"` or `"fail"` (never `"enter_phase2"`, `"continue"`, or any other value).
 
 ## Phase 2: Improve
 
@@ -358,7 +378,27 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 4. **Step 4: Reconcile + Analyze** -- Merge main thread + fresh-eyes findings, performance audit.
 5. **Step 5: Improvement Plan** -- Table of proposed changes with fix type and source. When multiple preferences apply to the same change, note any tension between them and state which takes precedence.
 6. **Step 6: Apply Edits** -- Stale-write guard, apply edits, generate companion validators if needed.
+6a. **Step 6a: Constraint Ablation** -- For each constraint flagged as possible dead weight (preference 19), remove it, re-run the existing criteria, and restore it only if a test regresses. Record each ablation and its outcome in the ledger. Skip constraints guarding irreversible actions.
 7. **Step 7: Description Trigger Testing** -- Test whether the description triggers correctly on realistic prompts.
+8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`. The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence.
+
+   Findings are nested under the round that produced them. Write exactly this shape:
+
+   ```json
+   {
+     "artifact": "{name}",
+     "max_rounds": 3,
+     "rounds": [
+       {"round": 1,
+        "findings": [
+          {"id": "F1", "severity": "critical", "file": "SKILL.md",
+           "summary": "Step 4 has no stated exit condition", "status": "open"}
+        ]}
+     ]
+   }
+   ```
+
+   `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones); `status` is `open`, `fixed`, or `rejected`. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged.
 
 ## Phase 3: Re-Evaluate
 
@@ -369,8 +409,9 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 1. Re-run eval runner with same criteria (blind evaluation — no mention of improvements).
 2. Run deterministic scoring on re-eval results.
 3. Compare before/after per-dimension. A drop > 0.1 in any dimension flags a regression, but resample first: re-run the tests feeding that dimension twice more and take the median. Auto-revert only if the median still shows the drop. If `score_execution.py` changed this round, re-score the prior round's results with the updated scorer before comparing, so a measurement change is not read as an artifact change.
-4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid. Read back the state file to verify. Check mechanical exit gate.
-5. If rounds remain and score is improving: loop back to Phase 2.
+4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid.
+5. Check the mechanical exit gate. It emits `workflow_exit` as the last event before any exit.
+6. If rounds remain and the score is improving: loop back to Phase 2.
 
 **Mechanical exit gate** decides when to stop (state file, not LLM judgment). See Phase 3 reference for full BLOCKED/ALLOWED conditions.
 
@@ -378,13 +419,14 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 
 1. **Printing text instead of using AskUserQuestion.** When the STOP section says "Call AskUserQuestion", you must call the tool. Text output does NOT satisfy the gate.
 2. **Proceeding past a STOP gate.** When a gate says "STOP immediately", no further workflow steps should execute.
-3. **Narrating the workflow in an error stop.** When stopping on a validation error, the error message and its options are the whole response. Say what is wrong and what the valid choices are, then stop. This applies to every halt, not just argument validation: on a corrupt state file or any mid-run error halt, report the failure, the file path, and how to resume. Do not inventory the work you are declining to do. Listing the steps you did not reach ("does not run the structural audit, does not generate criteria") reads as workflow narration and scores as a forbidden-phrase violation, even when phrased as a denial.
+3. **Narrating the workflow in an error stop.** When stopping on a validation error, the error message and its options are the whole response. Say what is wrong and what the valid choices are, then stop. This applies to every halt, not just argument validation: on a corrupt state file or any mid-run error halt, report the failure, the file path, and how to resume. Do not inventory the work you are declining to do: a list of the steps you did not reach is workflow narration in an error stop, where the error and the options are the whole response.
+
+   A denial is not itself the violation. `score_execution.py` scopes each negation cue to the clause it governs and walks back through commas, so a single denial covering a comma-separated list ("did not reach the audit, criteria generation, or the eval runner") is read as one denial and is not scored as a forbidden phrase. What still scores as a violation is the phrase appearing outside a denial, and a semicolon is a hard clause break: "did not run the audit; proceeded to Phase 2" negates only the first clause.
 4. **Naming internal machinery in fallback output.** When AskUserQuestion is unavailable and the fallback fires, the response is the question and its options and nothing else. Internal section names, step names, and script names belong in the state file, not in a user-facing stop message — a response that names them fails even when the question itself is correct.
 5. **Sequential reads for independent files.** When a phase starts by reading multiple unrelated files (artifact, reference file, state file), issuing them one at a time is a latency violation. Batch all independent Read calls into a single parallel tool-use turn.
-6. **Claiming verification without Read tool calls.** After every Write or Edit to any file, you MUST issue an actual Read tool call on the written path before proceeding. The scorer checks the tool call timeline, not the agent_response text. Describing verification in prose without an actual Read tool call is a hard failure for the verify_actions dimension.
-7. **Wrong result values in gate events.** Gate events only accept `"result": "pass"` or `"result": "fail"`. Using `"enter_phase2"`, `"enter_phase3"`, `"exit"`, `"continue"`, or any other value is a schema violation and causes gate_compliance to score 0.0. Use `"pass"` for all successful phase transitions.
-8. **Writing state file after reading reference files.** The state file MUST be written as the very first action. The Phase 1 STOP to read `phase1-evaluation.md` governs what you read before executing Phase 1 steps — it does NOT override state initialization. State file written after references = sequencing violation.
-9. **Omitting gate events when demonstrating parallel operations.** The Execution Efficiency Rules describe parallelism optimization for tool calls within steps — they do not replace inter-phase gate events. In SIMULATION MODE, include the corresponding gate event as JSON inline in your response. An executor showing parallel reads with no gate event scores 0.0 on gate_compliance.
+6. **Wrong result values in gate events.** Gate events only accept `"result": "pass"` or `"result": "fail"`. Using `"enter_phase2"`, `"enter_phase3"`, `"exit"`, `"continue"`, or any other value is a schema violation and causes gate_compliance to score 0.0. Use `"pass"` for all successful phase transitions.
+7. **Writing state file after reading reference files.** The state file MUST be written as the very first action. The Phase 1 STOP to read `phase1-evaluation.md` governs what you read before executing Phase 1 steps — it does NOT override state initialization. State file written after references = sequencing violation.
+8. **Omitting gate events when demonstrating parallel operations.** The Execution Efficiency Rules describe parallelism optimization for tool calls within steps — they do not replace inter-phase gate events. In SIMULATION MODE, include the corresponding gate event as JSON inline in your response. An executor showing parallel reads with no gate event scores 0.0 on gate_compliance.
 
 ## Context Compaction Protection
 
