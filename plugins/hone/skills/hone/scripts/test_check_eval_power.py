@@ -146,3 +146,39 @@ class TestCompare(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCriteriaRootShape(unittest.TestCase):
+    """A non-object criteria root is a usage error, not an AttributeError."""
+
+    def _run(self, contents):
+        import subprocess
+        import sys
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "criteria.json")
+            with open(path, "w") as handle:
+                handle.write(contents)
+            return subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "check_eval_power.py"),
+                    path,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+    def test_a_list_rooted_criteria_file_exits_2(self):
+        proc = self._run('[{"id": "TC-001"}]')
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("must be a JSON object", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_a_scalar_rooted_criteria_file_exits_2(self):
+        proc = self._run('"just a string"')
+        self.assertEqual(proc.returncode, 2)
+        self.assertNotIn("Traceback", proc.stderr)

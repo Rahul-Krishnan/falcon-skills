@@ -180,11 +180,14 @@ RUN_ID="hone-{name}-$(date +%Y%m%d-%H%M)"   # eg hone-recap-20260713-0022
 ```
 The state file is keyed per RUN, not per session. Two `/hone` runs in one session, which is what happens when you sweep several artifacts back to back, would otherwise collide on a single session-keyed file and overwrite each other's scores.
 
-**Resume protocol (after compaction, or across sessions).** If the glob below returns a path, you are resuming. Re-read this SKILL.md and the active phase's reference file, resume at the first step not marked `done`, and emit the `resume` gate event. Do **not** re-emit events already on disk; they survived, the resume is what did not. A resume that records nothing is indistinguishable from a skipped one. Validate with `--resumed`:
+**Resume protocol (after compaction, or across sessions).** If the glob below returns a path, you are resuming. Re-read this SKILL.md and the active phase's reference file, resume at the first step not marked `done`, then record the resumption in two places:
 
-```bash
-python3 <skill-dir>/scripts/validate_gates.py "$STATE_FILE" --resumed --json
-```
+1. Set `"resumed": true` at the top level of the state file.
+2. Emit the `resume` gate event.
+
+Do **not** re-emit events already on disk; they survived, the resume is what did not. A resume that records nothing is indistinguishable from a skipped one.
+
+Both records matter. The `resumed` field is what makes the `resume` event *required*: the exit gate below runs `validate_gates.py` with no flags, and it reads that field to decide whether to demand the event. Setting the field and omitting the event fails the exit gate, which is the point. Do not run the gate check here — mid-run, steps are still `pending`, the derived mode is `error-halt`, and its only required event is the `workflow_exit` you have not reached yet, so it reports a failure every time. Validate at the exit gate, once, like every other run.
 
 **Recovering RUN_ID after compaction:** the timestamp is not reconstructible from memory, so do not try to recompute it. Recover the path by globbing for the most recent match:
 ```bash
@@ -397,7 +400,7 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 
    Never hardcode `--root ~/.claude/skills`. Hone routinely operates on artifacts installed elsewhere (`$CLAUDE_PLUGIN_ROOT/skills/...`, `~/.claude/plugins/*/skills/...`), and a root that does not contain the edited file snapshots a tree nothing in the round touches, so `--verify` reports `clean` no matter what changed. For a single-file artifact (a hook or a script rather than a skill directory), `SCOPE_ROOT` is the containing directory and `SCOPE_NAME` is the file name.
 6. **Step 6: Apply Edits** -- Stale-write guard, apply edits, generate companion validators if needed.
-6a. **Step 6a: Scope Verify** -- Run `check_scope.py --root "$SCOPE_ROOT" --manifest /tmp/scope-${RUN_ID}.json --scope "$SCOPE_NAME" --verify`, reusing the same `$SCOPE_ROOT` Step 5a snapshotted. On a violation: revert **only** the paths listed in `violations`, emit a `fail` gate event for `scope_verify`, and halt the round.
+6a. **Step 6a: Scope Verify** -- Run `check_scope.py --root "$SCOPE_ROOT" --manifest /tmp/scope-${RUN_ID}.json --scope "$SCOPE_NAME" --verify`, reusing the same `$SCOPE_ROOT` Step 5a snapshotted. Emit the `scope_verify` gate event either way: `result: "pass"` when the check comes back `clean`, `result: "fail"` on a violation. On a violation, also revert **only** the paths listed in `violations` and halt the round. The clean path is the one that gets forgotten, and it is the one the exit gate requires.
 
    Revert nothing listed under `preexisting_dirty_out_of_scope`. Those files were already uncommitted when the run started and are byte-identical to the snapshot, so reverting them destroys someone else's work rather than undoing yours. Only the hash manifest can attribute a change to this run; a git diff cannot tell your edit from the one already sitting there.
 6b. **Step 6b: Constraint Ablation** -- For each constraint flagged as possible dead weight (preference 22), remove it, re-run the existing criteria, and restore it only if a test regresses. Record each ablation and its outcome in the ledger. Skip constraints guarding irreversible actions.

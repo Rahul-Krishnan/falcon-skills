@@ -137,7 +137,7 @@ def _git_changed(root: Path) -> list[str] | None:
     for line in stdout.splitlines():
         if len(line) <= 3:
             continue
-        entry = line[3:].strip().strip('"')
+        entry = _porcelain_path(line)
         try:
             relative = (toplevel_resolved / entry).relative_to(root_resolved)
         except ValueError:
@@ -146,6 +146,62 @@ def _git_changed(root: Path) -> list[str] | None:
             continue
         paths.append(str(relative))
     return paths
+
+
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n",
+    "r": "\r", "t": "\t", "v": "\v", "\\": "\\", '"': '"',
+}
+
+
+def _unquote_git_path(entry: str) -> str:
+    """Decode the C-quoted path form `git status --porcelain` emits.
+
+    Git wraps a path in double quotes and escapes it whenever it holds a
+    control character, a quote, a backslash, or a non-ASCII byte, encoding
+    those bytes as three-digit octal. Stripping the quotes without undoing the
+    escapes leaves a literal `\303\251` that matches nothing on disk, so the
+    entry falls out of the report it was supposed to appear in.
+    """
+    if len(entry) < 2 or not (entry.startswith('"') and entry.endswith('"')):
+        return entry
+    body = entry[1:-1]
+    out = bytearray()
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\":
+            out.extend(char.encode("utf-8"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(body):
+            break
+        nxt = body[index]
+        octal = body[index:index + 3]
+        if len(octal) == 3 and all(digit in "01234567" for digit in octal):
+            out.append(int(octal, 8))
+            index += 3
+            continue
+        out.extend(_C_ESCAPES.get(nxt, nxt).encode("utf-8"))
+        index += 1
+    return out.decode("utf-8", "replace")
+
+
+def _porcelain_path(line: str) -> str:
+    """The on-disk path a `git status --porcelain` line refers to.
+
+    Two shapes need handling. A rename or copy prints `old -> new`, and taking
+    the whole tail gives the single nonexistent path `old -> new`, which never
+    resolves under root and is dropped silently -- losing an entry from
+    `preexisting_dirty_out_of_scope`, the list whose whole job is telling the
+    caller what not to revert. The destination is the path that exists now, so
+    that is the one to keep. The other shape is C-quoting, handled above.
+    """
+    entry = line[3:].strip()
+    if line[:1] in ("R", "C") and " -> " in entry:
+        entry = entry.split(" -> ", 1)[-1].strip()
+    return _unquote_git_path(entry)
 
 
 def _in_scope(rel_path: str, scope: list[str]) -> bool:

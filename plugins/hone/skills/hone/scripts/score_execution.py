@@ -64,13 +64,41 @@ CLAUSE_BREAK_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A comma inside a denial is a list separator far more often than a clause
-# boundary, so the scan walks back through commas and stops at the first
-# non-comma break. Same rationale as "or" above: "did not reach A, B, or C" is
-# one denial covering three items, and resetting at each comma left every item
-# after the first with a cue-free window. A semicolon remains a hard break, so
-# a genuine two-clause statement still has punctuation that scopes it.
-COMMA_BREAK_RE = re.compile(r"^,$")
+# A comma separates list items or splices two clauses, and the two need
+# opposite treatment. "did not reach A, B, or C" is one denial covering three
+# items, so breaking at every comma left each item after the first with a
+# cue-free window. "Skipped the audit, ran Phase 1" is a splice, and reading
+# through that comma hands the second clause the first one's denial --
+# excusing the forward progress `required_absent` exists to catch.
+#
+# So a comma is a hard break only when both signals say clause: the text
+# between it and the phrase opens one (a finite verb or subject pronoun,
+# where a list conjunct would be a bare noun phrase), AND no "or"/"nor"
+# stands later in the sentence. The coordinator wins ties, which is what
+# keeps a list of verb phrases ("did not run the audit, validate the
+# handoff, or score the results") negated. The residual gap is a splice
+# carrying a later "or", which stays excused -- the conservative direction,
+# since separating those for certain needs a parser, not a regex. A
+# semicolon remains a hard break unconditionally.
+LIST_CONTINUATION_RE = re.compile(r"\b(?:or|nor)\b", re.IGNORECASE)
+
+# Finite-verb and subject-pronoun openers, the vocabulary these transcripts
+# actually use to report an action. A verb missing from this list degrades to
+# "not a clause opener", i.e. to the list reading, so a gap here is the same
+# false negative the check had before, never a new false positive.
+CLAUSE_OPENER_RE = re.compile(
+    r"^(?:i|we|it|they|he|she|you|this|that|then"
+    r"|ran|runs?|execut(?:ed|es|e)|appl(?:ied|ies|y)|wr(?:ote|ites|ite)"
+    r"|read|reads|call(?:ed|s)?|invok(?:ed|es|e)|emit(?:ted|s)?"
+    r"|skip(?:ped|s)?|proceed(?:ed|s)?|continu(?:ed|es|e)|start(?:ed|s)?"
+    r"|us(?:ed|es|e)|did|does|do|ma(?:de|kes|ke)|creat(?:ed|es|e)"
+    r"|add(?:ed|s)?|remov(?:ed|es|e)|check(?:ed|s)?|validat(?:ed|es|e)"
+    r"|scor(?:ed|es|e)|went|go(?:es)?|mov(?:ed|es|e)"
+    r"|enter(?:ed|s)?|load(?:ed|s)?|open(?:ed|s)?|halt(?:ed|s)?"
+    r"|stop(?:ped|s)?|report(?:ed|s)?|updat(?:ed|es|e)|jump(?:ed|s)?"
+    r"|is|was|are|were|has|have|had|will)\b",
+    re.IGNORECASE,
+)
 
 
 def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
@@ -86,9 +114,23 @@ def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
             _head, sep, tail = window.rpartition(breaker)
             if sep:
                 window = tail
+        # The rest of the sentence, so the coordinator test can look past the
+        # phrase: in "reach A, B, or C" the "or" that makes B a list item
+        # sits after B, not before it.
+        ahead = text[match.start() : match.start() + NEGATION_WINDOW]
+        for breaker in (".", "!", "?", ";", "\n"):
+            head, sep, _rest = ahead.partition(breaker)
+            if sep:
+                ahead = head
         for brk in reversed(list(CLAUSE_BREAK_RE.finditer(window))):
-            if COMMA_BREAK_RE.match(brk.group()):
-                continue
+            if brk.group() == ",":
+                segment = window[brk.end() :]
+                opens_clause = bool(CLAUSE_OPENER_RE.match(segment.lstrip()))
+                coordinated = bool(
+                    LIST_CONTINUATION_RE.search(segment + ahead)
+                )
+                if not opens_clause or coordinated:
+                    continue
             window = window[brk.end() :]
             break
         if not NEGATION_CUES.search(window):
@@ -144,8 +186,13 @@ GATE_KEYWORDS = re.compile(
 # whatever nouns it uses. Without it, the documented argument-validation
 # fallback ("What artifact type do you want to hone? ...") matched no
 # clarification phrase and scored as no communication at all.
+# `[^?]` spanned newlines, so any line opening with an interrogative word
+# paired with a question mark up to 200 characters later -- on some entirely
+# different line -- counted as a clarification request. `[^?\n]` keeps the
+# question on the line that opens it, which is the shape the documented
+# fallback actually has.
 INTERROGATIVE_OPENER = re.compile(
-    r"^\s*(?:what|which|who|where|how)\b[^?]{0,200}\?",
+    r"^[ \t]*(?:what|which|who|where|how)\b[^?\n]{0,200}\?",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -379,7 +426,7 @@ def _is_knowledge_extraction(test_result: dict) -> bool:
     runner_context = _runner_context(test_result)
     has_ke_marker = any(marker in runner_context for marker in KE_MARKERS)
 
-    timeline = test_result.get("execution_timeline") or []
+    timeline = _timeline_entries(test_result)
     tools_used = {
         _tool_name(entry)
         for entry in timeline
@@ -539,6 +586,42 @@ def _tool_input(entry: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _timeline_entries(test_result: object) -> list[dict]:
+    """A test record's execution_timeline, reduced to the entries that are objects.
+
+    `execution_timeline` is executor-written JSON and a dozen call sites walk
+    it with a bare `entry.get(...)`. One bare string element -- a narrative
+    line a hand-recorded or third-party trace dropped in among the structured
+    ones -- raised AttributeError from whichever site reached it first, and
+    `score_from_results` swallowed that into `composite: 0.0` for the entire
+    test. Normalizing once here is the same move `_tool_input` made for a
+    single field, applied to the container: every consumer downstream can
+    assume dicts because this is the only door in.
+    """
+    if not isinstance(test_result, dict):
+        return []
+    timeline = test_result.get("execution_timeline")
+    if not isinstance(timeline, list):
+        return []
+    return [entry for entry in timeline if isinstance(entry, dict)]
+
+
+def _entry_text(entry: object) -> str:
+    """Return a timeline entry's `content` when it is text, else "".
+
+    Same failure this file already hardened `_tool_input` against, one field
+    over: `content` is guarded elsewhere only by `if content:`, which a
+    non-empty dict or list passes, and the string concatenation on the next
+    line then raises TypeError. `score_from_results` swallows that into
+    `composite: 0.0` for the whole test, so one oddly-shaped entry in a
+    hand-recorded or third-party trace reads as total artifact failure.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    content = entry.get("content")
+    return content if isinstance(content, str) else ""
+
+
 def _tool_name(entry: dict) -> str:
     """The tool name on a timeline entry, under either key the runners emit.
 
@@ -551,14 +634,27 @@ def _tool_name(entry: dict) -> str:
     return entry.get("tool_name") or entry.get("tool") or ""
 
 
-def _get_tool_uses(timeline: list[dict]) -> list[dict]:
-    """Filter timeline to tool_use entries only."""
-    return [entry for entry in timeline if entry.get("step_type") == "tool_use"]
+def _get_tool_uses(timeline: list) -> list[dict]:
+    """Filter timeline to tool_use entries only.
+
+    The isinstance guard is the same one `_entry_text` and
+    `_is_well_formed_gate` carry: `execution_timeline` is executor-written
+    JSON, so a bare string element is possible, and the bare `.get` below
+    raised an AttributeError that `score_from_results` swallowed into
+    `composite: 0.0` for the whole test.
+    """
+    return [
+        entry for entry in timeline
+        if isinstance(entry, dict) and entry.get("step_type") == "tool_use"
+    ]
 
 
-def _get_text_entries(timeline: list[dict]) -> list[dict]:
-    """Filter timeline to text entries only."""
-    return [entry for entry in timeline if entry.get("step_type") == "text"]
+def _get_text_entries(timeline: list) -> list[dict]:
+    """Filter timeline to text entries only. Same guard as _get_tool_uses."""
+    return [
+        entry for entry in timeline
+        if isinstance(entry, dict) and entry.get("step_type") == "text"
+    ]
 
 
 def score_workflow_sequence(
@@ -579,7 +675,7 @@ def score_workflow_sequence(
     # under tool_input and never populate `content`; reading the timeline alone
     # scored 0/N on runs that named every step in order, and workflow_sequence
     # is the critical dimension, so the whole test was capped to an F.
-    parts = [entry.get("content", "") for entry in timeline if entry.get("content")]
+    parts = [text for text in (_entry_text(entry) for entry in timeline) if text]
     if agent_response:
         parts.append(agent_response)
     text_content = " ".join(parts)
@@ -664,8 +760,18 @@ def _extract_gate_events(
     return [], ""
 
 
-def _is_well_formed_gate(gate: dict) -> bool:
-    """A gate event is well-formed when it has the required keys and a valid result."""
+def _is_well_formed_gate(gate: object) -> bool:
+    """A gate event is well-formed when it has the required keys and a valid result.
+
+    The isinstance guard is load-bearing, not defensive noise: `gates[]` is
+    parsed out of executor-written JSON, so an element can be a bare string.
+    `"step" in gate` is then a substring test a narrative gate line passes,
+    and the `.get` on the next line raises AttributeError -- which the caller
+    swallows into `composite: 0.0` for the whole test. validate_gates.py
+    guards the same iteration the same way.
+    """
+    if not isinstance(gate, dict):
+        return False
     if not all(key in gate for key in ("step", "judge", "result")):
         return False
     return gate.get("result") in ("pass", "fail")
@@ -708,7 +814,8 @@ def score_gate_compliance(
             # result == "fail": compliant only when failure is the documented outcome.
             terminal = idx == len(gates) - 1
             repaired = any(
-                later.get("step") == gate.get("step")
+                isinstance(later, dict)
+                and later.get("step") == gate.get("step")
                 and later.get("result") == "pass"
                 for later in gates[idx + 1 :]
             )
@@ -729,9 +836,12 @@ def score_gate_compliance(
             # which rewards emitting fewer events than an honest run emits.
             later_gates = gates[idx + 1 :]
             halted = any(
-                later.get("step") == "workflow_exit" for later in later_gates
+                isinstance(later, dict) and later.get("step") == "workflow_exit"
+                for later in later_gates
             ) and all(
-                later.get("step") in HALT_SEQUENCE_STEPS for later in later_gates
+                isinstance(later, dict)
+                and later.get("step") in HALT_SEQUENCE_STEPS
+                for later in later_gates
             )
             if terminal or repaired or halted:
                 compliant += 1
@@ -776,7 +886,7 @@ def score_gate_compliance(
     # Legacy fallback: keyword counting, capped at 0.7
     combined = agent_response
     for entry in timeline:
-        content = entry.get("content", "")
+        content = _entry_text(entry)
         if content:
             combined += " " + content
 
@@ -1020,7 +1130,9 @@ def score_error_handling(
         # ("I gave up.") is the failure this dimension exists to catch.
         no_further_tool_use = not any(e.get("step_type") == "tool_use" for e in rest)
         said = " ".join(
-            e.get("content", "") for e in rest if e.get("step_type") == "text"
+            _entry_text(e)
+            for e in rest
+            if isinstance(e, dict) and e.get("step_type") == "text"
         )
         if no_further_tool_use and REPORTS_ERROR.search(f"{said} {agent_response}"):
             handled += 1
@@ -1213,10 +1325,12 @@ def score_user_communication(
     # fallback_output step types (eval runner records these when the tool is absent),
     # or ToolSearch with "AskUserQuestion" in content (skill tried to find the tool).
     attempted_ask = any(
-        e.get("step_type") in {"condition_fired", "fallback_text_output", "fallback_output"}
+        isinstance(e, dict)
+        and e.get("step_type")
+        in {"condition_fired", "fallback_text_output", "fallback_output"}
         for e in timeline
     ) or any(
-        _tool_name(t) == "ToolSearch" and "AskUserQuestion" in (t.get("content") or "")
+        _tool_name(t) == "ToolSearch" and "AskUserQuestion" in _entry_text(t)
         for t in tool_uses
     )
     if attempted_ask:
@@ -1228,9 +1342,10 @@ def score_user_communication(
     # Acceptable: any text output (step_type "text", "fallback_text_output", "fallback_output")
     text_entries = [
         e for e in timeline
-        if e.get("step_type") in {"text", "fallback_text_output", "fallback_output"}
+        if isinstance(e, dict)
+        and e.get("step_type") in {"text", "fallback_text_output", "fallback_output"}
     ]
-    has_text = any((entry.get("content") or "").strip() for entry in text_entries)
+    has_text = any(_entry_text(entry).strip() for entry in text_entries)
     if has_text:
         return {
             "score": 0.7,
@@ -1343,7 +1458,7 @@ def score_quality_checks(
 
     combined = agent_response
     for entry in timeline:
-        content = entry.get("content", "")
+        content = _entry_text(entry)
         if content:
             combined += " " + content
 
@@ -1364,8 +1479,8 @@ def score_quality_checks(
     # the moment its timeline is recorded.
     authored = agent_response
     for entry in timeline:
-        if entry.get("step_type") == "text":
-            content = entry.get("content", "")
+        if isinstance(entry, dict) and entry.get("step_type") == "text":
+            content = _entry_text(entry)
             if content:
                 authored += " " + content
 
@@ -1559,7 +1674,7 @@ def _score_single_test(
     from aggregation rather than average a fabricated number.
     """
     inconclusive = False
-    timeline = test_result.get("execution_timeline") or []
+    timeline = _timeline_entries(test_result)
     # `or ""`: an explicit `"agent_response": null` is a real shape from a
     # runner whose test crashed, and None crashes every string consumer below.
     agent_response = test_result.get("agent_response") or ""
@@ -1976,7 +2091,7 @@ def find_timeline_gaps(results: list) -> list[str]:
         if not isinstance(entry, dict):
             gaps.append("<non-object record>")
             continue
-        if not _get_tool_uses(entry.get("execution_timeline") or []):
+        if not _get_tool_uses(_timeline_entries(entry)):
             gaps.append(str(entry.get("test_id", "unknown")))
     return gaps
 
@@ -2008,7 +2123,10 @@ def main() -> None:
     parser.add_argument(
         "--require-timeline",
         action="store_true",
-        help="Exit non-zero, naming the test ids, if any record has no recorded tool call",
+        help=(
+            "Exit non-zero, naming the test ids, if any record has no recorded "
+            "tool call. Scores are still computed and written first"
+        ),
     )
     args = parser.parse_args()
 
@@ -2021,6 +2139,16 @@ def main() -> None:
             except OSError as exc:
                 print(f"WARNING: Could not read artifact: {exc}", file=sys.stderr)
 
+    # --require-timeline reports records with no recorded tool call. An empty
+    # results file is a usage error and stops here; a per-record gap is not.
+    # Aborting on a gap suppressed `deterministic_scores.json` for every other
+    # test in the file, and Phase 3's before/after comparison then has no
+    # current-round scores to read at all. One executor that produced no tool
+    # calls is a plausible outcome, not only a harness defect, so the gap is
+    # reported after the scores are written -- the exit status still fails, the
+    # other tests still get scored, and `_score_single_test` has already marked
+    # the offending record inconclusive.
+    timeline_gaps: list[str] = []
     if args.require_timeline:
         try:
             with open(args.results_json) as handle:
@@ -2029,17 +2157,10 @@ def main() -> None:
             print(f"ERROR: --require-timeline could not read {args.results_json}: {exc}", file=sys.stderr)
             sys.exit(2)
         records, _key = extract_results(raw)
-        gaps = find_timeline_gaps(records)
         if not records:
             print("ERROR: --require-timeline found no test records", file=sys.stderr)
             sys.exit(2)
-        if gaps:
-            print(
-                "ERROR: --require-timeline: no recorded tool calls for "
-                + ", ".join(gaps),
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        timeline_gaps = find_timeline_gaps(records)
 
     criteria_index = _load_criteria_index(args.criteria_path)
     try:
@@ -2081,6 +2202,15 @@ def main() -> None:
                 else:
                     print(f"  {test['test_id']}: {test['composite']:.4f}")
         print(f"\nScores written to: {output_path}")
+
+    if timeline_gaps:
+        print(
+            "ERROR: --require-timeline: no recorded tool calls for "
+            + ", ".join(timeline_gaps)
+            + f"; scores for the remaining records were written to {output_path}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":

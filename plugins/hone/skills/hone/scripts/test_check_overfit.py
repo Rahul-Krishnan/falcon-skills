@@ -117,3 +117,31 @@ class TestCheckOverfit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCriteriaRootShape(unittest.TestCase):
+    """A non-object criteria root is a usage error, not an AttributeError."""
+
+    def test_a_list_rooted_criteria_file_exits_2(self):
+        import subprocess
+        import sys
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "criteria.json")
+            with open(path, "w") as handle:
+                handle.write('[{"id": "TC-001"}]')
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "check_overfit.py"),
+                    path,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("must be a JSON object", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)

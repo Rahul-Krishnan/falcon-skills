@@ -207,6 +207,17 @@ def main() -> None:
         print(f"ERROR: ledger is not valid JSON: {exc}", file=sys.stderr)
         sys.exit(2)
 
+    # A bare array of rounds -- the shape SKILL.md warns against writing --
+    # reaches `.get()` in analyze() and raises an uncaught AttributeError; the
+    # contract here is exit 2.
+    if not isinstance(ledger, dict):
+        print(
+            f"ERROR: ledger root must be a JSON object, got "
+            f"{type(ledger).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     report = analyze(ledger, args.recurrence_limit, args.stall_limit)
     report["artifact"] = ledger.get("artifact")
 

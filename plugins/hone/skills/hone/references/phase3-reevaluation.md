@@ -66,8 +66,28 @@ Steps:
    {"step": "phase3_exit", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
    ```
    Set `result` to `"fail"` if a regression was detected and edits were reverted. Append to `state["gates"]` — do not replace.
-7. **Mechanical exit gate** (see Final Output below). The state file decides whether to continue or exit, not the LLM.
-8. If gate says CONTINUE: increment round, loop back to Phase 2.
+7. **Convergence check.** Run the check over this round's ledger and emit its gate event. This is the `convergence` event the gate table marks mandatory; the run does not exit without it.
+
+   ```bash
+   python3 <skill-dir>/scripts/check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json
+   ```
+
+   **Branch on the JSON `verdict`, not the exit code.** Only `converged` exits 0, so `in_progress` — the ordinary "keep going" case — exits 1 alongside the two halt verdicts. Treat exit 1 as "not converged yet" and read the verdict. Only exit 2 (missing or unparseable ledger) is a real failure.
+
+   Append the gate event in every case, including the ordinary one:
+
+   ```json
+   {"step": "convergence", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
+   ```
+
+   Use `result: "pass"` for `converged` and for `in_progress`: the check ran and did not halt the loop. Use `result: "fail"` for `escalate` and for `capped`, then halt.
+
+   - On `escalate` the loop is not converging (a finding open three rounds, a flat blocking count, or a finding closed in one file reopened in another). Halt and report the finding ids.
+   - On `capped` the round budget ran out with blocking findings still open. Report it as **capped, not converged**, list the open blocking findings, and halt. Never present a capped run as success.
+   - On `converged` or `in_progress`, continue to the mechanical exit gate below.
+
+8. **Mechanical exit gate** (see Final Output below). The state file decides whether to continue or exit, not the LLM.
+9. If gate says CONTINUE: increment round, loop back to Phase 2.
 
 ## Final Output
 

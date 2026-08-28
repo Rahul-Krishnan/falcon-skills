@@ -180,6 +180,16 @@ def main() -> None:
         print(f"ERROR: criteria file is not valid JSON: {exc}", file=sys.stderr)
         sys.exit(2)
 
+    # A list- or scalar-rooted criteria file reaches `.get()` below and raises
+    # an uncaught AttributeError; the contract here is exit 2.
+    if not isinstance(criteria, dict):
+        print(
+            f"ERROR: criteria file root must be a JSON object, got "
+            f"{type(criteria).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     skill_name = criteria.get("skill_name") or ""
     artifact_path = args.artifact
     if not artifact_path and skill_name:

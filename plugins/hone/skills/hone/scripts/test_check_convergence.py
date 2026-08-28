@@ -99,3 +99,86 @@ class TestEscalation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLedgerRootShape(unittest.TestCase):
+    """A non-object ledger root is a usage error, not an AttributeError."""
+
+    def test_a_list_rooted_ledger_exits_2(self):
+        import subprocess
+        import sys
+        import tempfile
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ledger.json")
+            with open(path, "w") as handle:
+                handle.write('[{"round": 1}]')
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "check_convergence.py"),
+                    path,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("must be a JSON object", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+
+class TestCappedIsReachable(unittest.TestCase):
+    """`capped` fires when the budget runs out on a finding opened late.
+
+    A blocking finding first raised in the final round has a one-round streak
+    and does not hold the blocking count flat, so no escalation reason fires
+    and the rounds-exhausted branch is the one that wins.
+    """
+
+    def test_a_finding_new_in_the_last_round_caps_rather_than_escalates(self):
+        from check_convergence import analyze
+
+        def finding(fid, summary, status, severity="major", path="a.md"):
+            return {
+                "id": fid,
+                "severity": severity,
+                "file": path,
+                "summary": summary,
+                "status": status,
+            }
+
+        ledger = {
+            "artifact": "x",
+            "max_rounds": 3,
+            "rounds": [
+                {
+                    "round": 1,
+                    "findings": [
+                        finding("F1", "alpha", "open", "critical"),
+                        finding("F2", "beta", "open"),
+                        finding("F3", "gamma", "open"),
+                    ],
+                },
+                {
+                    "round": 2,
+                    "findings": [
+                        finding("F1", "alpha", "fixed", "critical"),
+                        finding("F2", "beta", "open"),
+                        finding("F3", "gamma", "fixed"),
+                    ],
+                },
+                {
+                    "round": 3,
+                    "findings": [
+                        finding("F2", "beta", "fixed"),
+                        finding("F4", "delta new", "open", "critical", "b.md"),
+                    ],
+                },
+            ],
+        }
+        report = analyze(ledger, 3, 3)
+        self.assertEqual(report["verdict"], "capped")
+        self.assertEqual(report["reasons"], [])
+        self.assertEqual([f["id"] for f in report["open_blocking"]], ["F4"])

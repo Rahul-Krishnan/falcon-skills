@@ -24,8 +24,10 @@ What it checks:
      override; a contradiction with the derived mode draws a warning.
      `scope_verify` is required exactly when the state file records applied
      edits (applied_edits.edit_count > 0), matching SKILL.md's "mandatory
-     when edits were applied"; that condition is derived from the state
-     file too, never from a caller flag.
+     when edits were applied", and `resume` exactly when the state file
+     records `"resumed": true`. Both conditions are read off the state file,
+     so neither can be switched off by the caller; --resumed can only turn
+     the resume requirement on.
   3. Fail semantics: a "fail" event is legitimate when it is terminal —
      the pipeline halted there, followed at most by the mandated final
      workflow_exit event(s) — or when a later "pass" for the same step
@@ -161,9 +163,14 @@ def _expected_steps(
     Resumption is orthogonal to mode (any mode can be resumed), so it is a
     flag rather than a fifth mode. `scope_verify` is the same shape: SKILL.md
     marks it mandatory "when edits were applied", which is a property of the
-    run, not of its mode. Both are derived from the state file in main() and
-    never taken from a caller flag -- an executor allowed to declare "no edits
-    applied" could switch off the check that catches its out-of-scope edits.
+    run, not of its mode.
+
+    Both are derived from the state file in main(), never read off a caller
+    flag that could switch them off -- an executor allowed to declare "no
+    edits applied" or "not a resume" would turn off the checks that catch its
+    out-of-scope edits and its unrecorded resumption. `--resumed` survives
+    only as a one-way override: it can add the requirement, never remove one
+    the state file established.
     """
     steps = REQUIRED_STEPS.get(mode, ())
     if edits_applied:
@@ -171,6 +178,20 @@ def _expected_steps(
     if resumed:
         steps = steps + ("resume",)
     return steps
+
+
+def derive_resumed(state: object) -> bool:
+    """Whether the run resumed from an existing state file, per the state file.
+
+    Reads `resumed`, which SKILL.md's resume protocol sets alongside the
+    `resume` gate event. Deriving it here is what makes the requirement
+    enforceable: the exit gate runs `validate_gates.py` with no flags, so a
+    resumption recorded only by a caller-supplied `--resumed` was never
+    checked at the one point where checking is mandatory. Two records of the
+    same fact also means dropping either one is a detectable error rather
+    than a silent one.
+    """
+    return isinstance(state, dict) and state.get("resumed") is True
 
 
 def derive_edits_applied(state: object) -> bool:
@@ -352,9 +373,11 @@ def main() -> None:
         "--resumed",
         action="store_true",
         help=(
-            "The run resumed from an existing state file (after compaction or "
-            "across sessions). Requires a 'resume' event in addition to the "
-            "mode's normal set. Orthogonal to --mode."
+            "Force the 'resume' event requirement on. Normally derived from "
+            "the state file's `resumed` field, so passing this is only needed "
+            "for a run that resumed without recording it. One-way: it can add "
+            "the requirement, never remove one the state file established. "
+            "Orthogonal to --mode."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")
@@ -395,9 +418,8 @@ def main() -> None:
         mode = "normal"
 
     edits_applied = derive_edits_applied(state)
-    report = validate_gates(
-        state.get("gates", []), mode, args.resumed, edits_applied
-    )
+    resumed = derive_resumed(state) or args.resumed
+    report = validate_gates(state.get("gates", []), mode, resumed, edits_applied)
 
     if (
         args.mode is not None

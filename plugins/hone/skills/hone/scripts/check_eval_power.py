@@ -235,9 +235,17 @@ def check_compare(before: dict, after: dict, alpha: float) -> dict:
 
 
 def _load(path: str) -> dict:
+    """Load a JSON object, rejecting any other root shape as a usage error.
+
+    Every caller immediately does `.get()` on the result, so a list- or
+    scalar-rooted file (a criteria file holding a bare array of test cases, a
+    truncated write) raised an uncaught AttributeError traceback instead of
+    the documented exit 2. Same tolerance `_load_criteria_index` in
+    score_execution.py was hardened for.
+    """
     try:
         with open(path) as handle:
-            return json.load(handle)
+            loaded = json.load(handle)
     except FileNotFoundError:
         print(f"ERROR: file not found: {path}", file=sys.stderr)
         sys.exit(2)
@@ -247,6 +255,14 @@ def _load(path: str) -> dict:
     except OSError as exc:
         print(f"ERROR: cannot read {path}: {exc}", file=sys.stderr)
         sys.exit(2)
+    if not isinstance(loaded, dict):
+        print(
+            f"ERROR: {path} root must be a JSON object, got "
+            f"{type(loaded).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return loaded
 
 
 def main() -> None:

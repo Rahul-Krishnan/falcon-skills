@@ -182,3 +182,55 @@ class TestGitPathNamespace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPorcelainPathParsing(unittest.TestCase):
+    """Renames and C-quoted paths must survive into the dirty-file report.
+
+    `line[3:].strip().strip('"')` turned `R old -> new` into one nonexistent
+    path and left git's octal escapes literal. Both fell out of
+    `preexisting_dirty_out_of_scope`, the list that tells the caller what not
+    to revert, so the caller reverted someone else's uncommitted work.
+    """
+
+    def test_a_plain_path_is_unchanged(self):
+        from check_scope import _porcelain_path
+
+        self.assertEqual(_porcelain_path(" M plain/file.py"), "plain/file.py")
+
+    def test_a_path_with_spaces_is_kept_whole(self):
+        from check_scope import _porcelain_path
+
+        self.assertEqual(_porcelain_path(" M with space/file.md"), "with space/file.md")
+
+    def test_a_rename_keeps_the_destination(self):
+        from check_scope import _porcelain_path
+
+        self.assertEqual(
+            _porcelain_path("R  old/path.md -> new/path.md"), "new/path.md"
+        )
+
+    def test_a_copy_keeps_the_destination(self):
+        from check_scope import _porcelain_path
+
+        self.assertEqual(_porcelain_path("C  a/src.md -> b/copy.md"), "b/copy.md")
+
+    def test_octal_escapes_are_decoded(self):
+        from check_scope import _porcelain_path
+
+        self.assertEqual(
+            _porcelain_path('?? "caf\\303\\251/note.md"'), "café/note.md"
+        )
+
+    def test_a_quoted_rename_is_both_split_and_unquoted(self):
+        from check_scope import _porcelain_path
+
+        self.assertEqual(
+            _porcelain_path('R  "old \\303\\251.md" -> "new \\303\\251.md"'),
+            "new é.md",
+        )
+
+    def test_escaped_quotes_and_backslashes_round_trip(self):
+        from check_scope import _porcelain_path
+
+        self.assertEqual(_porcelain_path('?? "a\\"b/c\\\\d.md"'), 'a"b/c\\d.md')

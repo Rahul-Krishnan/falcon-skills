@@ -11,6 +11,7 @@ import math
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 # Will import after implementation exists
 # from score_execution import (
@@ -1803,8 +1804,11 @@ class TestScoreErrorIsInconclusive(unittest.TestCase):
                         {"step_type": "tool_use", "tool_name": "Read", "step_index": 0}
                     ],
                 },
-                # execution_timeline as an object, not a list: crashes the
-                # per-test scorer, which the run-level handler catches.
+                # execution_timeline as an object, not a list. This used to
+                # crash the per-test scorer; _timeline_entries now normalizes
+                # it to no entries, so the record scores as inconclusive
+                # instead. Either way it carries composite None and stays out
+                # of the run composite, which is what the callers rely on.
                 {
                     "test_id": "boom",
                     "agent_response": "x",
@@ -1820,12 +1824,52 @@ class TestScoreErrorIsInconclusive(unittest.TestCase):
             json.dump(output, handle)
         return output
 
-    def test_crashed_test_has_no_composite(self):
+    def test_malformed_timeline_has_no_composite(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = self._run(tmp)
         crashed = next(t for t in output["per_test"] if t["test_id"] == "boom")
         self.assertIsNone(crashed["composite"])
+        # A malformed timeline is unscoreable, not a scorer bug: it is
+        # normalized to no entries and reported as inconclusive rather than
+        # taken down the score_error path a real exception uses.
+        self.assertEqual(crashed["status"], "inconclusive")
+
+    def test_a_real_scorer_exception_still_lands_as_score_error(self):
+        """The run-level handler must still catch a genuine scorer crash.
+
+        Hardening the timeline removed the easiest way to trigger it, so the
+        path is exercised directly rather than through malformed input.
+        """
+        import score_execution
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("scorer blew up")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(score_execution, "_score_single_test", boom):
+                results = {
+                    "results": [
+                        {
+                            "test_id": "kaboom",
+                            "agent_response": "x",
+                            "execution_timeline": [
+                                {
+                                    "step_type": "tool_use",
+                                    "tool_name": "Read",
+                                    "tool_input": {},
+                                }
+                            ],
+                        }
+                    ]
+                }
+                path = os.path.join(tmp, "results.json")
+                with open(path, "w") as handle:
+                    json.dump(results, handle)
+                output = score_execution.score_from_results(path, "skill", "")
+        crashed = next(t for t in output["per_test"] if t["test_id"] == "kaboom")
         self.assertEqual(crashed["status"], "score_error")
+        self.assertIsNone(crashed["composite"])
+        self.assertIn("RuntimeError", crashed["error"])
 
     def test_crashed_test_is_excluded_from_the_run_composite(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2325,3 +2369,198 @@ class TestRequireTimelineGate(unittest.TestCase):
         from score_execution import find_timeline_gaps
 
         self.assertEqual(find_timeline_gaps(["oops"]), ["<non-object record>"])
+
+
+class TestCommaClauseScoping(unittest.TestCase):
+    """A comma separates list items or splices clauses; only one is negation.
+
+    Blanket comma transparency excused "Skipped the audit, ran Phase 1" --
+    forward progress hiding behind an earlier denial, which is the violation
+    required_absent exists to catch. Stopping at every comma instead left each
+    item of "did not reach A, B, or C" with a cue-free window.
+    """
+
+    def _flagged(self, phrase: str, text: str) -> bool:
+        from score_execution import _has_unnegated_occurrence
+
+        return _has_unnegated_occurrence(phrase, text)
+
+    def test_comma_splice_is_not_excused_by_an_earlier_denial(self):
+        self.assertTrue(self._flagged("Phase 1", "Skipped the audit, ran Phase 1"))
+
+    def test_comma_splice_with_an_explicit_subject_is_flagged(self):
+        self.assertTrue(self._flagged("Phase 1", "Skipped the audit, I ran Phase 1"))
+
+    def test_last_item_of_a_negated_list_stays_negated(self):
+        self.assertFalse(
+            self._flagged("Phase 3", "I did not reach Phase 1, Phase 2, or Phase 3")
+        )
+
+    def test_middle_item_of_a_negated_list_stays_negated(self):
+        self.assertFalse(
+            self._flagged("Phase 2", "I did not reach Phase 1, Phase 2, or Phase 3")
+        )
+
+    def test_negated_list_of_verb_phrases_stays_negated(self):
+        text = "I did not run the audit, validate the handoff, or score the results"
+        self.assertFalse(self._flagged("score the results", text))
+        self.assertFalse(self._flagged("validate the handoff", text))
+
+    def test_semicolon_remains_a_hard_break(self):
+        self.assertTrue(self._flagged("Phase 1", "Never touched the audit; ran Phase 1"))
+
+    def test_a_plain_denial_still_negates(self):
+        self.assertFalse(self._flagged("Phase 1", "I did not run Phase 1"))
+
+
+class TestMalformedTimelineTolerance(unittest.TestCase):
+    """A timeline entry that is not a dict, or whose content is not a string.
+
+    Both used to raise out of a dimension scorer and get swallowed into
+    composite 0.0 for the whole test -- reading as total artifact failure.
+    """
+
+    TIMELINE = [
+        {"step_type": "text", "content": {"nested": "dict"}},
+        {"step_type": "text", "content": ["a", "b"]},
+        "a bare narrative string",
+        {"step_type": "text", "content": "I ran Phase 1"},
+    ]
+
+    def test_entry_text_returns_empty_for_non_string_content(self):
+        from score_execution import _entry_text
+
+        self.assertEqual(_entry_text({"content": {"a": 1}}), "")
+        self.assertEqual(_entry_text({"content": ["a"]}), "")
+        self.assertEqual(_entry_text("bare"), "")
+        self.assertEqual(_entry_text({"content": "text"}), "text")
+
+    def test_timeline_entries_drops_non_objects(self):
+        from score_execution import _timeline_entries
+
+        self.assertEqual(len(_timeline_entries({"execution_timeline": self.TIMELINE})), 3)
+        self.assertEqual(_timeline_entries({"execution_timeline": {"oops": 1}}), [])
+        self.assertEqual(_timeline_entries("not a record"), [])
+
+    def test_quality_checks_does_not_crash(self):
+        from score_execution import score_quality_checks
+
+        self.assertEqual(
+            score_quality_checks("resp", self.TIMELINE, [], ["Phase 1"])["score"], 0.0
+        )
+
+    def test_workflow_sequence_does_not_crash(self):
+        from score_execution import score_workflow_sequence
+
+        score_workflow_sequence(self.TIMELINE, "resp", "")
+
+    def test_user_communication_does_not_crash(self):
+        from score_execution import score_user_communication
+
+        score_user_communication(self.TIMELINE, "resp")
+
+    def test_a_malformed_entry_does_not_zero_the_whole_test(self):
+        from score_execution import score_from_results
+
+        results = {
+            "results": [
+                {
+                    "test_id": "TC-1",
+                    "agent_response": "I ran Phase 1",
+                    "execution_timeline": self.TIMELINE
+                    + [{"step_type": "tool_use", "tool_name": "Read", "tool_input": {}}],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump(results, handle)
+            output = score_from_results(path, "skill", "")
+        self.assertIsNotNone(output["composite_score"])
+        self.assertGreater(output["composite_score"], 0.0)
+
+
+class TestNonDictGateElements(unittest.TestCase):
+    """gates[] is executor-written, so an element can be a bare string."""
+
+    def test_a_string_gate_does_not_crash_scoring(self):
+        from score_execution import score_gate_compliance
+
+        response = "\n".join(
+            [
+                json.dumps({"step": "phase1_to_phase2", "judge": "self-check", "result": "pass"}),
+                "GATE: the phase 2 step was checked",
+                json.dumps({"step": "workflow_exit", "judge": "self-check", "result": "pass"}),
+            ]
+        )
+        self.assertGreater(score_gate_compliance([], response)["score"], 0.0)
+
+    def test_is_well_formed_gate_rejects_a_string(self):
+        from score_execution import _is_well_formed_gate
+
+        self.assertFalse(_is_well_formed_gate("step judge result pass"))
+
+
+class TestInterrogativeOpenerScope(unittest.TestCase):
+    """The opener must not pair an interrogative with a '?' on another line."""
+
+    def test_a_same_line_question_still_matches(self):
+        from score_execution import INTERROGATIVE_OPENER
+
+        self.assertTrue(
+            INTERROGATIVE_OPENER.search("What artifact type do you want to hone? Pick one.")
+        )
+
+    def test_the_question_mark_may_not_come_from_a_later_line(self):
+        from score_execution import INTERROGATIVE_OPENER
+
+        self.assertIsNone(
+            INTERROGATIVE_OPENER.search("What I did next\nis run the audit. Was that ok?")
+        )
+
+
+class TestRequireTimelineWritesScoresFirst(unittest.TestCase):
+    """One record with no tool calls must not suppress everyone else's scores."""
+
+    def test_scores_are_written_and_the_exit_status_still_fails(self):
+        import subprocess
+        import sys
+
+        records = {
+            "results": [
+                {
+                    "test_id": f"TC-{i:03d}",
+                    "agent_response": "ran it",
+                    "execution_timeline": [
+                        {"step_type": "tool_use", "tool_name": "Read", "tool_input": {}}
+                    ],
+                }
+                for i in range(1, 4)
+            ]
+            + [{"test_id": "TC-GAP", "agent_response": "I would run it", "execution_timeline": []}]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump(records, handle)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "score_execution.py"),
+                    path,
+                    "--type",
+                    "skill",
+                    "--require-timeline",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            scores_path = os.path.join(tmp, "deterministic_scores.json")
+            self.assertTrue(os.path.exists(scores_path), "scores file was not written")
+            with open(scores_path) as handle:
+                scores = json.load(handle)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("TC-GAP", proc.stderr)
+        self.assertEqual(len(scores["per_test"]), 4)
+        self.assertIsNotNone(scores["composite_score"])
