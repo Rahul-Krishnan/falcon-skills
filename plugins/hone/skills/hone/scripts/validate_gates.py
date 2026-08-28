@@ -22,10 +22,14 @@ What it checks:
      when non-done, non-skipped steps remain) — the executor does not get
      to pick the gate set it is graded against. --mode is an explicit
      override; a contradiction with the derived mode draws a warning.
-     `resume` is required exactly when the state file records
-     `"resumed": true`. That condition is read off the state file, so it
-     cannot be switched off by the caller; --resumed can only turn the
-     resume requirement on.
+     `scope_verify` is required when the state file records applied edits
+     (applied_edits.edit_count > 0), matching SKILL.md's "mandatory when
+     edits were applied", except in error-halt, where the run may have
+     crashed between the edit and the verify and its absence is a warning
+     instead; `resume` is required exactly when the state file records
+     `"resumed": true`. Both conditions are read off the state file,
+     so neither can be switched off by the caller; --resumed can only turn
+     the resume requirement on.
   3. Fail semantics: a "fail" event is legitimate when it is terminal —
      the pipeline halted there, followed at most by the mandated final
      workflow_exit event(s) — or when a later "pass" for the same step
@@ -88,13 +92,17 @@ VALID_JUDGES = _load_valid_judges()
 
 # Events required for each run mode. Handoff events (handoff_<name>) are
 # emitted per validation attempt and are not part of a fixed expected set.
+#
+# `convergence` sits in the two modes that reach Phase 3. SKILL.md's gate
+# table marks it mandatory, and a gate the table calls mandatory that this
+# script does not check is prose: nothing stops a run from omitting it.
 REQUIRED_STEPS = {
     "normal": (
-        "phase1_to_phase2", "phase2_to_phase3",
+        "phase1_to_phase2", "phase2_to_phase3", "convergence",
         "phase3_exit", "workflow_exit",
     ),
     "fix-only": (
-        "fixonly_entry", "phase2_to_phase3",
+        "fixonly_entry", "phase2_to_phase3", "convergence",
         "phase3_exit", "workflow_exit",
     ),
     "error-halt": ("workflow_exit",),
@@ -149,19 +157,36 @@ def _rubric_errors(index: int, rubric: object) -> list[str]:
     return errors
 
 
-def _expected_steps(mode: str, resumed: bool = False) -> tuple[str, ...]:
-    """Expected event set for a mode, plus the one conditional event.
+def _expected_steps(
+    mode: str, resumed: bool = False, edits_applied: bool = False
+) -> tuple[str, ...]:
+    """Expected event set for a mode, plus the two conditional events.
 
     Resumption is orthogonal to mode (any mode can be resumed), so it is a
-    flag rather than a fifth mode.
+    flag rather than a fifth mode. `scope_verify` is the same shape: SKILL.md
+    marks it mandatory "when edits were applied", which is a property of the
+    run, not of its mode.
 
-    It is derived from the state file in main(), never read off a caller
-    flag that could switch it off -- an executor allowed to declare "not a
-    resume" would turn off the check that catches its unrecorded
-    resumption. `--resumed` survives only as a one-way override: it can add
-    the requirement, never remove the one the state file established.
+    Both are derived from the state file in main(), never read off a caller
+    flag that could switch them off -- an executor allowed to declare "no
+    edits applied" or "not a resume" would turn off the checks that catch its
+    out-of-scope edits and its unrecorded resumption. `--resumed` survives
+    only as a one-way override: it can add the requirement, never remove one
+    the state file established.
+
+    `error-halt` is exempt from the `scope_verify` requirement. That mode
+    means the run stopped mid-flight, and Phase 2 writes `edit_count` at
+    Step 6 while `scope_verify` is emitted at Step 6a, so a crash between the
+    two is a legitimate halt that would otherwise be reported as a missing
+    required event -- an error, on a run whose whole point is that it did not
+    finish. SKILL.md's resume note says the same thing ("the derived mode is
+    error-halt, and its only required event is the workflow_exit"). The
+    absence is not ignored: validate_gates() downgrades it to a warning, so
+    an error halt that skipped its scope check is still visible in the report.
     """
     steps = REQUIRED_STEPS.get(mode, ())
+    if edits_applied and mode != "error-halt":
+        steps = steps + ("scope_verify",)
     if resumed:
         steps = steps + ("resume",)
     return steps
@@ -181,7 +206,26 @@ def derive_resumed(state: object) -> bool:
     return isinstance(state, dict) and state.get("resumed") is True
 
 
-def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
+def derive_edits_applied(state: object) -> bool:
+    """Whether the run applied at least one Phase 2 edit, per the state file.
+
+    Reads `applied_edits.edit_count`, the field validate_handoff.py already
+    requires of the phase2_apply handoff.
+    """
+    if not isinstance(state, dict):
+        return False
+    applied = state.get("applied_edits")
+    if not isinstance(applied, dict):
+        return False
+    count = applied.get("edit_count")
+    if isinstance(count, bool) or not isinstance(count, (int, float)):
+        return False
+    return count > 0
+
+
+def validate_gates(
+    gates: list, mode: str, resumed: bool = False, edits_applied: bool = False
+) -> dict:
     """Return a report dict describing schema, completeness, and fail-semantics."""
     errors: list[str] = []
     warnings: list[str] = []
@@ -191,10 +235,13 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
             "valid": False,
             "mode": mode,
             "resumed": resumed,
+            "edits_applied": edits_applied,
             "gate_count": 0,
             "errors": ["gates is not a list"],
             "warnings": [],
-            "missing_steps": list(_expected_steps(mode, resumed)),
+            "missing_steps": list(
+                _expected_steps(mode, resumed, edits_applied)
+            ),
         }
 
     for index, gate in enumerate(gates):
@@ -292,7 +339,7 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
     }
     missing = [
         step
-        for step in _expected_steps(mode, resumed)
+        for step in _expected_steps(mode, resumed, edits_applied)
         if step not in emitted
     ]
     for step in missing:
@@ -304,10 +351,22 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
         else:
             errors.append(f"missing required gate event '{step}' for mode '{mode}'")
 
+    # The error-halt exemption from _expected_steps, recorded rather than
+    # dropped: the run applied edits and never verified their scope, which is
+    # expected of a crash between Phase 2 Step 6 and Step 6a but is still the
+    # one thing a reader of this report wants to know about those edits.
+    if edits_applied and mode == "error-halt" and "scope_verify" not in emitted:
+        warnings.append(
+            "edits were applied but no 'scope_verify' event was recorded; the "
+            "run halted on an error before Phase 2 Step 6a, so the scope of "
+            "those edits is unverified"
+        )
+
     return {
         "valid": not errors,
         "mode": mode,
         "resumed": resumed,
+        "edits_applied": edits_applied,
         "gate_count": len(gates),
         "errors": errors,
         "warnings": warnings,
@@ -379,8 +438,9 @@ def main() -> None:
     else:
         mode = "normal"
 
+    edits_applied = derive_edits_applied(state)
     resumed = derive_resumed(state) or args.resumed
-    report = validate_gates(state.get("gates", []), mode, resumed)
+    report = validate_gates(state.get("gates", []), mode, resumed, edits_applied)
 
     if (
         args.mode is not None

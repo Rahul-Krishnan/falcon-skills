@@ -270,6 +270,21 @@ improvement_plan: {
 }
 ```
 
+### Step 5a: Scope Snapshot (before any edit)
+
+Preference 11 stops hone clobbering someone else's change; nothing stops hone changing a file nobody asked it to touch. Derive the guarded tree from the artifact path Step 1 discovered, then snapshot before the first edit:
+
+```bash
+ARTIFACT_DIR="$(cd "$(dirname "{artifact_path}")" && pwd)"
+SCOPE_ROOT="$(dirname "$ARTIFACT_DIR")"
+SCOPE_NAME="$(basename "$ARTIFACT_DIR")"
+
+python3 <skill-dir>/scripts/check_scope.py --root "$SCOPE_ROOT" \
+  --manifest /tmp/scope-${RUN_ID}.json --snapshot --json
+```
+
+`--root` is derived, never hardcoded. Hone discovers artifacts under `~/.claude/skills/`, `$CLAUDE_PLUGIN_ROOT/skills/`, `~/.claude/plugins/*/skills/`, and the other roots in `references/artifact-profiles.md`; a root that does not contain the edited file snapshots a tree the round never touches, and `--verify` then reports `clean` however much was changed. For a single-file artifact (hook or script), `SCOPE_ROOT` is the containing directory and `SCOPE_NAME` is the file name.
+
 ### Step 6: Apply Edits
 
 **Pre-step validation:** Verify `improvement_plan` from Step 5: `edits` is a non-empty array, each entry has `id`, `target_section`, and `change` fields, `total_approved >= 1`. If shape is malformed: STOP, report "P2 Step 6 handoff validation failed."
@@ -327,6 +342,27 @@ applied_edits: {
 }
 ```
 Write `artifact_before_snapshot` (pre-edit file content) to the workflow state file before applying edits. Phase 3 reads this for auto-revert on regression.
+
+### Step 6a: Scope Verify (after edits)
+
+```bash
+python3 <skill-dir>/scripts/check_scope.py --root "$SCOPE_ROOT" \
+  --manifest /tmp/scope-${RUN_ID}.json --scope "$SCOPE_NAME" --verify --json
+```
+
+Reuse the `$SCOPE_ROOT` and `$SCOPE_NAME` Step 5a derived. Verifying against a different root than the one snapshotted compares two unrelated trees.
+
+**Emit the `scope_verify` gate event on both paths.** The clean path is the one that gets forgotten, and a check that only records itself when it fails is indistinguishable from a check that never ran:
+
+```json
+{"step": "scope_verify", "judge": "automated", "result": "pass", "ts": "<ISO timestamp>"}
+```
+
+On `clean`: emit that event with `result: "pass"` and continue.
+
+On `scope_violation`: revert **only** the paths listed under `violations`, emit the same event with `result: "fail"`, and halt the round.
+
+**Revert nothing listed under `preexisting_dirty_out_of_scope`.** Those files were already uncommitted when the run started and are byte-identical to the snapshot, so this run did not touch them. Reverting them destroys whatever uncommitted work was sitting there. Git reports a file dirty relative to HEAD; the manifest reports it relative to this run's start, and only the manifest can attribute a change to you.
 
 ### Step 7: Description Trigger Testing (skills and commands only)
 
