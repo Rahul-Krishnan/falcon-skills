@@ -22,10 +22,12 @@ What it checks:
      when non-done, non-skipped steps remain) — the executor does not get
      to pick the gate set it is graded against. --mode is an explicit
      override; a contradiction with the derived mode draws a warning.
-     `scope_verify` is required exactly when the state file records applied
-     edits (applied_edits.edit_count > 0), matching SKILL.md's "mandatory
-     when edits were applied", and `resume` exactly when the state file
-     records `"resumed": true`. Both conditions are read off the state file,
+     `scope_verify` is required when the state file records applied edits
+     (applied_edits.edit_count > 0), matching SKILL.md's "mandatory when
+     edits were applied", except in error-halt, where the run may have
+     crashed between the edit and the verify and its absence is a warning
+     instead; `resume` is required exactly when the state file records
+     `"resumed": true`. Both conditions are read off the state file,
      so neither can be switched off by the caller; --resumed can only turn
      the resume requirement on.
   3. Fail semantics: a "fail" event is legitimate when it is terminal —
@@ -171,9 +173,19 @@ def _expected_steps(
     out-of-scope edits and its unrecorded resumption. `--resumed` survives
     only as a one-way override: it can add the requirement, never remove one
     the state file established.
+
+    `error-halt` is exempt from the `scope_verify` requirement. That mode
+    means the run stopped mid-flight, and Phase 2 writes `edit_count` at
+    Step 6 while `scope_verify` is emitted at Step 6a, so a crash between the
+    two is a legitimate halt that would otherwise be reported as a missing
+    required event -- an error, on a run whose whole point is that it did not
+    finish. SKILL.md's resume note says the same thing ("the derived mode is
+    error-halt, and its only required event is the workflow_exit"). The
+    absence is not ignored: validate_gates() downgrades it to a warning, so
+    an error halt that skipped its scope check is still visible in the report.
     """
     steps = REQUIRED_STEPS.get(mode, ())
-    if edits_applied:
+    if edits_applied and mode != "error-halt":
         steps = steps + ("scope_verify",)
     if resumed:
         steps = steps + ("resume",)
@@ -298,13 +310,14 @@ def validate_gates(
     # literal last index flagged every documented halt shape and invited the
     # executor to append a fabricated repair pass to silence the warning.
     # `convergence` joins workflow_exit in that tail: it is the check the
-    # failure capped. Both files call hone_common.is_halt_tail, so "the same
-    # shape" is now one function rather than two hand-copied conditions that
-    # had already drifted apart.
+    # failure capped, and Phase 3 emits it after `phase3_exit`, so the failing
+    # step goes to the helper along with the tail. Both files call
+    # hone_common.is_halt_tail, so "the same shape" is now one function rather
+    # than two hand-copied conditions that had already drifted apart.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
-        terminal = is_halt_tail(gates[index + 1 :])
+        terminal = is_halt_tail(gates[index + 1 :], gate.get("step"))
         repaired = any(
             isinstance(later, dict)
             and later.get("step") == gate.get("step")
@@ -337,6 +350,17 @@ def validate_gates(
             )
         else:
             errors.append(f"missing required gate event '{step}' for mode '{mode}'")
+
+    # The error-halt exemption from _expected_steps, recorded rather than
+    # dropped: the run applied edits and never verified their scope, which is
+    # expected of a crash between Phase 2 Step 6 and Step 6a but is still the
+    # one thing a reader of this report wants to know about those edits.
+    if edits_applied and mode == "error-halt" and "scope_verify" not in emitted:
+        warnings.append(
+            "edits were applied but no 'scope_verify' event was recorded; the "
+            "run halted on an error before Phase 2 Step 6a, so the scope of "
+            "those edits is unverified"
+        )
 
     return {
         "valid": not errors,

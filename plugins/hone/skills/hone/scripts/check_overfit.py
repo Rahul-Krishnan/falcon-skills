@@ -23,7 +23,9 @@ artifact itself). Everything else is `outcome`.
 own vocabulary must NOT appear in output, which is the opposite failure mode
 and a legitimate use of lifted phrasing.
 
-Exit codes: 0 within threshold, 1 over threshold, 2 usage error.
+Exit codes: 0 within threshold, 1 over threshold or not measurable, 2 usage
+error. `not_measurable` is the verdict when the criteria set yields zero
+classifiable items -- nothing was measured, so nothing passed.
 
 Stdlib only. Read-only: it reports, it never rewrites criteria.
 """
@@ -137,16 +139,27 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
 
     total = len(classified)
     overfit = counts["technique"] + counts["vocabulary"]
-    ratio = (overfit / total) if total else 0.0
-    within = ratio <= max_ratio
+
+    # Zero classifiable items is not a pass. `overfit / total` guarded with an
+    # `else 0.0` made an empty ratio indistinguishable from a perfect one, so
+    # a criteria set whose cases carry only `required_absent` lists (exempt by
+    # construction) or no test cases at all cleared Step 6a's mandatory gate
+    # silently, on no evidence. `not_measurable` says what actually happened,
+    # and exits non-zero so the gate cannot read it as within threshold.
+    if total == 0:
+        verdict = "not_measurable"
+        ratio = None
+    else:
+        ratio = round(overfit / total, 4)
+        verdict = "within_threshold" if ratio <= max_ratio else "overfitted"
 
     return {
-        "verdict": "within_threshold" if within else "overfitted",
+        "verdict": verdict,
         "skill_name": skill_name,
         "items_classified": total,
         "items_exempt_required_absent": exempt,
         "counts": counts,
-        "overfit_ratio": round(ratio, 4),
+        "overfit_ratio": ratio,
         "max_overfit_ratio": max_ratio,
         "flagged": [i for i in classified if i["class"] != "outcome"],
     }
@@ -217,8 +230,12 @@ def main() -> None:
         print()
     else:
         counts = report["counts"]
-        print(f"VERDICT: {report['verdict']} (ratio {report['overfit_ratio']}, "
-              f"max {report['max_overfit_ratio']})")
+        if report["overfit_ratio"] is None:
+            print(f"VERDICT: {report['verdict']} (no classifiable items; "
+                  f"nothing was measured)")
+        else:
+            print(f"VERDICT: {report['verdict']} (ratio {report['overfit_ratio']}, "
+                  f"max {report['max_overfit_ratio']})")
         print(f"  {report['items_classified']} item(s): "
               f"{counts['outcome']} outcome, {counts['technique']} technique, "
               f"{counts['vocabulary']} vocabulary "

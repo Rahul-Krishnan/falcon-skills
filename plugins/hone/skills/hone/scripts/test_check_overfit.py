@@ -109,10 +109,22 @@ class TestCheckOverfit(unittest.TestCase):
         self.assertEqual(report["counts"]["technique"], 0)
         self.assertEqual(report["items_classified"], 2)
 
-    def test_empty_criteria_does_not_divide_by_zero(self):
+    def test_empty_criteria_is_not_measurable_rather_than_passing(self):
+        """Zero classifiable items clears nothing: Step 6a is a mandatory gate."""
         report = check_overfit({"skill_name": "demo", "test_cases": []}, ARTIFACT, "demo", 0.34)
-        self.assertEqual(report["overfit_ratio"], 0.0)
-        self.assertEqual(report["verdict"], "within_threshold")
+        self.assertIsNone(report["overfit_ratio"])
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["items_classified"], 0)
+
+    def test_only_required_absent_items_is_not_measurable(self):
+        """`required_absent` is exempt by construction, so it scores nothing."""
+        criteria = {
+            "skill_name": "demo",
+            "test_cases": [{"id": "t1", "required_absent": ["Phase 2"]}],
+        }
+        report = check_overfit(criteria, ARTIFACT, "demo", 0.34)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["items_exempt_required_absent"], 1)
 
 
 if __name__ == "__main__":

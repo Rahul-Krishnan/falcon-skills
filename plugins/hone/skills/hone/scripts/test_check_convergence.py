@@ -62,7 +62,51 @@ class TestEscalation(unittest.TestCase):
         ]
         report = analyze(ledger(rounds), 99, 3)
         self.assertEqual(report["verdict"], "escalate")
-        self.assertTrue(any("did not fall" in r for r in report["reasons"]))
+        self.assertTrue(any("did not move" in r for r in report["reasons"]))
+
+    def test_a_rising_blocking_count_is_not_a_stall(self):
+        """[0, 0, 1]: a newly found finding, not a loop that stopped moving.
+
+        `window[-1] >= max(window)` escalated on a blocking finding's first
+        appearance, before the loop had one round to fix it.
+        """
+        rounds = [[], [], [finding("a")]]
+        report = analyze(ledger(rounds, max_rounds=9), 99, 3)
+        self.assertEqual(report["verdict"], "in_progress")
+        self.assertEqual(report["reasons"], [])
+
+    def test_a_fixed_streak_no_longer_escalates(self):
+        """A finding open three rounds and then fixed is healed, not stuck.
+
+        `reasons` is built from the whole history and was consulted before the
+        "nothing open -> converged" branch, so one 3-round streak made every
+        later round return `escalate` with an empty `open_blocking` -- a run
+        that halted on a convergence gate it had already cleared.
+        """
+        rounds = [[finding("f1")]] * 3 + [[finding("f1", status="fixed")]] * 2
+        report = analyze(ledger(rounds, max_rounds=9), 3, 9)
+        self.assertEqual(report["verdict"], "converged")
+        self.assertEqual(report["reasons"], [])
+        self.assertEqual(report["recurring"], [])
+
+    def test_a_still_open_streak_still_escalates(self):
+        rounds = [[finding("f1")]] * 3
+        report = analyze(ledger(rounds, max_rounds=9), 3, 9)
+        self.assertEqual(report["verdict"], "escalate")
+        self.assertIn("f1", report["recurring"])
+
+    def test_a_repaired_relocation_no_longer_escalates(self):
+        rounds = [
+            [finding("f1", status="fixed", file="a.py", summary="same shape")],
+            [finding("f2", status="open", file="b.py", summary="same shape")],
+        ]
+        self.assertEqual(
+            analyze(ledger(rounds, max_rounds=9), 9, 9)["verdict"], "escalate"
+        )
+        rounds.append([finding("f2", status="fixed", file="b.py", summary="same shape")])
+        report = analyze(ledger(rounds, max_rounds=9), 9, 9)
+        self.assertEqual(report["verdict"], "converged")
+        self.assertEqual(report["relocations"], [])
 
     def test_falling_count_does_not_escalate(self):
         rounds = [

@@ -2,6 +2,7 @@
 """Tests for check_scope.py."""
 
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -182,6 +183,46 @@ class TestGitPathNamespace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUntrackedDirectories(unittest.TestCase):
+    """A directory this run created must not be reported as pre-existing dirt.
+
+    `git status --porcelain` defaults to `-unormal`, which collapses a wholly
+    untracked directory to `newdir/`. That entry never matched the file-level
+    paths in the hash manifest, so it survived the "not in changed" filter and
+    the report told the caller to revert `newdir/x.txt` and, two fields later,
+    that `newdir` predated the run and must not be reverted.
+    """
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        self.root = self.repo / "skills"
+        (self.root / "hone").mkdir(parents=True)
+        (self.root / "hone" / "SKILL.md").write_text("in scope\n")
+        run = subprocess.run(
+            ["git", "init", "-q", str(self.repo)],
+            capture_output=True, text=True,
+        )
+        if run.returncode != 0:  # pragma: no cover - git is present in CI
+            self.skipTest("git unavailable")
+        for args in (
+            ["add", "-A"],
+            ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+        ):
+            subprocess.run(["git", "-C", str(self.repo), *args], capture_output=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def test_a_directory_created_by_this_run_is_not_preexisting(self):
+        manifest = build_manifest(self.root)
+        (self.root / "newdir").mkdir()
+        (self.root / "newdir" / "x.txt").write_text("written by this run\n")
+        report = verify(self.root, manifest, ["hone"])
+        self.assertTrue(report["git_available"])
+        self.assertEqual(report["violations"], ["newdir/x.txt"])
+        self.assertEqual(report["preexisting_dirty_out_of_scope"], [])
 
 
 class TestPorcelainPathParsing(unittest.TestCase):

@@ -404,7 +404,7 @@ Criteria derived from the artifact test whether the artifact was *recited*. An a
 python3 <skill-dir>/scripts/check_overfit.py {eval_criteria_path} --artifact {artifact_path} --json
 ```
 
-Each scored item is classified `outcome`, `technique`, or `vocabulary`. Over the ratio threshold the verdict is `overfit`. Rewrite every flagged item to describe the result the user needed, never the procedure or the artifact's wording. `required_absent` lists are exempt by construction: they assert vocabulary must NOT appear.
+Each scored item is classified `outcome`, `technique`, or `vocabulary`. Over the ratio threshold the verdict is `overfit`. A criteria set that yields zero classifiable items returns `not_measurable` and exits non-zero: nothing was measured, so nothing passed, and this gate is not cleared until the set has scored items to classify. Rewrite every flagged item to describe the result the user needed, never the procedure or the artifact's wording. `required_absent` lists are exempt by construction: they assert vocabulary must NOT appear.
 
 ### Step 6b: Power Check (all artifact types)
 

@@ -120,8 +120,16 @@ def _git_changed(root: Path) -> list[str] | None:
     `preexisting_dirty_out_of_scope` next to "do not revert them".
 
     Rebase each path onto `root` and drop the ones that fall outside it.
+
+    `--untracked-files=all` is not decoration. The default `normal` collapses
+    a wholly untracked directory to one entry, `newdir/`, which never matches
+    the file-level paths in the hash manifest. A directory this run created
+    therefore passed the `not in changed` test and was reported as
+    pre-existing dirt, while the files inside it were reported as violations:
+    the caller was told to revert `newdir/x.txt` and, in the same report, that
+    `newdir` predates the run and must not be reverted.
     """
-    stdout = _git(root, "status", "--porcelain")
+    stdout = _git(root, "status", "--porcelain", "--untracked-files=all")
     if stdout is None:
         return None
     toplevel = _git_toplevel(root)

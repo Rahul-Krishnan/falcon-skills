@@ -406,6 +406,31 @@ class TestScopeVerifyIsConditional(unittest.TestCase):
         self.assertFalse(report["valid"])
         self.assertIn("scope_verify", report["missing_steps"])
 
+    def test_an_error_halt_is_not_failed_for_the_missing_event(self):
+        """Phase 2 writes edit_count at Step 6; scope_verify lands at Step 6a.
+
+        A crash between the two is a legitimate halt, and reporting it as a
+        missing required event turned the halt itself into a gate violation.
+        SKILL.md's resume note says the same: in error-halt the only required
+        event is the workflow_exit.
+        """
+        report = validate_gates(
+            [gate("workflow_exit", result="fail")], "error-halt", edits_applied=True
+        )
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["missing_steps"], [])
+
+    def test_an_error_halt_still_warns_about_the_unverified_edits(self):
+        report = validate_gates(
+            [gate("workflow_exit", result="fail")], "error-halt", edits_applied=True
+        )
+        self.assertTrue(any("scope_verify" in w for w in report["warnings"]))
+
+    def test_an_error_halt_that_verified_scope_does_not_warn(self):
+        gates = [gate("scope_verify"), gate("workflow_exit", result="fail")]
+        report = validate_gates(gates, "error-halt", edits_applied=True)
+        self.assertEqual(report["warnings"], [])
+
     def test_satisfied_by_the_event(self):
         gates = NORMAL_RUN + [gate("scope_verify")]
         self.assertTrue(validate_gates(gates, "normal", edits_applied=True)["valid"])
@@ -603,7 +628,18 @@ class TestHaltTailMatchesTheScorer(unittest.TestCase):
         report = validate_gates(gates, "normal")
         self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
 
-    def test_passing_convergence_in_the_tail_warns(self):
+    def test_passing_convergence_after_an_unrelated_fail_warns(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("handoff_phase2_apply", result="fail"),
+            gate("convergence", result="pass"),
+            gate("workflow_exit", result="pass"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
+
+    def test_the_documented_regression_halt_does_not_warn(self):
+        """phase3_exit fails at step 6; the mandatory convergence check follows."""
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
@@ -612,4 +648,4 @@ class TestHaltTailMatchesTheScorer(unittest.TestCase):
             gate("workflow_exit", result="pass"),
         ]
         report = validate_gates(gates, "normal")
-        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
+        self.assertEqual(report["warnings"], [])

@@ -1091,9 +1091,31 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
 
     def test_terminal_fail_is_compliant(self):
-        result = _score_written_gates([self._gate("phase3_exit", "fail")])
+        result = _score_written_gates([
+            self._gate("phase3_exit", "fail"),
+            self._gate("workflow_exit", "fail"),
+        ])
         self.assertEqual(result["score"], 1.0)
         self.assertIn("expected-fail", result["evidence"])
+
+    def test_a_failing_exit_event_is_compliant_on_its_own(self):
+        """`workflow_exit` is the last event a run owes, so a fail there ends it."""
+        result = _score_written_gates([self._gate("workflow_exit", "fail")])
+        self.assertEqual(result["score"], 1.0)
+        self.assertIn("expected-fail", result["evidence"])
+
+    def test_a_fail_that_simply_stops_emitting_is_not_compliant(self):
+        """No `workflow_exit` after the fail: the run stopped writing gates.
+
+        Treating that as a halt let an executor score a failed gate as an
+        expected fail by emitting fewer events than an honest halt emits.
+        """
+        result = _score_written_gates([
+            self._gate("phase2_to_phase3", "pass"),
+            self._gate("phase3_exit", "fail"),
+        ])
+        self.assertLess(result["score"], 1.0)
+        self.assertIn("non-compliant", result["evidence"])
 
     def test_fail_then_pass_same_step_is_compliant(self):
         result = _score_written_gates(
@@ -2412,6 +2434,65 @@ class TestCommaClauseScoping(unittest.TestCase):
     def test_a_plain_denial_still_negates(self):
         self.assertFalse(self._flagged("Phase 1", "I did not run Phase 1"))
 
+    def test_a_noun_subject_second_clause_is_flagged(self):
+        """The regression a clause-opener vocabulary could not cover.
+
+        Keying comma transparency on "does the second clause open with a known
+        verb or pronoun" read every noun subject as a list conjunct, so these
+        two inherited the first clause's denial -- a false negative
+        unconditional comma breaks did not have.
+        """
+        self.assertTrue(self._flagged(
+            "Phase 2", "Skipped the structural audit, Phase 2 was entered anyway."
+        ))
+        self.assertTrue(self._flagged(
+            "Phase 2", "Skipped the structural audit, the run proceeded to Phase 2."
+        ))
+
+    def test_transparency_requires_a_coordinator(self):
+        """Same sentence, with and without the "or" that makes it a list."""
+        self.assertFalse(self._flagged(
+            "Phase 2", "I did not reach Phase 1, Phase 2, or Phase 3."
+        ))
+        self.assertTrue(self._flagged(
+            "Phase 2", "I did not reach Phase 1, Phase 2 was reached instead."
+        ))
+
+
+class TestInterrogativeOpenerPosition(unittest.TestCase):
+    """A clarification request opens the response; a rhetorical one does not.
+
+    SKILL.md's argument-validation fallback says the entire response is the
+    question and its options, "no preamble, no closing line". Matching the
+    pattern anywhere let a narration that stopped to ask itself a question
+    score as a clarification the executor never requested.
+    """
+
+    def test_a_question_in_mid_narration_is_not_a_clarification(self):
+        from score_execution import score_user_communication
+
+        response = (
+            "Run complete.\n"
+            "How does the resume protocol work? It re-reads SKILL.md and continues.\n"
+            "All 9 steps done."
+        )
+        self.assertLess(score_user_communication([], response)["score"], 0.9)
+
+    def test_the_documented_fallback_still_scores(self):
+        from score_execution import score_user_communication
+
+        response = (
+            "What artifact type do you want to hone?\n"
+            "- skill\n- command\n- hook\n- script"
+        )
+        self.assertEqual(score_user_communication([], response)["score"], 0.9)
+
+    def test_a_leading_blank_line_does_not_disqualify(self):
+        from score_execution import _opens_with_question
+
+        self.assertTrue(_opens_with_question("\n\nWhich file should I scan?"))
+        self.assertFalse(_opens_with_question("Done.\nWhich file should I scan?"))
+
 
 class TestMalformedTimelineTolerance(unittest.TestCase):
     """A timeline entry that is not a dict, or whose content is not a string.
@@ -2611,11 +2692,27 @@ class TestGateComplianceHaltTail(unittest.TestCase):
         ])
         self.assertEqual(result["score"], 1.0)
 
-    def test_passing_convergence_is_not_a_halt(self):
-        """convergence(pass) after a fail is forward progress, not the cap."""
+    def test_passing_convergence_is_not_a_halt_for_an_unrelated_fail(self):
+        """convergence(pass) after an unrelated fail is progress, not the cap."""
+        result = _score_written_gates([
+            self._gate("handoff_phase2_apply"),
+            self._gate("convergence", "pass"),
+            self._gate("workflow_exit", "pass"),
+        ])
+        self.assertLess(result["score"], 1.0)
+
+    def test_the_documented_regression_halt_is_compliant(self):
+        """[phase3_exit:fail, convergence:pass, workflow_exit:pass].
+
+        The auto-revert halt in references/phase3-reevaluation.md: step 6
+        records the regression, step 7 runs the mandatory convergence check,
+        which passes on the pre-revert ledger. Scoring that fail as
+        non-compliant penalizes the executor for reporting it.
+        """
         result = _score_written_gates([
             self._gate("phase3_exit"),
             self._gate("convergence", "pass"),
             self._gate("workflow_exit", "pass"),
         ])
-        self.assertLess(result["score"], 1.0)
+        self.assertEqual(result["score"], 1.0)
+        self.assertIn("expected-fail", result["evidence"])

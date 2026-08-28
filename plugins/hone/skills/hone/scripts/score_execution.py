@@ -71,34 +71,27 @@ CLAUSE_BREAK_RE = re.compile(
 # through that comma hands the second clause the first one's denial --
 # excusing the forward progress `required_absent` exists to catch.
 #
-# So a comma is a hard break only when both signals say clause: the text
-# between it and the phrase opens one (a finite verb or subject pronoun,
-# where a list conjunct would be a bare noun phrase), AND no "or"/"nor"
-# stands later in the sentence. The coordinator wins ties, which is what
-# keeps a list of verb phrases ("did not run the audit, validate the
-# handoff, or score the results") negated. The residual gap is a splice
-# carrying a later "or", which stays excused -- the conservative direction,
-# since separating those for certain needs a parser, not a regex. A
-# semicolon remains a hard break unconditionally.
+# A comma is therefore a hard break unless the sentence shows positive
+# evidence of a list: an "or"/"nor" coordinating the items, which is the
+# widening the design rationale accepts. Everything else breaks, as it did
+# before the widening.
+#
+# Testing the shape of the clause after the comma instead does not work. That
+# rule read a splice as a list whenever the second clause failed to start with
+# a known finite verb or subject pronoun, so a noun subject ("Skipped the
+# structural audit, Phase 2 was entered anyway", "..., the run proceeded to
+# Phase 2") inherited the first clause's denial -- a false negative
+# unconditional comma breaks did not have. Widening that opener vocabulary to
+# determiners and nouns only moves the boundary, and narrowing it to subject
+# pronouns re-breaks a list of verb phrases ("did not run the audit, validate
+# the handoff, or score the results"), whose conjuncts are verb-initial by
+# construction. The coordinator is the signal that separates the two shapes
+# without a vocabulary to maintain.
+#
+# Residual gap: a splice that happens to carry a later "or" stays excused.
+# That is the conservative direction, and separating those for certain needs a
+# parser, not a regex. A semicolon remains a hard break unconditionally.
 LIST_CONTINUATION_RE = re.compile(r"\b(?:or|nor)\b", re.IGNORECASE)
-
-# Finite-verb and subject-pronoun openers, the vocabulary these transcripts
-# actually use to report an action. A verb missing from this list degrades to
-# "not a clause opener", i.e. to the list reading, so a gap here is the same
-# false negative the check had before, never a new false positive.
-CLAUSE_OPENER_RE = re.compile(
-    r"^(?:i|we|it|they|he|she|you|this|that|then"
-    r"|ran|runs?|execut(?:ed|es|e)|appl(?:ied|ies|y)|wr(?:ote|ites|ite)"
-    r"|read|reads|call(?:ed|s)?|invok(?:ed|es|e)|emit(?:ted|s)?"
-    r"|skip(?:ped|s)?|proceed(?:ed|s)?|continu(?:ed|es|e)|start(?:ed|s)?"
-    r"|us(?:ed|es|e)|did|does|do|ma(?:de|kes|ke)|creat(?:ed|es|e)"
-    r"|add(?:ed|s)?|remov(?:ed|es|e)|check(?:ed|s)?|validat(?:ed|es|e)"
-    r"|scor(?:ed|es|e)|went|go(?:es)?|mov(?:ed|es|e)"
-    r"|enter(?:ed|s)?|load(?:ed|s)?|open(?:ed|s)?|halt(?:ed|s)?"
-    r"|stop(?:ped|s)?|report(?:ed|s)?|updat(?:ed|es|e)|jump(?:ed|s)?"
-    r"|is|was|are|were|has|have|had|will)\b",
-    re.IGNORECASE,
-)
 
 
 def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
@@ -125,11 +118,7 @@ def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
         for brk in reversed(list(CLAUSE_BREAK_RE.finditer(window))):
             if brk.group() == ",":
                 segment = window[brk.end() :]
-                opens_clause = bool(CLAUSE_OPENER_RE.match(segment.lstrip()))
-                coordinated = bool(
-                    LIST_CONTINUATION_RE.search(segment + ahead)
-                )
-                if not opens_clause or coordinated:
+                if LIST_CONTINUATION_RE.search(segment + ahead):
                     continue
             window = window[brk.end() :]
             break
@@ -190,11 +179,41 @@ GATE_KEYWORDS = re.compile(
 # paired with a question mark up to 200 characters later -- on some entirely
 # different line -- counted as a clarification request. `[^?\n]` keeps the
 # question on the line that opens it, which is the shape the documented
-# fallback actually has.
+# fallback actually has. Which line that may be is `_opens_with_question`'s
+# business, below; this pattern only says what a question looks like.
 INTERROGATIVE_OPENER = re.compile(
     r"^[ \t]*(?:what|which|who|where|how)\b[^?\n]{0,200}\?",
     re.IGNORECASE | re.MULTILINE,
 )
+
+
+def _opens_with_question(response: str) -> bool:
+    """True when the response *starts* with a clarification question.
+
+    Keeping the question on its own line was not enough on its own: a
+    narration that stops to ask a rhetorical question ("Run complete.\\nHow
+    does the resume protocol work? It re-reads SKILL.md.\\nAll 9 steps done.")
+    matched mid-response and scored as a clarification the executor never
+    requested -- the same false positive the word-boundary work on "ask" and
+    "user" below it was written to close.
+
+    The documented fallback has no such ambiguity: when AskUserQuestion is
+    unavailable, SKILL.md's argument-validation conditions say the entire
+    response is the question and its options, "no preamble, no closing line".
+    So the question opens the response or it is not that fallback. Anchoring
+    to the first non-empty line (rather than to position 0) keeps a leading
+    blank line from disqualifying it.
+
+    Residual: a response that opens by restating a question it then answers --
+    the shape a knowledge-extraction prompt invites -- still matches. Telling
+    a restated question from a real one is not something a regex settles, and
+    the branch this feeds scores 0.9, not a full score.
+    """
+    for line in response.splitlines():
+        if not line.strip():
+            continue
+        return bool(INTERROGATIVE_OPENER.match(line))
+    return False
 
 # State file path patterns
 STATE_FILE_PATTERN = re.compile(
@@ -847,8 +866,11 @@ def score_gate_compliance(
             # hone_common.is_halt_tail owns that shape; validate_gates.py asks
             # it the same question, so the two cannot drift again. It also
             # covers the fail-is-last-event case, which was a separate
-            # `terminal` test here.
-            halted = is_halt_tail(gates[idx + 1 :])
+            # `terminal` test here. The failing step goes with the tail: it is
+            # what tells a documented Phase 3 halt (phase3_exit fails, the
+            # mandatory convergence check still runs and passes) apart from an
+            # unrelated fail borrowing that same tail.
+            halted = is_halt_tail(gates[idx + 1 :], gate.get("step"))
             if repaired or halted:
                 compliant += 1
                 expected_fail += 1
@@ -1394,7 +1416,7 @@ def score_user_communication(
         asks_user = (
             "askuserquestion" in response_lower
             or ("?" in agent_response and (asks_the_user or clarification_phrase))
-            or bool(INTERROGATIVE_OPENER.search(agent_response))
+            or _opens_with_question(agent_response)
         )
         if asks_user:
             return {
