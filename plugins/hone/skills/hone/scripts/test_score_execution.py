@@ -2564,3 +2564,58 @@ class TestRequireTimelineWritesScoresFirst(unittest.TestCase):
         self.assertIn("TC-GAP", proc.stderr)
         self.assertEqual(len(scores["per_test"]), 4)
         self.assertIsNotNone(scores["composite_score"])
+
+
+class TestRequiredAbsentSeesFallbackProse(unittest.TestCase):
+    """`required_absent` asks what the executor SAID, on every path it says it.
+
+    The runner records user-facing prose as `text`, and as
+    `fallback_text_output` / `fallback_output` when AskUserQuestion is
+    unavailable. Scanning `text` alone meant the identical sentence passed on
+    the fallback path and failed on the normal one -- and the fallback path is
+    exactly the one the AskUserQuestion anti-pattern cases police.
+    """
+
+    FORBIDDEN = "... Proceeding to Phase 1 now."
+
+    def _score(self, step_type):
+        from score_execution import score_quality_checks
+
+        return score_quality_checks(
+            "", [{"step_type": step_type, "content": self.FORBIDDEN}], [], ["Phase 1"]
+        )["score"]
+
+    def test_every_authored_step_type_scores_alike(self):
+        scores = {
+            step_type: self._score(step_type)
+            for step_type in ("text", "fallback_text_output", "fallback_output")
+        }
+        self.assertEqual(set(scores.values()), {0.0}, scores)
+
+    def test_tool_result_content_is_still_not_scanned(self):
+        """Reading a file that contains the phrase is not saying it."""
+        self.assertEqual(self._score("tool_result"), 1.0)
+
+
+class TestGateComplianceHaltTail(unittest.TestCase):
+    """The scorer reads the halt tail through the shared helper."""
+
+    def _gate(self, step, result="fail"):
+        return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
+
+    def test_capped_convergence_then_exit_is_compliant(self):
+        result = _score_written_gates([
+            self._gate("phase3_exit"),
+            self._gate("convergence"),
+            self._gate("workflow_exit"),
+        ])
+        self.assertEqual(result["score"], 1.0)
+
+    def test_passing_convergence_is_not_a_halt(self):
+        """convergence(pass) after a fail is forward progress, not the cap."""
+        result = _score_written_gates([
+            self._gate("phase3_exit"),
+            self._gate("convergence", "pass"),
+            self._gate("workflow_exit", "pass"),
+        ])
+        self.assertLess(result["score"], 1.0)

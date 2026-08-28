@@ -582,3 +582,34 @@ class TestResumedIsDerivedFromState(unittest.TestCase):
         state = base._state(resumed=True)
         state["gates"].append(base._gate("resume"))
         self.assertTrue(base._report(state)["valid"])
+
+
+class TestHaltTailMatchesTheScorer(unittest.TestCase):
+    """validate_gates and score_gate_compliance read one halt shape.
+
+    The comment above the fail-semantics loop claimed they already did; they
+    did not. `terminal` was `all(step in HALT_SEQUENCE_STEPS)`, satisfied by a
+    tail of `convergence` alone, while the scorer also required a
+    `workflow_exit`.
+    """
+
+    def test_convergence_tail_without_workflow_exit_warns(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("convergence", result="fail"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
+
+    def test_passing_convergence_in_the_tail_warns(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("convergence", result="pass"),
+            gate("workflow_exit", result="pass"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))

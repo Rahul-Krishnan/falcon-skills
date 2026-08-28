@@ -23,10 +23,10 @@ from pathlib import Path
 # and a wrong-typed value, as absent, as the validators already do.
 from hone_common import (
     DIMENSION_FLOOR,
-    HALT_SEQUENCE_STEPS,
     SANDBOX_HEADER,
     extract_results,
     get as typed_get,
+    is_halt_tail,
 )
 
 EPSILON = 1e-6
@@ -622,6 +622,17 @@ def _entry_text(entry: object) -> str:
     return content if isinstance(content, str) else ""
 
 
+# Step types whose `content` is the executor's own prose. The runner records
+# user-facing text as `text`, and as `fallback_text_output` / `fallback_output`
+# when AskUserQuestion is unavailable and the skill writes the question out
+# instead (references/phase1-evaluation.md:516). Reading only `text` let the
+# same sentence pass on the fallback path and fail on the normal one, which is
+# the path the AskUserQuestion anti-pattern cases exist to police.
+AUTHORED_TEXT_STEP_TYPES: frozenset[str] = frozenset(
+    {"text", "fallback_text_output", "fallback_output"}
+)
+
+
 def _tool_name(entry: dict) -> str:
     """The tool name on a timeline entry, under either key the runners emit.
 
@@ -812,7 +823,6 @@ def score_gate_compliance(
                 compliant += 1
                 continue
             # result == "fail": compliant only when failure is the documented outcome.
-            terminal = idx == len(gates) - 1
             repaired = any(
                 isinstance(later, dict)
                 and later.get("step") == gate.get("step")
@@ -834,16 +844,12 @@ def score_gate_compliance(
             # that failed a gate, carried on through the whole workflow, and
             # simply stopped emitting passing gates score that fail as a halt,
             # which rewards emitting fewer events than an honest run emits.
-            later_gates = gates[idx + 1 :]
-            halted = any(
-                isinstance(later, dict) and later.get("step") == "workflow_exit"
-                for later in later_gates
-            ) and all(
-                isinstance(later, dict)
-                and later.get("step") in HALT_SEQUENCE_STEPS
-                for later in later_gates
-            )
-            if terminal or repaired or halted:
+            # hone_common.is_halt_tail owns that shape; validate_gates.py asks
+            # it the same question, so the two cannot drift again. It also
+            # covers the fail-is-last-event case, which was a separate
+            # `terminal` test here.
+            halted = is_halt_tail(gates[idx + 1 :])
+            if repaired or halted:
                 compliant += 1
                 expected_fail += 1
 
@@ -1339,11 +1345,11 @@ def score_user_communication(
             "evidence": "AskUserQuestion attempted but unavailable; used fallback",
         }
 
-    # Acceptable: any text output (step_type "text", "fallback_text_output", "fallback_output")
+    # Acceptable: any text output the executor authored.
     text_entries = [
         e for e in timeline
         if isinstance(e, dict)
-        and e.get("step_type") in {"text", "fallback_text_output", "fallback_output"}
+        and e.get("step_type") in AUTHORED_TEXT_STEP_TYPES
     ]
     has_text = any(_entry_text(entry).strip() for entry in text_entries)
     if has_text:
@@ -1479,7 +1485,10 @@ def score_quality_checks(
     # the moment its timeline is recorded.
     authored = agent_response
     for entry in timeline:
-        if isinstance(entry, dict) and entry.get("step_type") == "text":
+        if (
+            isinstance(entry, dict)
+            and entry.get("step_type") in AUTHORED_TEXT_STEP_TYPES
+        ):
             content = _entry_text(entry)
             if content:
                 authored += " " + content

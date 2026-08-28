@@ -5,8 +5,10 @@ Phase 3 loops back to Phase 2 "if rounds remain and score is improving". That
 rule cannot see three failure shapes, all of which burn the round budget while
 looking like progress:
 
-  recurring    The same finding reopens round after round. Each round "fixes"
-               it and the next round finds it again.
+  recurring    The same finding stays open round after round, or each round
+               "fixes" it and the next round finds it again. Both count: the
+               first as a consecutive-open streak, the second as repeated
+               fixed-to-open transitions.
   stalled      The blocking-finding count stops falling. Work continues, the
                number does not move.
   relocated    A finding is closed in one file and an equivalent one opens in
@@ -58,6 +60,14 @@ BLOCKING = ("critical", "major")
 # Consecutive rounds a finding may stay open before it counts as recurring.
 DEFAULT_RECURRENCE_LIMIT = 3
 
+# Times a finding may be recorded fixed and then found open again before it
+# counts as recurring. The consecutive-open streak cannot see this shape at
+# all -- the round that records the fix zeroes the streak, so a finding that
+# alternates open/fixed forever never reaches DEFAULT_RECURRENCE_LIMIT -- and
+# it is the first shape the module docstring names. One reopen is an
+# incomplete fix; two is a loop that is not converging on this finding.
+DEFAULT_REOPEN_LIMIT = 2
+
 # Consecutive rounds the blocking count may fail to fall before it counts as
 # stalled. Two rounds of no movement is noise; three is a pattern.
 DEFAULT_STALL_LIMIT = 3
@@ -82,34 +92,70 @@ def _blocking(findings: list[dict]) -> list[dict]:
     return [f for f in findings if (f.get("severity") or "").lower() in BLOCKING]
 
 
-def analyze(ledger: dict, recurrence_limit: int, stall_limit: int) -> dict:
+def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
+            reopen_limit: int = DEFAULT_REOPEN_LIMIT) -> dict:
     rounds = [r for r in ledger.get("rounds", []) if isinstance(r, dict)]
     rounds.sort(key=lambda r: r.get("round", 0))
     reasons: list[str] = []
 
     if not rounds:
+        # Every key the normal return carries, so a caller reading the --json
+        # contract -- `max_rounds` is the documented way to tell `capped` from
+        # `in_progress` -- does not hit KeyError on a freshly created ledger.
         return {
-            "verdict": "in_progress", "rounds_run": 0, "reasons": [],
+            "verdict": "in_progress", "rounds_run": 0,
+            "max_rounds": ledger.get("max_rounds"), "reasons": [],
             "open_blocking": [], "open_minor_count": 0,
-            "recurring": [], "relocations": [], "blocking_counts": [],
+            "recurring": [], "reopened": [], "relocations": [],
+            "blocking_counts": [],
         }
 
-    # Recurring: an id open in `recurrence_limit` consecutive rounds.
+    # Recurring, two shapes. `stuck` is an id open in `recurrence_limit`
+    # consecutive rounds. `reopened` is an id recorded `fixed` and found open
+    # again `reopen_limit` times -- the "each round fixes it and the next round
+    # finds it again" shape, which the streak alone cannot see because the
+    # round that records the fix resets the streak to zero.
+    #
+    # Only an explicit `fixed` record counts as a close. A finding simply
+    # absent from a round is an unreported round, not a fix, and reading it as
+    # one would escalate every ledger that lists open findings only.
     streaks: dict[str, int] = {}
-    recurring: list[str] = []
+    reopens: dict[str, int] = {}
+    fixed_since_open: set[str] = set()
+    stuck: list[str] = []
+    reopened: list[str] = []
     for round_entry in rounds:
-        open_ids = {f.get("id") for f in _open_findings(round_entry) if f.get("id")}
+        statuses = {
+            f.get("id"): f.get("status")
+            for f in round_entry.get("findings", [])
+            if isinstance(f, dict) and f.get("id")
+        }
+        open_ids = {fid for fid, status in statuses.items() if status == "open"}
         for finding_id in list(streaks):
             if finding_id not in open_ids:
                 streaks[finding_id] = 0
         for finding_id in open_ids:
             streaks[finding_id] = streaks.get(finding_id, 0) + 1
-            if streaks[finding_id] >= recurrence_limit and finding_id not in recurring:
-                recurring.append(finding_id)
-    if recurring:
+            if finding_id in fixed_since_open:
+                fixed_since_open.discard(finding_id)
+                reopens[finding_id] = reopens.get(finding_id, 0) + 1
+            if streaks[finding_id] >= recurrence_limit and finding_id not in stuck:
+                stuck.append(finding_id)
+            if reopens.get(finding_id, 0) >= reopen_limit and finding_id not in reopened:
+                reopened.append(finding_id)
+        for finding_id, status in statuses.items():
+            if status == "fixed":
+                fixed_since_open.add(finding_id)
+    recurring = sorted(set(stuck) | set(reopened))
+    if stuck:
         reasons.append(
-            f"finding(s) {sorted(recurring)} stayed open for "
+            f"finding(s) {sorted(stuck)} stayed open for "
             f"{recurrence_limit}+ consecutive rounds"
+        )
+    if reopened:
+        reasons.append(
+            f"finding(s) {sorted(reopened)} were recorded fixed and found open "
+            f"again {reopen_limit}+ times"
         )
 
     # Stalled: blocking count failed to fall across the trailing window.
@@ -176,7 +222,8 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int) -> dict:
             for f in open_blocking
         ],
         "open_minor_count": open_minor,
-        "recurring": sorted(recurring),
+        "recurring": recurring,
+        "reopened": sorted(reopened),
         "relocations": relocations,
         "blocking_counts": blocking_counts,
     }
@@ -190,6 +237,9 @@ def main() -> None:
     parser.add_argument("--recurrence-limit", type=int, default=DEFAULT_RECURRENCE_LIMIT,
                         help=f"Consecutive open rounds before escalating "
                              f"(default: {DEFAULT_RECURRENCE_LIMIT})")
+    parser.add_argument("--reopen-limit", type=int, default=DEFAULT_REOPEN_LIMIT,
+                        help=f"Fixed-then-reopened cycles before escalating "
+                             f"(default: {DEFAULT_REOPEN_LIMIT})")
     parser.add_argument("--stall-limit", type=int, default=DEFAULT_STALL_LIMIT,
                         help=f"Rounds without a falling blocking count before "
                              f"escalating (default: {DEFAULT_STALL_LIMIT})")
@@ -218,7 +268,8 @@ def main() -> None:
         )
         sys.exit(2)
 
-    report = analyze(ledger, args.recurrence_limit, args.stall_limit)
+    report = analyze(ledger, args.recurrence_limit, args.stall_limit,
+                     args.reopen_limit)
     report["artifact"] = ledger.get("artifact")
 
     if args.json:

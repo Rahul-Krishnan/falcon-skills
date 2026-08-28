@@ -131,6 +131,48 @@ RUN_SHAPE_ACTIVE_STEPS: dict[str, frozenset[str]] = {
 HALT_SEQUENCE_STEPS: frozenset[str] = frozenset({"convergence", "workflow_exit"})
 
 
+def is_halt_tail(later_gates: object) -> bool:
+    """True when everything after a failing gate belongs to that gate's halt.
+
+    The one place the halt shape is defined. Both callers had their own copy
+    and the copies had drifted: validate_gates.py accepted a tail of
+    `convergence` alone, while score_execution.py additionally required
+    `workflow_exit`, so the two disagreed about whether a run had halted even
+    though a comment in each claimed they scored the same shape.
+
+    A tail is a halt when:
+
+    * nothing follows -- the fail is the last recorded event; or
+    * `workflow_exit` is present (SKILL.md mandates it before ANY exit, so a
+      tail without one is a run that carried on), every event in the tail is
+      a halt-sequence step, and no `convergence` in it passed.
+
+    That last clause is the other half of the drift. `convergence` is allowed
+    in the tail because it is the check the failure capped, which means it
+    reports the cap -- a *passing* convergence check says the run converged,
+    and a run that converged did not halt on the earlier failure. Without the
+    result test, `convergence(pass) + workflow_exit` read as a legitimate halt
+    in both files. `workflow_exit` itself may pass or fail: a passing exit is
+    the ordinary clean stop, and it is the halt rather than progress past it.
+    """
+    if not isinstance(later_gates, (list, tuple)):
+        return False
+    if not later_gates:
+        return True
+    saw_exit = False
+    for later in later_gates:
+        if not isinstance(later, dict):
+            return False
+        step = later.get("step")
+        if step not in HALT_SEQUENCE_STEPS:
+            return False
+        if step == "workflow_exit":
+            saw_exit = True
+        elif step == "convergence" and later.get("result") == "pass":
+            return False
+    return saw_exit
+
+
 def derive_run_shape(steps: object) -> str:
     """Run shape derived from the state file's steps{} map.
 

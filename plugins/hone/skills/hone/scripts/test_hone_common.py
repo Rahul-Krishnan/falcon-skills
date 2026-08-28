@@ -31,6 +31,7 @@ from hone_common import (
     find_slash_invocations,
     frontmatter_field,
     get,
+    is_halt_tail,
     load_deterministic_scores,
     load_inconclusive_ids,
     match_frontmatter,
@@ -453,3 +454,44 @@ class TestFrontmatterExtraction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHaltTail(unittest.TestCase):
+    """One definition of a halt tail, shared by validate_gates and the scorer.
+
+    Both used to carry their own copy and the copies had drifted:
+    validate_gates accepted a tail of `convergence` alone, and neither checked
+    that the trailing `convergence` had actually failed.
+    """
+
+    def _gate(self, step, result="fail"):
+        return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
+
+    def test_empty_tail_is_a_halt(self):
+        self.assertTrue(is_halt_tail([]))
+
+    def test_workflow_exit_is_required(self):
+        self.assertFalse(is_halt_tail([self._gate("convergence")]))
+
+    def test_capped_convergence_then_exit_is_a_halt(self):
+        self.assertTrue(is_halt_tail(
+            [self._gate("convergence"), self._gate("workflow_exit")]
+        ))
+
+    def test_passing_convergence_is_not_a_halt(self):
+        """A convergence check that passed says the run converged."""
+        self.assertFalse(is_halt_tail(
+            [self._gate("convergence", "pass"), self._gate("workflow_exit", "pass")]
+        ))
+
+    def test_passing_workflow_exit_is_still_a_halt(self):
+        self.assertTrue(is_halt_tail([self._gate("workflow_exit", "pass")]))
+
+    def test_forward_progress_is_not_a_halt(self):
+        self.assertFalse(is_halt_tail(
+            [self._gate("phase2_improve", "pass"), self._gate("workflow_exit")]
+        ))
+
+    def test_non_dict_entries_do_not_read_as_a_halt(self):
+        self.assertFalse(is_halt_tail(["workflow_exit"]))
+        self.assertFalse(is_halt_tail(None))

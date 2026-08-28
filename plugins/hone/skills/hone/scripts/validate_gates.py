@@ -46,7 +46,7 @@ import json
 import sys
 from pathlib import Path
 
-from hone_common import HALT_SEQUENCE_STEPS, derive_gate_mode
+from hone_common import derive_gate_mode, is_halt_tail
 
 VALID_RESULTS = ("pass", "fail")
 
@@ -298,16 +298,13 @@ def validate_gates(
     # literal last index flagged every documented halt shape and invited the
     # executor to append a fabricated repair pass to silence the warning.
     # `convergence` joins workflow_exit in that tail: it is the check the
-    # failure capped, and score_execution.score_gate_compliance scores the
-    # same shape the same way.
+    # failure capped. Both files call hone_common.is_halt_tail, so "the same
+    # shape" is now one function rather than two hand-copied conditions that
+    # had already drifted apart.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
-        terminal = all(
-            isinstance(later, dict)
-            and later.get("step") in HALT_SEQUENCE_STEPS
-            for later in gates[index + 1 :]
-        )
+        terminal = is_halt_tail(gates[index + 1 :])
         repaired = any(
             isinstance(later, dict)
             and later.get("step") == gate.get("step")

@@ -182,3 +182,54 @@ class TestCappedIsReachable(unittest.TestCase):
         self.assertEqual(report["verdict"], "capped")
         self.assertEqual(report["reasons"], [])
         self.assertEqual([f["id"] for f in report["open_blocking"]], ["F4"])
+
+
+class TestReopenRecurrence(unittest.TestCase):
+    """The docstring's first failure shape: fixed one round, open the next.
+
+    The consecutive-open streak cannot see this -- the round recording the fix
+    zeroes it -- so before the reopen counter an oscillating critical finding
+    reported `converged` with no reasons.
+    """
+
+    def test_alternating_open_and_fixed_escalates(self):
+        statuses = ["open", "fixed", "open", "fixed", "open", "fixed"]
+        rounds = [[finding("f1", severity="critical", status=s)] for s in statuses]
+        report = analyze(ledger(rounds, max_rounds=8), 3, 3)
+        self.assertEqual(report["verdict"], "escalate")
+        self.assertIn("f1", report["reopened"])
+        self.assertIn("f1", report["recurring"])
+        self.assertTrue(any("found open again" in r for r in report["reasons"]))
+
+    def test_single_reopen_is_not_yet_recurring(self):
+        rounds = [[finding("f1", status=s)] for s in ["open", "fixed", "open"]]
+        report = analyze(ledger(rounds), 3, 99)
+        self.assertEqual(report["reopened"], [])
+
+    def test_absent_round_is_a_gap_not_a_fix(self):
+        """Only an explicit `fixed` record closes a finding.
+
+        A ledger that lists open findings only would otherwise read every
+        unreported round as a fix and escalate on the next sighting.
+        """
+        rounds = [[finding("f1")], [], [finding("f1")], [], [finding("f1")]]
+        report = analyze(ledger(rounds, max_rounds=9), 3, 99)
+        self.assertEqual(report["reopened"], [])
+
+    def test_reopen_limit_is_configurable(self):
+        rounds = [[finding("f1", status=s)] for s in ["open", "fixed", "open"]]
+        report = analyze(ledger(rounds), 3, 99, reopen_limit=1)
+        self.assertIn("f1", report["reopened"])
+
+
+class TestJsonContractKeys(unittest.TestCase):
+    """The empty-rounds early return is the same dict shape as the normal one."""
+
+    def test_empty_ledger_reports_max_rounds(self):
+        report = analyze({"rounds": [], "max_rounds": 5}, 3, 3)
+        self.assertEqual(report["max_rounds"], 5)
+
+    def test_empty_and_populated_returns_have_the_same_keys(self):
+        empty = analyze({"rounds": [], "max_rounds": 5}, 3, 3)
+        populated = analyze(ledger([[finding("f1")]]), 3, 3)
+        self.assertEqual(set(empty), set(populated))
