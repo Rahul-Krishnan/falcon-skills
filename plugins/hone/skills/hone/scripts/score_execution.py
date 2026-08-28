@@ -1557,8 +1557,52 @@ _VERIFY_CONTENT_RE = re.compile(
     r"\bre-?read\b|\bread.{0,20}back\b|\bconfirm.{0,30}content\b|\bverif",
     re.IGNORECASE,
 )
-# State/temp paths that are initialization writes, not artifact modifications
-_TEMP_PATH_RE = re.compile(r"/tmp/|workflow[-_]state|state\.json", re.IGNORECASE)
+# Bookkeeping files that are never the artifact under improvement, whatever
+# directory they sit in: the workflow state file, and the eval criteria file.
+# The read-back instruction for both was ablated out of SKILL.md and the phase
+# references, so counting these writes would score an executor down for
+# following the current text.
+_STATE_FILE_RE = re.compile(
+    r"workflow[-_]state|state\.json|eval[-_]criteria\.json", re.IGNORECASE
+)
+# Scratch directories. Unlike the file names above this is a location, not an
+# identity, so it is *conditional*: a case that declares a `fixture_setup`
+# sandbox is naming the files it really operates on, and its artifact lives
+# there. Matching `/tmp/` unconditionally is what made TC-013's artifact at
+# /tmp/hone-seg-sandbox/SKILL.md invisible, handing both verify_actions and
+# research_first a free 1.0 in the one case built to measure them.
+_SCRATCH_DIR_RE = re.compile(r"/tmp/", re.IGNORECASE)
+
+
+def _fixture_sandbox_paths(crit: dict) -> tuple[str, ...]:
+    """Sandbox paths a test case declares under `fixture_setup`.
+
+    Returns the root (slash-terminated, so it only matches as a directory
+    prefix) plus each declared file path. Empty when the case declares no
+    fixture, which leaves the scratch-directory exclusion exactly as it was
+    for every other case.
+    """
+    fixture = typed_get(crit or {}, "fixture_setup", {}, expected=dict)
+    paths: list[str] = []
+    root = typed_get(fixture, "root", "", expected=str)
+    if root:
+        paths.append(root.rstrip("/") + "/")
+    for spec in typed_get(fixture, "files", [], expected=list):
+        if not isinstance(spec, dict):
+            continue
+        path = typed_get(spec, "path", "", expected=str)
+        if path:
+            paths.append(path)
+    return tuple(paths)
+
+
+def _is_non_artifact_path(text: str, sandbox_paths: tuple[str, ...] = ()) -> bool:
+    """Is this path (or write-describing prose) bookkeeping rather than artifact?"""
+    if _STATE_FILE_RE.search(text):
+        return True
+    if _SCRATCH_DIR_RE.search(text):
+        return not any(p and p in text for p in sandbox_paths)
+    return False
 
 
 def _is_write_entry(entry: dict) -> bool:
@@ -1570,12 +1614,16 @@ def _is_write_entry(entry: dict) -> bool:
     return bool(_WRITE_CONTENT_RE.match(entry.get("content") or ""))
 
 
-def _is_artifact_write_entry(entry: dict) -> bool:
+def _is_artifact_write_entry(entry: dict, sandbox_paths: tuple[str, ...] = ()) -> bool:
     """Write to an artifact — excludes temp/state-file initialization.
 
     Real tool_use entries carry their path in tool_input["file_path"];
     simulation-mode entries describe the write in prose under "content".
     Check both so state-file writes are excluded in either shape.
+
+    `sandbox_paths` are the paths the test case declared in `fixture_setup`;
+    a write inside that sandbox is a write to the artifact under test, so the
+    scratch-directory exclusion does not apply to it.
     """
     tool_input = _tool_input(entry)
     file_path = tool_input.get("file_path", "") if isinstance(tool_input, dict) else ""
@@ -1584,11 +1632,11 @@ def _is_artifact_write_entry(entry: dict) -> bool:
         # here would let a Write to SKILL.md whose echoed content merely
         # mentions /tmp/ or state files (exactly what hone's conventions tell
         # skills to document) masquerade as a temp/state write.
-        if _TEMP_PATH_RE.search(file_path):
+        if _is_non_artifact_path(file_path, sandbox_paths):
             return False
         return _is_write_entry(entry)
     content = entry.get("content") or ""
-    if _TEMP_PATH_RE.search(content):
+    if _is_non_artifact_path(content, sandbox_paths):
         return False
     return _is_write_entry(entry)
 
@@ -1607,7 +1655,9 @@ def _is_verify_entry(entry: dict) -> bool:
     return bool(_VERIFY_CONTENT_RE.search(entry.get("content") or ""))
 
 
-def score_verify_actions(timeline: list[dict]) -> dict[str, float | str]:
+def score_verify_actions(
+    timeline: list[dict], sandbox_paths: tuple[str, ...] = ()
+) -> dict[str, float | str]:
     """Score: were consequential writes followed by verification?
 
     Each artifact Edit/Write should be followed by a read-back or verification
@@ -1621,11 +1671,15 @@ def score_verify_actions(timeline: list[dict]) -> dict[str, float | str]:
     shape a scoring dimension must never have. What the docs still require
     verifying is the artifact edit itself, and that is what this measures.
     Temp and state-file writes are excluded by `_is_artifact_write_entry`,
-    the same classifier `score_research_first` already uses.
+    the same classifier `score_research_first` already uses. `sandbox_paths`
+    carries the case's declared `fixture_setup` paths so a sandboxed artifact
+    under /tmp is still measured rather than silently dropped.
     """
     tool_uses = _get_tool_uses(timeline)
     write_indices = [
-        i for i, e in enumerate(tool_uses) if _is_artifact_write_entry(e)
+        i
+        for i, e in enumerate(tool_uses)
+        if _is_artifact_write_entry(e, sandbox_paths)
     ]
 
     if not write_indices:
@@ -1647,17 +1701,25 @@ def score_verify_actions(timeline: list[dict]) -> dict[str, float | str]:
     return {"score": round(score, 4), "evidence": evidence}
 
 
-def score_research_first(timeline: list[dict]) -> dict[str, float | str]:
+def score_research_first(
+    timeline: list[dict], sandbox_paths: tuple[str, ...] = ()
+) -> dict[str, float | str]:
     """Score: did the executor read/research before making the first artifact write?
 
     Skills should read reference files and understand the artifact before
     making changes. Writes before any reads suggest uninformed edits.
-    Temp/state-file writes (workflow state init) are excluded.
+    Temp/state-file writes (workflow state init) are excluded, except inside a
+    sandbox the case declared in `fixture_setup` (see `sandbox_paths`).
     """
     tool_uses = _get_tool_uses(timeline)
 
     first_write_idx = next(
-        (i for i, e in enumerate(tool_uses) if _is_artifact_write_entry(e)), None
+        (
+            i
+            for i, e in enumerate(tool_uses)
+            if _is_artifact_write_entry(e, sandbox_paths)
+        ),
+        None,
     )
     if first_write_idx is None:
         return {"score": 1.0, "evidence": "No artifact writes; research check not applicable"}
@@ -1773,6 +1835,9 @@ def _score_single_test(
     # dimension to 0.0 on every timed run. No declared budget -> dimension is
     # skipped and weights renormalize, same as an untimed run.
     perf_budget = typed_get(crit, "performance_budget_seconds", expected=(int, float))
+    # Paths the case declared as its sandbox. Writes there are writes to the
+    # artifact under test even when the sandbox lives under /tmp.
+    sandbox_paths = _fixture_sandbox_paths(crit)
 
     if artifact_type in ("skill", "command"):
         dimensions: dict[str, dict] = {}
@@ -1823,8 +1888,8 @@ def _score_single_test(
             dimensions["quality_checks"] = score_quality_checks(
                 agent_response, timeline, required_present, required_absent
             )
-            dimensions["verify_actions"] = score_verify_actions(timeline)
-            dimensions["research_first"] = score_research_first(timeline)
+            dimensions["verify_actions"] = score_verify_actions(timeline, sandbox_paths)
+            dimensions["research_first"] = score_research_first(timeline, sandbox_paths)
             active_weights = dict(SIDE_EFFECT_GUARDED_WEIGHTS)
             # Every dimension in this profile defaults high in the absence of
             # evidence (no errors, no writes to verify, no assertions), so a
@@ -1878,8 +1943,8 @@ def _score_single_test(
             dimensions["quality_checks"] = score_quality_checks(
                 agent_response, timeline, required_present, required_absent
             )
-            dimensions["verify_actions"] = score_verify_actions(timeline)
-            dimensions["research_first"] = score_research_first(timeline)
+            dimensions["verify_actions"] = score_verify_actions(timeline, sandbox_paths)
+            dimensions["research_first"] = score_research_first(timeline, sandbox_paths)
             # Emit only what this profile weights, so `dimensions` and the
             # composite's inputs are the same set (see COMMAND_WEIGHTS).
             if "parallel_efficiency" in weights:

@@ -495,6 +495,98 @@ class TestVerifyActionsScope(unittest.TestCase):
         self.assertIn("artifact writes", result["evidence"])
 
 
+class TestSandboxedArtifactWrites(unittest.TestCase):
+    """A declared fixture sandbox under /tmp still holds a real artifact.
+
+    Scoping verify_actions/research_first to `_is_artifact_write_entry` made
+    the scratch-directory exclusion swallow TC-013's artifact at
+    /tmp/hone-seg-sandbox/SKILL.md, so the one case in the suite that scores
+    these two dimensions handed both a free 1.0 whatever the executor did.
+    """
+
+    SANDBOX = ("/tmp/hone-seg-sandbox/",)
+    ARTIFACT = "/tmp/hone-seg-sandbox/SKILL.md"
+    STATE = "/tmp/hone-seg-sandbox/workflow-state-hone-smelt-seg.json"
+    CRITERIA = "/home/u/.claude/skills/hone/evals/eval_criteria.json"
+
+    _FIXTURE_CRIT = {
+        "TC-seg": {
+            "fixture_setup": {
+                "root": "/tmp/hone-seg-sandbox",
+                "reset": True,
+                "files": [{"path": ARTIFACT, "content": "# seg-demo\n"}],
+            }
+        }
+    }
+
+    def _write(self, path, index=0):
+        return _make_timeline_entry(
+            index, "tool_use", "Edit", tool_input={"file_path": path}
+        )
+
+    def test_sandbox_artifact_write_is_counted(self):
+        from score_execution import _is_artifact_write_entry, score_verify_actions
+
+        entry = self._write(self.ARTIFACT)
+        self.assertTrue(_is_artifact_write_entry(entry, self.SANDBOX))
+        result = score_verify_actions([entry], self.SANDBOX)
+        self.assertEqual(result["score"], 0.0)
+        self.assertIn("0/1 artifact writes", result["evidence"])
+
+    def test_sandbox_state_file_write_is_still_excluded(self):
+        from score_execution import _is_artifact_write_entry
+
+        self.assertFalse(
+            _is_artifact_write_entry(self._write(self.STATE), self.SANDBOX)
+        )
+
+    def test_scratch_write_outside_sandbox_is_still_excluded(self):
+        from score_execution import _is_artifact_write_entry
+
+        entry = self._write("/tmp/hone-scratch/notes.md")
+        self.assertFalse(_is_artifact_write_entry(entry, self.SANDBOX))
+
+    def test_criteria_file_write_is_not_an_artifact_write(self):
+        """r6-B2: the criteria read-back instruction was ablated in this PR."""
+        from score_execution import _is_artifact_write_entry
+
+        self.assertFalse(_is_artifact_write_entry(self._write(self.CRITERIA)))
+
+    def test_research_first_measures_sandbox_writes(self):
+        from score_execution import score_research_first
+
+        timeline = [self._write(self.ARTIFACT)]
+        self.assertEqual(score_research_first(timeline, self.SANDBOX)["score"], 0.0)
+
+    def test_end_to_end_scoring_sees_the_sandbox_artifact(self):
+        """The regression as the pipeline actually hits it: via criteria_index."""
+        from score_execution import _score_single_test
+
+        timeline = [
+            self._write(self.ARTIFACT, 0),
+            self._write(self.STATE, 1),
+        ]
+        scored = _score_single_test(
+            {
+                "test_id": "TC-seg",
+                "execution_timeline": timeline,
+                "agent_response": "## Report\nApplied F1 and F2.",
+            },
+            "skill",
+            criteria_index=self._FIXTURE_CRIT,
+        )
+        dims = scored["dimensions"]
+        self.assertEqual(dims["verify_actions"]["score"], 0.0)
+        self.assertIn("1 artifact writes", dims["verify_actions"]["evidence"])
+        self.assertEqual(dims["research_first"]["score"], 0.0)
+
+    def test_case_without_fixture_keeps_the_scratch_exclusion(self):
+        from score_execution import score_verify_actions
+
+        timeline = [self._write("/tmp/whatever.md")]
+        self.assertEqual(score_verify_actions(timeline)["score"], 1.0)
+
+
 class TestOutputStructure(unittest.TestCase):
     """Test output format matching against artifact expectations."""
 

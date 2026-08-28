@@ -493,6 +493,16 @@ same state rather than inheriting the previous round's edits. Write each `files`
 entry verbatim, then confirm every path exists before spawning. Placeholder
 substitution applies to `fixture_setup` paths and content too.
 
+The block is also what tells the scorer where the artifact under test lives.
+`verify_actions` and `research_first` ignore writes to scratch directories, and
+a sandbox under `/tmp` would otherwise be scratch: declaring it here exempts it,
+so a real `Edit` of `<root>/SKILL.md` is measured as an artifact write. Writes
+whose *file name* marks them as bookkeeping (`workflow-state*.json`,
+`state.json`, `eval_criteria.json`) stay excluded wherever they sit, including
+inside the sandbox. A case that measures real writes but declares no
+`fixture_setup` gets neither: its writes look like scratch and both dimensions
+return a free 1.0.
+
 Provisioning belongs in the parent for two reasons. A `runner_context` that told
 the subagent to create its own sandbox would fail the Step 4 hygiene audit, which
 rejects setup blocks and filesystem-mutating commands in `runner_context`. And the
