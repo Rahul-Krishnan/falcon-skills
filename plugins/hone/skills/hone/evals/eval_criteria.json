@@ -304,7 +304,7 @@
       "name": "hone-improvement-preferences-compliance",
       "category": "execution",
       "test_profile": "knowledge_extraction",
-      "prompt": "Read the hone skill at {HONE_DIR}/SKILL.md. List and explain all 17 improvement preferences marked as 'Non-Negotiable'. For each, explain what violation would look like and how the skill enforces compliance.",
+      "prompt": "Read the hone skill at {HONE_DIR}/SKILL.md. List and explain all 22 improvement preferences marked as 'Non-Negotiable'. For each, explain what violation would look like and how the skill enforces compliance.",
       "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits). Reading files in order to answer is expected.\n\nRead {HONE_DIR}/SKILL.md and focus on the 'Improvement Preferences (Non-Negotiable)' section.\nThis is a knowledge extraction task, not an execution task. Do NOT invoke the hone skill.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
       "allowed_tools": [
         "Read",
@@ -317,14 +317,14 @@
       ],
       "checks": [
         {
-          "description": "Demonstrates understanding of the improvement preferences by explaining at least 12 of the 17 rules, with concrete violation examples (not just restating the rule text)",
+          "description": "Demonstrates understanding of the improvement preferences by explaining at least 12 of the 22 rules, with concrete violation examples (not just restating the rule text)",
           "importance": "HIGH",
           "rubric": {
             "1": "Lists fewer than 5 preferences or simply quotes text verbatim",
             "2": "Lists 5-9 preferences with paraphrasing but no violation examples",
             "3": "Lists 10+ preferences with some violation examples",
             "4": "Lists 12+ preferences with concrete violation examples for most",
-            "5": "All 17 preferences explained with violation examples AND how the skill structurally prevents violations (eg gate checks, script validations)"
+            "5": "All 22 preferences explained with violation examples AND how the skill structurally prevents violations (eg gate checks, script validations)"
           }
         },
         {

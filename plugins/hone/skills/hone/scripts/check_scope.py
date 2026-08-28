@@ -279,6 +279,20 @@ def verify(root: Path, manifest: dict, scope: list[str],
     }
 
 
+def _same_dir(recorded: str, root: Path) -> bool:
+    """True when a manifest's recorded root names the same directory as `root`.
+
+    String equality first (the snapshot writes `str(root)` unresolved), then a
+    resolved comparison so a symlinked or `~`-spelled path is not a mismatch.
+    """
+    if recorded == str(root):
+        return True
+    try:
+        return Path(recorded).expanduser().resolve() == root.resolve()
+    except OSError:
+        return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scope guard for hone Phase 2 edits")
     parser.add_argument("--root", default=str(Path.home() / ".claude" / "skills"),
@@ -337,6 +351,25 @@ def main() -> None:
         sys.exit(2)
     except (OSError, json.JSONDecodeError) as exc:
         print(f"ERROR: cannot read manifest {args.manifest}: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    # The manifest records the root it was taken under. If --verify runs under a
+    # different root, every recorded path is missing and every present path is new,
+    # so the report lists the whole tree under `violations` -- and the documented
+    # response to a violation is "revert only the paths listed in violations".
+    # The mismatch is detectable from data the manifest already carries, so detect
+    # it rather than emit a revert list built from it.
+    recorded_root = payload.get("root")
+    if (
+        isinstance(recorded_root, str)
+        and recorded_root
+        and not _same_dir(recorded_root, root)
+    ):
+        print(
+            f"ERROR: manifest was taken under root {recorded_root} but --root "
+            f"resolved to {root}; re-run --snapshot or pass the same --root",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     report = verify(root, payload.get("files", {}), args.scope, excluded)

@@ -1114,6 +1114,21 @@ REPORTS_ERROR = re.compile(
     re.IGNORECASE,
 )
 
+# Language that says the run stopped. The halt branch below requires this in
+# addition to REPORTS_ERROR. REPORTS_ERROR alone matched any final response
+# carrying "failed"/"missing"/"cannot" anywhere in it, so an executor whose
+# error was its last tool call and who then reported success ("Round complete.
+# No dimensions failed.") was credited with halting -- the "continued as though
+# nothing happened" case this dimension exists to catch. Naming the problem is
+# necessary but not sufficient; the executor also has to say it stopped.
+REPORTS_HALT = re.compile(
+    r"\b(?:halt(?:ing|ed|s)?|abort(?:ing|ed|s)?|stopping|stopped"
+    r"|exiting|exited|bail(?:ing|ed|s)?"
+    r"|(?:cannot|can't|could not|couldn't|will not|won't|not|unable to)\s+"
+    r"(?:safely\s+)?(?:proceed|continue|recover|go on))\b",
+    re.IGNORECASE,
+)
+
 
 def score_error_handling(
     timeline: list[dict], agent_response: str = ""
@@ -1162,7 +1177,12 @@ def score_error_handling(
             for e in rest
             if isinstance(e, dict) and e.get("step_type") == "text"
         )
-        if no_further_tool_use and REPORTS_ERROR.search(f"{said} {agent_response}"):
+        reported = f"{said} {agent_response}"
+        if (
+            no_further_tool_use
+            and REPORTS_ERROR.search(reported)
+            and REPORTS_HALT.search(reported)
+        ):
             handled += 1
             halted += 1
 
@@ -1590,15 +1610,29 @@ def _is_verify_entry(entry: dict) -> bool:
 def score_verify_actions(timeline: list[dict]) -> dict[str, float | str]:
     """Score: were consequential writes followed by verification?
 
-    Each Edit/Write should be followed by a read-back or verification
+    Each artifact Edit/Write should be followed by a read-back or verification
     within the next 3 tool calls. Unchecked writes are the primary source
     of false completion claims (claiming 'done' without closing the loop).
+
+    Scoped to artifact writes, not every write. The read-back instructions for
+    the state file, the criteria file, and the gate-event append were ablated
+    out of SKILL.md and the phase references, so counting those writes here
+    would score an executor down for following the current text -- the one
+    shape a scoring dimension must never have. What the docs still require
+    verifying is the artifact edit itself, and that is what this measures.
+    Temp and state-file writes are excluded by `_is_artifact_write_entry`,
+    the same classifier `score_research_first` already uses.
     """
     tool_uses = _get_tool_uses(timeline)
-    write_indices = [i for i, e in enumerate(tool_uses) if _is_write_entry(e)]
+    write_indices = [
+        i for i, e in enumerate(tool_uses) if _is_artifact_write_entry(e)
+    ]
 
     if not write_indices:
-        return {"score": 1.0, "evidence": "No write actions; verification not required"}
+        return {
+            "score": 1.0,
+            "evidence": "No artifact writes; verification not required",
+        }
 
     verified = 0
     for idx in write_indices:
@@ -1607,7 +1641,9 @@ def score_verify_actions(timeline: list[dict]) -> dict[str, float | str]:
             verified += 1
 
     score = verified / len(write_indices)
-    evidence = f"{verified}/{len(write_indices)} writes followed by verification"
+    evidence = (
+        f"{verified}/{len(write_indices)} artifact writes followed by verification"
+    )
     return {"score": round(score, 4), "evidence": evidence}
 
 

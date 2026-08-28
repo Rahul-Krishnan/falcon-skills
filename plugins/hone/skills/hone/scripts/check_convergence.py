@@ -96,10 +96,34 @@ def _blocking(findings: list[dict]) -> list[dict]:
     return [f for f in findings if (f.get("severity") or "").lower() in BLOCKING]
 
 
+def _as_int(value: object, default: int | None = None) -> int | None:
+    """Ledger numbers, tolerant of the shapes an executor actually writes.
+
+    The ledger is executor-written JSON, and everything else in this module
+    tolerates a wrong type rather than raising. `"round": "1"` or a string
+    `max_rounds` used to reach a comparison and raise TypeError out of
+    `analyze()`, which `main()` does not catch -- the documented contract for
+    a bad ledger is exit 2, not a traceback. `bool` is excluded because
+    `True` is an int in Python and is never a round number.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
 def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             reopen_limit: int = DEFAULT_REOPEN_LIMIT) -> dict:
     rounds = [r for r in ledger.get("rounds", []) if isinstance(r, dict)]
-    rounds.sort(key=lambda r: r.get("round", 0))
+    rounds.sort(key=lambda r: _as_int(r.get("round"), 0))
     reasons: list[str] = []
 
     if not rounds:
@@ -108,7 +132,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
         # `in_progress` -- does not hit KeyError on a freshly created ledger.
         return {
             "verdict": "in_progress", "rounds_run": 0,
-            "max_rounds": ledger.get("max_rounds"), "reasons": [],
+            "max_rounds": _as_int(ledger.get("max_rounds")), "reasons": [],
             "open_blocking": [], "open_minor_count": 0,
             "recurring": [], "reopened": [], "relocations": [],
             "blocking_counts": [],
@@ -205,6 +229,10 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # still open in the latest round (see `last_open_signatures` above -- a
     # relocation that has since been fixed is history, not an escalation).
     relocations: list[dict] = []
+    # One relocation still open across three rounds is one relocation, not
+    # three: the reason line counts entries, so without this it read as
+    # "3 finding(s) closed in one file reopened in another".
+    seen_relocations: set[tuple[str, str, str]] = set()
     closed_signatures: dict[str, str] = {}
     for round_entry in rounds:
         for finding in round_entry.get("findings", []):
@@ -221,7 +249,10 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
                 and signature in last_open_signatures
             ):
                 origin = closed_signatures[signature]
-                if origin != file_path:
+                if origin != file_path and (
+                    signature, origin, file_path
+                ) not in seen_relocations:
+                    seen_relocations.add((signature, origin, file_path))
                     relocations.append({
                         "signature_sample": (finding.get("summary") or "")[:100],
                         "from": origin, "to": file_path,
@@ -237,7 +268,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     open_blocking = _blocking(last_open)
     open_minor = len(last_open) - len(open_blocking)
 
-    max_rounds = ledger.get("max_rounds")
+    max_rounds = _as_int(ledger.get("max_rounds"))
     rounds_exhausted = bool(max_rounds) and len(rounds) >= max_rounds
 
     if reasons:

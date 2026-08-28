@@ -275,3 +275,58 @@ class TestPorcelainPathParsing(unittest.TestCase):
         from check_scope import _porcelain_path
 
         self.assertEqual(_porcelain_path('?? "a\\"b/c\\\\d.md"'), 'a"b/c\\d.md')
+
+
+class TestManifestRootMismatch(unittest.TestCase):
+    """A --verify under a different root must exit 2, not emit a revert list.
+
+    SKILL.md Step 6a tells the executor to reuse $SCOPE_ROOT from Step 5a, but
+    shell state does not survive between tool calls, so a re-derived or empty
+    --root is a realistic outcome. Under a mismatched root every recorded file
+    is "removed" and every present file is "added", and the documented response
+    to a violation is to revert the listed paths.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.root = self.tmp / "skills"
+        (self.root / "hone").mkdir(parents=True)
+        (self.root / "hone" / "SKILL.md").write_text("in scope\n")
+        self.other = self.tmp / "elsewhere"
+        (self.other / "hone").mkdir(parents=True)
+        (self.other / "hone" / "SKILL.md").write_text("different tree\n")
+        self.manifest = self.tmp / "manifest.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, str(Path(check_scope.__file__)), *args],
+            capture_output=True, text=True,
+        )
+
+    def test_verify_under_a_different_root_exits_2(self):
+        snap = self._run("--root", str(self.root), "--manifest", str(self.manifest),
+                         "--snapshot")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        verify_run = self._run("--root", str(self.other), "--manifest",
+                               str(self.manifest), "--scope", "hone", "--verify")
+        self.assertEqual(verify_run.returncode, 2, verify_run.stdout)
+        self.assertIn("manifest was taken under root", verify_run.stderr)
+        self.assertNotIn("VIOLATION", verify_run.stdout)
+
+    def test_verify_under_the_recorded_root_still_runs(self):
+        self._run("--root", str(self.root), "--manifest", str(self.manifest),
+                  "--snapshot")
+        verify_run = self._run("--root", str(self.root), "--manifest",
+                               str(self.manifest), "--scope", "hone", "--verify")
+        self.assertEqual(verify_run.returncode, 0, verify_run.stderr)
+
+    def test_a_spelling_difference_for_the_same_directory_is_not_a_mismatch(self):
+        self._run("--root", str(self.root), "--manifest", str(self.manifest),
+                  "--snapshot")
+        respelled = str(self.root) + "/./hone/.."
+        verify_run = self._run("--root", respelled, "--manifest",
+                               str(self.manifest), "--scope", "hone", "--verify")
+        self.assertEqual(verify_run.returncode, 0, verify_run.stderr)

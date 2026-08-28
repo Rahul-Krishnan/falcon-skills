@@ -182,3 +182,22 @@ class TestCriteriaRootShape(unittest.TestCase):
         proc = self._run('"just a string"')
         self.assertEqual(proc.returncode, 2)
         self.assertNotIn("Traceback", proc.stderr)
+
+
+class TestSizingHonoursAlpha(unittest.TestCase):
+    """The sizing block and the comparison block must quote the same floor."""
+
+    def test_min_discordant_tracks_the_caller_alpha(self):
+        from check_eval_power import check_sizing, min_discordant_for_alpha
+
+        criteria = {"test_cases": [
+            {"id": f"TC-00{i}", "test_profile": "execution"} for i in range(1, 7)
+        ]}
+        default = check_sizing(criteria, 5, 2)
+        loose = check_sizing(criteria, 5, 2, alpha=0.2)
+        self.assertEqual(default["min_discordant_for_significance"],
+                         min_discordant_for_alpha(0.05))
+        self.assertEqual(loose["min_discordant_for_significance"],
+                         min_discordant_for_alpha(0.2))
+        self.assertNotEqual(default["min_discordant_for_significance"],
+                            loose["min_discordant_for_significance"])

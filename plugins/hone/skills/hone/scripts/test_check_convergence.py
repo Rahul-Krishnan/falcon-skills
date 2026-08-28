@@ -277,3 +277,67 @@ class TestJsonContractKeys(unittest.TestCase):
         empty = analyze({"rounds": [], "max_rounds": 5}, 3, 3)
         populated = analyze(ledger([[finding("f1")]]), 3, 3)
         self.assertEqual(set(empty), set(populated))
+
+
+class TestRelocationDeduplication(unittest.TestCase):
+    """One relocation still open across N rounds is one relocation."""
+
+    def test_a_relocation_open_for_three_rounds_is_counted_once(self):
+        rounds = [
+            [finding("f1", file="SKILL.md", summary="gate order wrong")],
+            [finding("f1", status="fixed", file="SKILL.md",
+                     summary="gate order wrong")],
+            [finding("f2", file="ref.md", summary="gate order wrong")],
+            [finding("f2", file="ref.md", summary="gate order wrong")],
+            [finding("f2", file="ref.md", summary="gate order wrong")],
+        ]
+        report = analyze(ledger(rounds, max_rounds=9), 99, 99)
+        self.assertEqual(len(report["relocations"]), 1)
+        self.assertIn("1 finding(s) closed in one file reopened in another",
+                      report["reasons"])
+
+    def test_two_distinct_relocations_are_both_reported(self):
+        rounds = [
+            [finding("f1", file="a.md", summary="alpha"),
+             finding("g1", file="c.md", summary="beta")],
+            [finding("f1", status="fixed", file="a.md", summary="alpha"),
+             finding("g1", status="fixed", file="c.md", summary="beta")],
+            [finding("f2", file="b.md", summary="alpha"),
+             finding("g2", file="d.md", summary="beta")],
+        ]
+        report = analyze(ledger(rounds, max_rounds=9), 99, 99)
+        self.assertEqual(len(report["relocations"]), 2)
+
+
+class TestLedgerTypeTolerance(unittest.TestCase):
+    """A stringified number in the ledger is exit 2 territory, not a traceback.
+
+    Everything else in this module tolerates a wrong type; `round` and
+    `max_rounds` reached a comparison and raised TypeError out of analyze().
+    """
+
+    def test_string_round_numbers_sort_without_raising(self):
+        report = analyze(
+            {"max_rounds": 5, "rounds": [
+                {"round": "2", "findings": [finding("f1")]},
+                {"round": "1", "findings": []},
+            ]}, 3, 3)
+        self.assertEqual(report["rounds_run"], 2)
+        self.assertEqual(report["verdict"], "in_progress")
+
+    def test_string_max_rounds_still_caps(self):
+        report = analyze(
+            {"max_rounds": "2", "rounds": [
+                {"round": 1, "findings": [finding("f1")]},
+                {"round": 2, "findings": [finding("f1")]},
+            ]}, 99, 99)
+        self.assertEqual(report["max_rounds"], 2)
+        self.assertEqual(report["verdict"], "capped")
+
+    def test_unparseable_max_rounds_is_treated_as_absent(self):
+        report = analyze(
+            {"max_rounds": "soon", "rounds": [
+                {"round": 1, "findings": [finding("f1")]},
+            ]}, 99, 99)
+        self.assertIsNone(report["max_rounds"])
+        self.assertEqual(report["verdict"], "in_progress")

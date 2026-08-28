@@ -424,6 +424,77 @@ class TestErrorHandling(unittest.TestCase):
         self.assertEqual(result["score"], 0.0)
 
 
+class TestHaltReporting(unittest.TestCase):
+    """The halt branch needs a halt, not just error vocabulary.
+
+    An error on the last tool call plus any final response containing
+    "failed"/"missing"/"cannot" used to count as "handled by halting and
+    reporting", which credits the executor that carried on and claimed
+    success.
+    """
+
+    def _timeline(self):
+        return [
+            _make_timeline_entry(0, "tool_use", "Bash", is_error=True),
+            _make_timeline_entry(1, "tool_result", is_error=True, content="boom"),
+        ]
+
+    def test_success_narration_mentioning_failure_is_not_a_halt(self):
+        from score_execution import score_error_handling
+
+        result = score_error_handling(
+            self._timeline(), "Round complete. No dimensions failed."
+        )
+        self.assertEqual(result["score"], 0.0)
+
+    def test_naming_the_error_and_stopping_is_a_halt(self):
+        from score_execution import score_error_handling
+
+        result = score_error_handling(
+            self._timeline(),
+            "The state file is malformed at /tmp/state.json. Cannot proceed.",
+        )
+        self.assertEqual(result["score"], 1.0)
+        self.assertIn("halting", result["evidence"])
+
+
+class TestVerifyActionsScope(unittest.TestCase):
+    """verify_actions counts artifact writes only.
+
+    The state-file, criteria-file and gate-event read-back instructions were
+    ablated out of the docs, so counting those writes would score an executor
+    down for following the current text.
+    """
+
+    def test_state_file_write_is_not_counted(self):
+        from score_execution import score_verify_actions
+
+        timeline = [
+            _make_timeline_entry(
+                0, "tool_use", "Write",
+                tool_input={"file_path": "/tmp/workflow-hone-x.json"},
+            ),
+            _make_timeline_entry(1, "tool_result"),
+        ]
+        result = score_verify_actions(timeline)
+        self.assertEqual(result["score"], 1.0)
+        self.assertIn("No artifact writes", result["evidence"])
+
+    def test_artifact_write_without_verification_still_scores_zero(self):
+        from score_execution import score_verify_actions
+
+        timeline = [
+            _make_timeline_entry(
+                0, "tool_use", "Edit",
+                tool_input={"file_path": "/home/u/.claude/skills/hone/SKILL.md"},
+            ),
+            _make_timeline_entry(1, "tool_result"),
+        ]
+        result = score_verify_actions(timeline)
+        self.assertEqual(result["score"], 0.0)
+        self.assertIn("artifact writes", result["evidence"])
+
+
 class TestOutputStructure(unittest.TestCase):
     """Test output format matching against artifact expectations."""
 

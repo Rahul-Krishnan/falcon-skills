@@ -548,8 +548,10 @@ BASELINE_START_NS=$(date +%s%N)
 Run the same subagent evaluation without loading the skill context. Write results to `$BASELINE_DIR/results.json`. Then run deterministic scoring on the baseline too, so Step 10's benchmark compares like metrics (`generate_spec_artifacts.py` only computes a composite delta between matching metrics — deterministic vs deterministic, or LLM-average vs LLM-average — and omits it otherwise):
 
 ```bash
-python3 <skill-dir>/scripts/score_execution.py "$BASELINE_DIR/results.json" --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --require-timeline --json
+python3 <skill-dir>/scripts/score_execution.py "$BASELINE_DIR/results.json" --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --json
 ```
+
+**No `--require-timeline` on the baseline.** Step 9 uses the flag because a skill-loaded run that produced no tool call is a harness defect. The baseline is run *without* the skill context, where a case the agent declines or answers in prose alone is a legitimate baseline outcome and the exact thing the delta is meant to measure. Requiring a timeline there turns that outcome into a non-zero exit with no documented response.
 
 The script writes `$BASELINE_DIR/deterministic_scores.json` next to the results file.
 

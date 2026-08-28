@@ -72,7 +72,8 @@ def min_discordant_for_alpha(alpha: float = ALPHA) -> int:
     return n
 
 
-def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int) -> dict:
+def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
+                 alpha: float = ALPHA) -> dict:
     """Assess whether a criteria set is large and varied enough to rule."""
     cases = criteria.get("test_cases") or []
     ids = [c.get("id") for c in cases if isinstance(c, dict) and c.get("id")]
@@ -94,7 +95,7 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int) -> dict:
     if len(distinct_ids) < min_stimuli:
         errors.append(
             f"{len(distinct_ids)} distinct test case(s), floor is {min_stimuli}; "
-            "no arrangement of wins reaches p<=0.05 below the floor"
+            f"no arrangement of wins reaches p<={alpha} below the floor"
         )
     if len(profiles) < min_profiles:
         warnings.append(
@@ -110,7 +111,7 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int) -> dict:
         "distinct_cases": len(distinct_ids),
         "min_stimuli": min_stimuli,
         "profiles": profiles,
-        "min_discordant_for_significance": min_discordant_for_alpha(),
+        "min_discordant_for_significance": min_discordant_for_alpha(alpha),
         "errors": errors,
         "warnings": warnings,
     }
@@ -296,7 +297,7 @@ def main() -> None:
         sys.exit(2)
 
     criteria = _load(args.criteria_file)
-    sizing = check_sizing(criteria, args.min_stimuli, args.min_profiles)
+    sizing = check_sizing(criteria, args.min_stimuli, args.min_profiles, args.alpha)
 
     report = sizing
     if args.before:
