@@ -389,18 +389,18 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 3. **Step 3: Fresh-Eyes Analysis** -- Parallel fresh-eyes subagent (inherits session model) for independent improvement proposals.
 4. **Step 4: Reconcile + Analyze** -- Merge main thread + fresh-eyes findings, performance audit.
 5. **Step 5: Improvement Plan** -- Table of proposed changes with fix type and source. When multiple preferences apply to the same change, note any tension between them and state which takes precedence.
-5a. **Step 5a: Scope Snapshot** -- Before any edit, derive the guarded tree from the artifact path Step 1 discovered, then snapshot it (preference 21):
+5a. **Step 5a: Scope Snapshot** -- Before any edit, snapshot the guarded tree by handing the script the artifact path Step 1 discovered and its type (preference 21):
 
    ```bash
-   ARTIFACT_DIR="$(cd "$(dirname "<discovered artifact path>")" && pwd)"
-   SCOPE_ROOT="$(dirname "$ARTIFACT_DIR")"
-   SCOPE_NAME="$(basename "$ARTIFACT_DIR")"
-   check_scope.py --root "$SCOPE_ROOT" --manifest /tmp/scope-${RUN_ID}.json --snapshot
+   check_scope.py --artifact "<discovered artifact path>" --type <skill|command|hook|script> \
+     --manifest /tmp/scope-${RUN_ID}.json --snapshot
    ```
 
-   Never hardcode `--root ~/.claude/skills`. Hone routinely operates on artifacts installed elsewhere (`$CLAUDE_PLUGIN_ROOT/skills/...`, `~/.claude/plugins/*/skills/...`), and a root that does not contain the edited file snapshots a tree nothing in the round touches, so `--verify` reports `clean` no matter what changed. For a single-file artifact (a hook or a script rather than a skill directory), `SCOPE_ROOT` is the containing directory and `SCOPE_NAME` is the file name.
+   Pass the artifact, not a hand-derived root. The watch root and the permitted scope are independent and derive differently -- a hook's watch is its install directory while its scope is that one file, and a skill inside a repository needs a watch that reaches the *whole repository* so an edit to a sibling `commands/` directory or a repo-root `scripts/` is visible. No single dirname chain produces both, which is why the script derives them. `--root` and `--scope` remain available as explicit overrides for the rare case that needs them.
 6. **Step 6: Apply Edits** -- Stale-write guard, apply edits, generate companion validators if needed.
-6a. **Step 6a: Scope Verify** -- Run `check_scope.py --root "$SCOPE_ROOT" --manifest /tmp/scope-${RUN_ID}.json --scope "$SCOPE_NAME" --verify`, reusing the same `$SCOPE_ROOT` Step 5a snapshotted. Emit the `scope_verify` gate event either way: `result: "pass"` when the check comes back `clean`, `result: "fail"` on a violation. On a violation, also revert **only** the paths listed in `violations` and halt the round. The clean path is the one that gets forgotten, and it is the one the exit gate requires.
+6a. **Step 6a: Scope Verify** -- Run `check_scope.py --manifest /tmp/scope-${RUN_ID}.json --verify`. It reads the root and the scope back out of the manifest, so nothing from Step 5a has to be reproduced here -- Step 5a and Step 6a are separate Bash calls and shell state does not survive between them. Emit the `scope_verify` gate event either way: `result: "pass"` when the check comes back `clean`, `result: "fail"` on a violation. On a violation, also revert **only** the paths listed in `violations` and halt the round. The clean path is the one that gets forgotten, and it is the one the exit gate requires.
+
+   If the report carries a `root_fallback` field, the repository exceeded `--max-files` and the watch narrowed to the install directory. That is a real gap in coverage, not a clean bill of health: say so in the round summary rather than treating `clean` at face value.
 
    Revert nothing listed under `preexisting_dirty_out_of_scope`. Those files were already uncommitted when the run started and are byte-identical to the snapshot, so reverting them destroys someone else's work rather than undoing yours. Only the hash manifest can attribute a change to this run; a git diff cannot tell your edit from the one already sitting there.
 6b. **Step 6b: Constraint Ablation** -- For each constraint flagged as possible dead weight (preference 22), remove it, re-run the existing criteria, and restore it only if a test regresses. Record each ablation and its outcome in the ledger. Skip constraints guarding irreversible actions.
