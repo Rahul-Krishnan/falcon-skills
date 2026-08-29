@@ -260,6 +260,7 @@ class TestModeDerivation(unittest.TestCase):
             "gates": [
                 gate("fixonly_entry"),
                 gate("phase2_to_phase3"),
+                gate("convergence"),
                 gate("phase3_exit"),
                 gate("workflow_exit"),
             ],
@@ -365,5 +366,176 @@ class TestCliStateFileGuards(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
 
+class TestHaltSequenceTail(unittest.TestCase):
+    """A fail followed by convergence + workflow_exit is a halt, not progress."""
+
+    def test_convergence_in_the_tail_does_not_warn(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("convergence", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["warnings"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestResumedRuns(unittest.TestCase):
+    """A resumed run must record that it resumed (regression: TC-011).
+
+    The compaction-resume path was the one documented recovery path with no
+    gate event, so a correct resume left no trace and scored 0.0 on
+    gate_compliance.
+    """
+
+    def _normal(self):
+        return [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("workflow_exit"),
+        ]
+
+    def test_resumed_without_resume_event_is_invalid(self):
+        report = validate_gates(self._normal(), "normal", resumed=True)
+        self.assertFalse(report["valid"])
+        self.assertIn("resume", report["missing_steps"])
+
+    def test_resumed_with_resume_event_is_valid(self):
+        report = validate_gates([gate("resume")] + self._normal(), "normal", resumed=True)
+        self.assertTrue(report["valid"])
+
+    def test_resume_not_required_when_not_resumed(self):
+        self.assertTrue(validate_gates(self._normal(), "normal", resumed=False)["valid"])
+
+    def test_resumed_is_orthogonal_to_mode(self):
+        gates = [gate("resume"), gate("fixonly_entry"), gate("phase2_to_phase3"),
+                 gate("phase3_exit"), gate("workflow_exit")]
+        self.assertTrue(validate_gates(gates, "fix-only", resumed=True)["valid"])
+
+
+class TestDocumentedCleanRunValidates(unittest.TestCase):
+    """A run that emits every documented gate event must pass its own exit gate.
+
+    Events have been added to REQUIRED_STEPS without the instructions that
+    emit them on the clean path, so every compliant run failed here. This
+    pins the two halves together: if the requirement moves, the emission
+    instructions have to move with it.
+    """
+
+    STEPS = {
+        "phase1_structural_audit": "done",
+        "phase1_criteria_audit": "done",
+        "phase1_evaluate": "done",
+        "phase1_spec_artifacts": "done",
+        "phase1_reference_validation": "done",
+        "phase2_fresh_eyes": "done",
+        "phase2_trigger_test": "done",
+        "phase2_improve": "done",
+        "phase3_reevaluate": "done",
+    }
+
+    @staticmethod
+    def _gate(step, result="pass"):
+        return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
+
+    def _state(self, **overrides):
+        state = {
+            "steps": dict(self.STEPS),
+            "gates": [
+                self._gate("phase1_to_phase2"),
+                self._gate("phase2_to_phase3"),
+                self._gate("phase3_exit"),
+                self._gate("workflow_exit"),
+            ],
+        }
+        state.update(overrides)
+        return state
+
+    def _report(self, state):
+        from validate_gates import derive_resumed, validate_gates
+        from hone_common import derive_gate_mode
+
+        return validate_gates(
+            state.get("gates", []),
+            derive_gate_mode(state.get("steps")) or "normal",
+            derive_resumed(state),
+        )
+
+    def test_a_fully_documented_normal_run_is_valid(self):
+        report = self._report(self._state())
+        self.assertTrue(report["valid"], report["errors"])
+
+class TestResumedIsDerivedFromState(unittest.TestCase):
+    """`resumed` must come off the state file, not a flag the exit gate omits."""
+
+    def test_derive_resumed_reads_the_state_field(self):
+        from validate_gates import derive_resumed
+
+        self.assertTrue(derive_resumed({"resumed": True}))
+        self.assertFalse(derive_resumed({"resumed": False}))
+        self.assertFalse(derive_resumed({}))
+        self.assertFalse(derive_resumed("not a state file"))
+        # Only a real boolean true counts; a truthy string is not a resume.
+        self.assertFalse(derive_resumed({"resumed": "yes"}))
+
+    def test_a_resumed_run_missing_its_resume_event_fails_with_no_flag(self):
+        base = TestDocumentedCleanRunValidates()
+        state = base._state(resumed=True)
+        report = base._report(state)
+        self.assertFalse(report["valid"])
+        self.assertIn("resume", report["missing_steps"])
+
+    def test_a_resumed_run_that_recorded_the_event_is_valid(self):
+        base = TestDocumentedCleanRunValidates()
+        state = base._state(resumed=True)
+        state["gates"].append(base._gate("resume"))
+        self.assertTrue(base._report(state)["valid"])
+
+
+class TestHaltTailMatchesTheScorer(unittest.TestCase):
+    """validate_gates and score_gate_compliance read one halt shape.
+
+    The comment above the fail-semantics loop claimed they already did; they
+    did not. `terminal` was `all(step in HALT_SEQUENCE_STEPS)`, satisfied by a
+    tail of `convergence` alone, while the scorer also required a
+    `workflow_exit`.
+    """
+
+    def test_convergence_tail_without_workflow_exit_warns(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("convergence", result="fail"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
+
+    def test_passing_convergence_after_an_unrelated_fail_warns(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("handoff_phase2_apply", result="fail"),
+            gate("convergence", result="pass"),
+            gate("workflow_exit", result="pass"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
+
+    def test_the_documented_regression_halt_does_not_warn(self):
+        """phase3_exit fails at step 6; the mandatory convergence check follows."""
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("convergence", result="pass"),
+            gate("workflow_exit", result="pass"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertEqual(report["warnings"], [])

@@ -11,6 +11,7 @@ import math
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 # Will import after implementation exists
 # from score_execution import (
@@ -235,7 +236,11 @@ class TestGateCompliance(unittest.TestCase):
             _make_timeline_entry(1, "tool_result"),
             _make_timeline_entry(2, "text", content="I did the thing. Moving on."),
         ]
-        result = score_gate_compliance(timeline, "Just did it, no validation.")
+        # The fixture must contain no gate vocabulary at all, negated or not:
+        # the legacy fallback is a substring counter, not a parser, so
+        # "no validation" reads as a validation mention. It is capped at
+        # 0.7 precisely because it is that crude.
+        result = score_gate_compliance(timeline, "Just did it and moved on.")
         self.assertEqual(result["score"], 0.0)
 
 
@@ -417,6 +422,169 @@ class TestErrorHandling(unittest.TestCase):
         ]
         result = score_error_handling(timeline)
         self.assertEqual(result["score"], 0.0)
+
+
+class TestHaltReporting(unittest.TestCase):
+    """The halt branch needs a halt, not just error vocabulary.
+
+    An error on the last tool call plus any final response containing
+    "failed"/"missing"/"cannot" used to count as "handled by halting and
+    reporting", which credits the executor that carried on and claimed
+    success.
+    """
+
+    def _timeline(self):
+        return [
+            _make_timeline_entry(0, "tool_use", "Bash", is_error=True),
+            _make_timeline_entry(1, "tool_result", is_error=True, content="boom"),
+        ]
+
+    def test_success_narration_mentioning_failure_is_not_a_halt(self):
+        from score_execution import score_error_handling
+
+        result = score_error_handling(
+            self._timeline(), "Round complete. No dimensions failed."
+        )
+        self.assertEqual(result["score"], 0.0)
+
+    def test_naming_the_error_and_stopping_is_a_halt(self):
+        from score_execution import score_error_handling
+
+        result = score_error_handling(
+            self._timeline(),
+            "The state file is malformed at /tmp/state.json. Cannot proceed.",
+        )
+        self.assertEqual(result["score"], 1.0)
+        self.assertIn("halting", result["evidence"])
+
+
+class TestVerifyActionsScope(unittest.TestCase):
+    """verify_actions counts artifact writes only.
+
+    The state-file, criteria-file and gate-event read-back instructions were
+    ablated out of the docs, so counting those writes would score an executor
+    down for following the current text.
+    """
+
+    def test_state_file_write_is_not_counted(self):
+        from score_execution import score_verify_actions
+
+        timeline = [
+            _make_timeline_entry(
+                0, "tool_use", "Write",
+                tool_input={"file_path": "/tmp/workflow-hone-x.json"},
+            ),
+            _make_timeline_entry(1, "tool_result"),
+        ]
+        result = score_verify_actions(timeline)
+        self.assertEqual(result["score"], 1.0)
+        self.assertIn("No artifact writes", result["evidence"])
+
+    def test_artifact_write_without_verification_still_scores_zero(self):
+        from score_execution import score_verify_actions
+
+        timeline = [
+            _make_timeline_entry(
+                0, "tool_use", "Edit",
+                tool_input={"file_path": "/home/u/.claude/skills/hone/SKILL.md"},
+            ),
+            _make_timeline_entry(1, "tool_result"),
+        ]
+        result = score_verify_actions(timeline)
+        self.assertEqual(result["score"], 0.0)
+        self.assertIn("artifact writes", result["evidence"])
+
+
+class TestSandboxedArtifactWrites(unittest.TestCase):
+    """A declared fixture sandbox under /tmp still holds a real artifact.
+
+    Scoping verify_actions/research_first to `_is_artifact_write_entry` made
+    the scratch-directory exclusion swallow TC-013's artifact at
+    /tmp/hone-seg-sandbox/SKILL.md, so the one case in the suite that scores
+    these two dimensions handed both a free 1.0 whatever the executor did.
+    """
+
+    SANDBOX = ("/tmp/hone-seg-sandbox/",)
+    ARTIFACT = "/tmp/hone-seg-sandbox/SKILL.md"
+    STATE = "/tmp/hone-seg-sandbox/workflow-state-hone-smelt-seg.json"
+    CRITERIA = "/home/u/.claude/skills/hone/evals/eval_criteria.json"
+
+    _FIXTURE_CRIT = {
+        "TC-seg": {
+            "fixture_setup": {
+                "root": "/tmp/hone-seg-sandbox",
+                "reset": True,
+                "files": [{"path": ARTIFACT, "content": "# seg-demo\n"}],
+            }
+        }
+    }
+
+    def _write(self, path, index=0):
+        return _make_timeline_entry(
+            index, "tool_use", "Edit", tool_input={"file_path": path}
+        )
+
+    def test_sandbox_artifact_write_is_counted(self):
+        from score_execution import _is_artifact_write_entry, score_verify_actions
+
+        entry = self._write(self.ARTIFACT)
+        self.assertTrue(_is_artifact_write_entry(entry, self.SANDBOX))
+        result = score_verify_actions([entry], self.SANDBOX)
+        self.assertEqual(result["score"], 0.0)
+        self.assertIn("0/1 artifact writes", result["evidence"])
+
+    def test_sandbox_state_file_write_is_still_excluded(self):
+        from score_execution import _is_artifact_write_entry
+
+        self.assertFalse(
+            _is_artifact_write_entry(self._write(self.STATE), self.SANDBOX)
+        )
+
+    def test_scratch_write_outside_sandbox_is_still_excluded(self):
+        from score_execution import _is_artifact_write_entry
+
+        entry = self._write("/tmp/hone-scratch/notes.md")
+        self.assertFalse(_is_artifact_write_entry(entry, self.SANDBOX))
+
+    def test_criteria_file_write_is_not_an_artifact_write(self):
+        """r6-B2: the criteria read-back instruction was ablated in this PR."""
+        from score_execution import _is_artifact_write_entry
+
+        self.assertFalse(_is_artifact_write_entry(self._write(self.CRITERIA)))
+
+    def test_research_first_measures_sandbox_writes(self):
+        from score_execution import score_research_first
+
+        timeline = [self._write(self.ARTIFACT)]
+        self.assertEqual(score_research_first(timeline, self.SANDBOX)["score"], 0.0)
+
+    def test_end_to_end_scoring_sees_the_sandbox_artifact(self):
+        """The regression as the pipeline actually hits it: via criteria_index."""
+        from score_execution import _score_single_test
+
+        timeline = [
+            self._write(self.ARTIFACT, 0),
+            self._write(self.STATE, 1),
+        ]
+        scored = _score_single_test(
+            {
+                "test_id": "TC-seg",
+                "execution_timeline": timeline,
+                "agent_response": "## Report\nApplied F1 and F2.",
+            },
+            "skill",
+            criteria_index=self._FIXTURE_CRIT,
+        )
+        dims = scored["dimensions"]
+        self.assertEqual(dims["verify_actions"]["score"], 0.0)
+        self.assertIn("1 artifact writes", dims["verify_actions"]["evidence"])
+        self.assertEqual(dims["research_first"]["score"], 0.0)
+
+    def test_case_without_fixture_keeps_the_scratch_exclusion(self):
+        from score_execution import score_verify_actions
+
+        timeline = [self._write("/tmp/whatever.md")]
+        self.assertEqual(score_verify_actions(timeline)["score"], 1.0)
 
 
 class TestOutputStructure(unittest.TestCase):
@@ -1086,9 +1254,31 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
 
     def test_terminal_fail_is_compliant(self):
-        result = _score_written_gates([self._gate("phase3_exit", "fail")])
+        result = _score_written_gates([
+            self._gate("phase3_exit", "fail"),
+            self._gate("workflow_exit", "fail"),
+        ])
         self.assertEqual(result["score"], 1.0)
         self.assertIn("expected-fail", result["evidence"])
+
+    def test_a_failing_exit_event_is_compliant_on_its_own(self):
+        """`workflow_exit` is the last event a run owes, so a fail there ends it."""
+        result = _score_written_gates([self._gate("workflow_exit", "fail")])
+        self.assertEqual(result["score"], 1.0)
+        self.assertIn("expected-fail", result["evidence"])
+
+    def test_a_fail_that_simply_stops_emitting_is_not_compliant(self):
+        """No `workflow_exit` after the fail: the run stopped writing gates.
+
+        Treating that as a halt let an executor score a failed gate as an
+        expected fail by emitting fewer events than an honest halt emits.
+        """
+        result = _score_written_gates([
+            self._gate("phase2_to_phase3", "pass"),
+            self._gate("phase3_exit", "fail"),
+        ])
+        self.assertLess(result["score"], 1.0)
+        self.assertIn("non-compliant", result["evidence"])
 
     def test_fail_then_pass_same_step_is_compliant(self):
         result = _score_written_gates(
@@ -1120,6 +1310,71 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
     def test_invalid_result_value_is_malformed(self):
         result = _score_written_gates([self._gate("phase1_to_phase2", "enter_phase2")])
         self.assertLess(result["score"], 1.0)
+
+    def test_documented_halt_sequence_is_compliant(self):
+        # The detecting fail, the convergence check it capped, then the exit.
+        result = _score_written_gates(
+            [
+                self._gate("phase3_exit", "fail"),
+                self._gate("convergence", "fail"),
+                self._gate("workflow_exit", "fail"),
+            ]
+        )
+        self.assertEqual(result["score"], 1.0)
+
+    def test_fail_then_silence_is_not_a_halt(self):
+        # No later pass, but no workflow_exit either: the run failed a gate
+        # and kept going without recording anything. Absence of forward
+        # progress is not evidence of a halt.
+        result = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "fail"),
+                self._gate("phase2_to_phase3", "fail"),
+                self._gate("phase3_exit", "fail"),
+            ]
+        )
+        self.assertLess(result["score"], 1.0)
+
+    def test_honest_later_pass_does_not_score_worse_than_silence(self):
+        silent = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "fail"),
+                self._gate("phase2_to_phase3", "fail"),
+            ]
+        )
+        honest = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "fail"),
+                self._gate("phase2_to_phase3", "pass"),
+            ]
+        )
+        self.assertLessEqual(silent["score"], honest["score"])
+
+
+class TestGateKeywordAnchoring(unittest.TestCase):
+    """The keyword fallback must not fire on words that merely start the same."""
+
+    def _matches(self, text):
+        from score_execution import GATE_KEYWORDS
+
+        return GATE_KEYWORDS.findall(text)
+
+    def test_inflected_forms_still_match(self):
+        for text in ("gates[]", "validate_handoff.py", "validation", "validators",
+                     "checklists", "rubrics"):
+            self.assertTrue(self._matches(text), text)
+
+    def test_prefix_collisions_do_not_match(self):
+        for text in ("gateway", "stopwatch", "stopped", "stopping",
+                     "gate2", "validationErrors"):
+            self.assertEqual(self._matches(text), [], text)
+
+    def test_halt_narrative_does_not_reach_the_keyword_ceiling(self):
+        from score_execution import score_gate_compliance
+
+        narrative = "Stopped. Stopping now. It stopped again, stopping there."
+        result = score_gate_compliance([], narrative)
+        self.assertEqual(result["score"], 0.0)
 
 
 class TestRequiredAbsentNegation(unittest.TestCase):
@@ -1734,8 +1989,11 @@ class TestScoreErrorIsInconclusive(unittest.TestCase):
                         {"step_type": "tool_use", "tool_name": "Read", "step_index": 0}
                     ],
                 },
-                # execution_timeline as an object, not a list: crashes the
-                # per-test scorer, which the run-level handler catches.
+                # execution_timeline as an object, not a list. This used to
+                # crash the per-test scorer; _timeline_entries now normalizes
+                # it to no entries, so the record scores as inconclusive
+                # instead. Either way it carries composite None and stays out
+                # of the run composite, which is what the callers rely on.
                 {
                     "test_id": "boom",
                     "agent_response": "x",
@@ -1751,12 +2009,52 @@ class TestScoreErrorIsInconclusive(unittest.TestCase):
             json.dump(output, handle)
         return output
 
-    def test_crashed_test_has_no_composite(self):
+    def test_malformed_timeline_has_no_composite(self):
         with tempfile.TemporaryDirectory() as tmp:
             output = self._run(tmp)
         crashed = next(t for t in output["per_test"] if t["test_id"] == "boom")
         self.assertIsNone(crashed["composite"])
+        # A malformed timeline is unscoreable, not a scorer bug: it is
+        # normalized to no entries and reported as inconclusive rather than
+        # taken down the score_error path a real exception uses.
+        self.assertEqual(crashed["status"], "inconclusive")
+
+    def test_a_real_scorer_exception_still_lands_as_score_error(self):
+        """The run-level handler must still catch a genuine scorer crash.
+
+        Hardening the timeline removed the easiest way to trigger it, so the
+        path is exercised directly rather than through malformed input.
+        """
+        import score_execution
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("scorer blew up")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(score_execution, "_score_single_test", boom):
+                results = {
+                    "results": [
+                        {
+                            "test_id": "kaboom",
+                            "agent_response": "x",
+                            "execution_timeline": [
+                                {
+                                    "step_type": "tool_use",
+                                    "tool_name": "Read",
+                                    "tool_input": {},
+                                }
+                            ],
+                        }
+                    ]
+                }
+                path = os.path.join(tmp, "results.json")
+                with open(path, "w") as handle:
+                    json.dump(results, handle)
+                output = score_execution.score_from_results(path, "skill", "")
+        crashed = next(t for t in output["per_test"] if t["test_id"] == "kaboom")
         self.assertEqual(crashed["status"], "score_error")
+        self.assertIsNone(crashed["composite"])
+        self.assertIn("RuntimeError", crashed["error"])
 
     def test_crashed_test_is_excluded_from_the_run_composite(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2035,3 +2333,549 @@ class TestUserCommunicationWordBoundaries(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMergedRegressions(unittest.TestCase):
+    """Regressions carried forward from the local fork (2026-08-26 hone run)."""
+
+    TC004 = "'widget' is not a valid artifact type. Choose one: skill, command, hook, script."
+    TC005 = ("--auto and --confirm conflict. Choose one: --auto (run unattended) "
+             "or --confirm (approve each step).")
+    TC003 = ("What artifact type do you want to hone? (e.g. /hone skill recap)\n"
+             "- skill: Evaluate a skill\n- command: Evaluate a command\n\n"
+             "What is the artifact name?")
+
+    def test_mandated_fallbacks_are_recognized_as_communication(self):
+        from score_execution import score_user_communication
+        for name, text in (("TC-003", self.TC003), ("TC-004", self.TC004), ("TC-005", self.TC005)):
+            with self.subTest(case=name):
+                self.assertGreater(score_user_communication([], text)["score"], 0.0)
+
+    def test_silence_is_still_not_communication(self):
+        from score_execution import score_user_communication
+        self.assertEqual(score_user_communication([], "Done.")["score"], 0.0)
+
+    def test_gate_keywords_match_inflections(self):
+        from score_execution import score_gate_compliance
+        for text in ("Any gates[] events already appended survive on disk.",
+                     "I re-ran validate_handoff.py and confirmed validation passed.",
+                     "The validator reported zero errors."):
+            with self.subTest(text=text):
+                self.assertGreater(score_gate_compliance([], text)["score"], 0.0)
+
+    def test_required_absent_ignores_tool_results(self):
+        from score_execution import score_quality_checks
+        timeline = [{"step_type": "tool_result",
+                     "content": "## Phase 1: Evaluate\nRun the eval runner...", "is_error": False}]
+        r = score_quality_checks("'widget' is not a valid artifact type.", timeline,
+                                 [], ["Phase 1", "eval runner"])
+        self.assertEqual(r["score"], 1.0)
+
+    def test_required_absent_still_catches_what_executor_said(self):
+        from score_execution import score_quality_checks
+        timeline = [{"step_type": "text", "content": "Proceeding to Phase 1 now."}]
+        self.assertLess(score_quality_checks("Halting.", timeline, [], ["Phase 1"])["score"], 1.0)
+
+    def test_reported_halt_counts_as_error_handling(self):
+        from score_execution import score_error_handling
+        timeline = [
+            {"step_type": "tool_use", "tool_name": "Read",
+             "tool_input": {"file_path": "/tmp/w.json"}, "is_error": False},
+            {"step_type": "tool_result", "content": "truncated -- JSONDecodeError", "is_error": True},
+            {"step_type": "text", "content": "Halting: the state file at /tmp/w.json is corrupt."},
+        ]
+        r = score_error_handling(timeline)
+        self.assertEqual(r["score"], 1.0)
+        self.assertIn("halting", r["evidence"].lower())
+
+    def test_silent_abandonment_still_scores_zero(self):
+        from score_execution import score_error_handling
+        timeline = [
+            {"step_type": "tool_use", "tool_name": "Bash",
+             "tool_input": {"command": "x"}, "is_error": True},
+            {"step_type": "tool_result", "content": "failed", "is_error": True},
+            {"step_type": "text", "content": "I gave up."},
+        ]
+        self.assertEqual(score_error_handling(timeline)["score"], 0.0)
+
+    def test_string_tool_input_does_not_zero_the_test(self):
+        from score_execution import _score_single_test
+        record = {
+            "test_id": "TC-X",
+            "agent_response": "## Result\nDid the work.",
+            "execution_timeline": [
+                {"step_type": "tool_use", "tool_name": "Bash",
+                 "tool_input": "python3 something.py", "is_error": False},
+                {"step_type": "text", "content": "done"},
+            ],
+        }
+        scored = _score_single_test(record, "skill", "", None)
+        self.assertIsNotNone(scored.get("composite"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestCoordinatedListDenial(unittest.TestCase):
+    """A single denial covering a comma-separated list excuses every item."""
+
+    HALT = (
+        "Halted: workflow state file is corrupt. Emitted the workflow_exit fail "
+        "event and stopped without proceeding to structural audit, criteria "
+        "generation, or the eval runner."
+    )
+
+    def test_first_list_item_is_negated(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(_has_unnegated_occurrence("structural audit", self.HALT))
+
+    def test_middle_list_item_is_negated(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(_has_unnegated_occurrence("criteria generation", self.HALT))
+
+    def test_last_list_item_is_negated(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(_has_unnegated_occurrence("eval runner", self.HALT))
+
+    def test_clean_halt_scores_full_quality_checks(self):
+        from score_execution import score_quality_checks
+
+        result = score_quality_checks(
+            self.HALT,
+            [],
+            [],
+            ["structural audit", "criteria generation", "eval runner"],
+        )
+        self.assertEqual(result["score"], 1.0)
+
+    def test_semicolon_still_scopes_a_second_clause(self):
+        from score_execution import _has_unnegated_occurrence
+
+        text = "I did not read the file; running the structural audit now."
+        self.assertTrue(_has_unnegated_occurrence("structural audit", text))
+
+    def test_conjunction_after_denial_still_violates(self):
+        from score_execution import _has_unnegated_occurrence
+
+        text = "Skipping the audit and proceeding to Phase 2 now."
+        self.assertTrue(_has_unnegated_occurrence("proceeding to Phase 2", text))
+
+    def test_cue_in_a_previous_sentence_does_not_excuse(self):
+        from score_execution import _has_unnegated_occurrence
+
+        text = "It does not run the audit. Now running the structural audit."
+        self.assertTrue(_has_unnegated_occurrence("structural audit", text))
+
+
+class TestHaltSequenceGateCompliance(unittest.TestCase):
+    """A fail followed only by the halt is the documented outcome, not a lapse."""
+
+    @staticmethod
+    def _resp(gates):
+        return "\n".join(json.dumps(g) for g in gates)
+
+    def test_detecting_fail_before_exit_is_compliant(self):
+        from score_execution import score_gate_compliance
+
+        gates = [
+            {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
+            {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
+        ]
+        from score_execution import ECHOED_GATE_CAP
+
+        result = score_gate_compliance([], self._resp(gates))
+        self.assertEqual(result["score"], ECHOED_GATE_CAP)
+
+    def test_extra_truthful_fail_does_not_lower_the_score(self):
+        from score_execution import score_gate_compliance
+
+        two = [
+            {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
+            {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
+        ]
+        three = [
+            {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
+            {"step": "convergence", "judge": "automated", "result": "fail"},
+            {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
+        ]
+        self.assertEqual(
+            score_gate_compliance([], self._resp(three))["score"],
+            score_gate_compliance([], self._resp(two))["score"],
+        )
+
+    def test_fail_followed_by_forward_progress_is_still_non_compliant(self):
+        from score_execution import score_gate_compliance
+
+        gates = [
+            {"step": "phase1_to_phase2", "judge": "self-check", "result": "fail"},
+            {"step": "phase2_to_phase3", "judge": "self-check", "result": "pass"},
+            {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
+        ]
+        self.assertLess(score_gate_compliance([], self._resp(gates))["score"], 1.0)
+
+
+class TestRequireTimelineGate(unittest.TestCase):
+    """--require-timeline names the records with no recorded tool call."""
+
+    def test_records_with_tool_calls_have_no_gaps(self):
+        from score_execution import find_timeline_gaps
+
+        records = [
+            {
+                "test_id": "TC-001",
+                "execution_timeline": [
+                    {"step_type": "tool_use", "tool_name": "Read", "tool_input": {}}
+                ],
+            }
+        ]
+        self.assertEqual(find_timeline_gaps(records), [])
+
+    def test_missing_timeline_is_a_gap(self):
+        from score_execution import find_timeline_gaps
+
+        self.assertEqual(find_timeline_gaps([{"test_id": "TC-002"}]), ["TC-002"])
+
+    def test_text_only_timeline_is_a_gap(self):
+        from score_execution import find_timeline_gaps
+
+        records = [
+            {
+                "test_id": "TC-003",
+                "execution_timeline": [{"step_type": "text", "content": "I would run it"}],
+            }
+        ]
+        self.assertEqual(find_timeline_gaps(records), ["TC-003"])
+
+    def test_non_object_record_is_a_gap(self):
+        from score_execution import find_timeline_gaps
+
+        self.assertEqual(find_timeline_gaps(["oops"]), ["<non-object record>"])
+
+
+class TestCommaClauseScoping(unittest.TestCase):
+    """A comma separates list items or splices clauses; only one is negation.
+
+    Blanket comma transparency excused "Skipped the audit, ran Phase 1" --
+    forward progress hiding behind an earlier denial, which is the violation
+    required_absent exists to catch. Stopping at every comma instead left each
+    item of "did not reach A, B, or C" with a cue-free window.
+    """
+
+    def _flagged(self, phrase: str, text: str) -> bool:
+        from score_execution import _has_unnegated_occurrence
+
+        return _has_unnegated_occurrence(phrase, text)
+
+    def test_comma_splice_is_not_excused_by_an_earlier_denial(self):
+        self.assertTrue(self._flagged("Phase 1", "Skipped the audit, ran Phase 1"))
+
+    def test_comma_splice_with_an_explicit_subject_is_flagged(self):
+        self.assertTrue(self._flagged("Phase 1", "Skipped the audit, I ran Phase 1"))
+
+    def test_last_item_of_a_negated_list_stays_negated(self):
+        self.assertFalse(
+            self._flagged("Phase 3", "I did not reach Phase 1, Phase 2, or Phase 3")
+        )
+
+    def test_middle_item_of_a_negated_list_stays_negated(self):
+        self.assertFalse(
+            self._flagged("Phase 2", "I did not reach Phase 1, Phase 2, or Phase 3")
+        )
+
+    def test_negated_list_of_verb_phrases_stays_negated(self):
+        text = "I did not run the audit, validate the handoff, or score the results"
+        self.assertFalse(self._flagged("score the results", text))
+        self.assertFalse(self._flagged("validate the handoff", text))
+
+    def test_semicolon_remains_a_hard_break(self):
+        self.assertTrue(self._flagged("Phase 1", "Never touched the audit; ran Phase 1"))
+
+    def test_a_plain_denial_still_negates(self):
+        self.assertFalse(self._flagged("Phase 1", "I did not run Phase 1"))
+
+    def test_a_noun_subject_second_clause_is_flagged(self):
+        """The regression a clause-opener vocabulary could not cover.
+
+        Keying comma transparency on "does the second clause open with a known
+        verb or pronoun" read every noun subject as a list conjunct, so these
+        two inherited the first clause's denial -- a false negative
+        unconditional comma breaks did not have.
+        """
+        self.assertTrue(self._flagged(
+            "Phase 2", "Skipped the structural audit, Phase 2 was entered anyway."
+        ))
+        self.assertTrue(self._flagged(
+            "Phase 2", "Skipped the structural audit, the run proceeded to Phase 2."
+        ))
+
+    def test_transparency_requires_a_coordinator(self):
+        """Same sentence, with and without the "or" that makes it a list."""
+        self.assertFalse(self._flagged(
+            "Phase 2", "I did not reach Phase 1, Phase 2, or Phase 3."
+        ))
+        self.assertTrue(self._flagged(
+            "Phase 2", "I did not reach Phase 1, Phase 2 was reached instead."
+        ))
+
+
+class TestInterrogativeOpenerPosition(unittest.TestCase):
+    """A clarification request opens the response; a rhetorical one does not.
+
+    SKILL.md's argument-validation fallback says the entire response is the
+    question and its options, "no preamble, no closing line". Matching the
+    pattern anywhere let a narration that stopped to ask itself a question
+    score as a clarification the executor never requested.
+    """
+
+    def test_a_question_in_mid_narration_is_not_a_clarification(self):
+        from score_execution import score_user_communication
+
+        response = (
+            "Run complete.\n"
+            "How does the resume protocol work? It re-reads SKILL.md and continues.\n"
+            "All 9 steps done."
+        )
+        self.assertLess(score_user_communication([], response)["score"], 0.9)
+
+    def test_the_documented_fallback_still_scores(self):
+        from score_execution import score_user_communication
+
+        response = (
+            "What artifact type do you want to hone?\n"
+            "- skill\n- command\n- hook\n- script"
+        )
+        self.assertEqual(score_user_communication([], response)["score"], 0.9)
+
+    def test_a_leading_blank_line_does_not_disqualify(self):
+        from score_execution import _opens_with_question
+
+        self.assertTrue(_opens_with_question("\n\nWhich file should I scan?"))
+        self.assertFalse(_opens_with_question("Done.\nWhich file should I scan?"))
+
+
+class TestMalformedTimelineTolerance(unittest.TestCase):
+    """A timeline entry that is not a dict, or whose content is not a string.
+
+    Both used to raise out of a dimension scorer and get swallowed into
+    composite 0.0 for the whole test -- reading as total artifact failure.
+    """
+
+    TIMELINE = [
+        {"step_type": "text", "content": {"nested": "dict"}},
+        {"step_type": "text", "content": ["a", "b"]},
+        "a bare narrative string",
+        {"step_type": "text", "content": "I ran Phase 1"},
+    ]
+
+    def test_entry_text_returns_empty_for_non_string_content(self):
+        from score_execution import _entry_text
+
+        self.assertEqual(_entry_text({"content": {"a": 1}}), "")
+        self.assertEqual(_entry_text({"content": ["a"]}), "")
+        self.assertEqual(_entry_text("bare"), "")
+        self.assertEqual(_entry_text({"content": "text"}), "text")
+
+    def test_timeline_entries_drops_non_objects(self):
+        from score_execution import _timeline_entries
+
+        self.assertEqual(len(_timeline_entries({"execution_timeline": self.TIMELINE})), 3)
+        self.assertEqual(_timeline_entries({"execution_timeline": {"oops": 1}}), [])
+        self.assertEqual(_timeline_entries("not a record"), [])
+
+    def test_quality_checks_does_not_crash(self):
+        from score_execution import score_quality_checks
+
+        self.assertEqual(
+            score_quality_checks("resp", self.TIMELINE, [], ["Phase 1"])["score"], 0.0
+        )
+
+    def test_workflow_sequence_does_not_crash(self):
+        from score_execution import score_workflow_sequence
+
+        score_workflow_sequence(self.TIMELINE, "resp", "")
+
+    def test_user_communication_does_not_crash(self):
+        from score_execution import score_user_communication
+
+        score_user_communication(self.TIMELINE, "resp")
+
+    def test_a_malformed_entry_does_not_zero_the_whole_test(self):
+        from score_execution import score_from_results
+
+        results = {
+            "results": [
+                {
+                    "test_id": "TC-1",
+                    "agent_response": "I ran Phase 1",
+                    "execution_timeline": self.TIMELINE
+                    + [{"step_type": "tool_use", "tool_name": "Read", "tool_input": {}}],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump(results, handle)
+            output = score_from_results(path, "skill", "")
+        self.assertIsNotNone(output["composite_score"])
+        self.assertGreater(output["composite_score"], 0.0)
+
+
+class TestNonDictGateElements(unittest.TestCase):
+    """gates[] is executor-written, so an element can be a bare string."""
+
+    def test_a_string_gate_does_not_crash_scoring(self):
+        from score_execution import score_gate_compliance
+
+        response = "\n".join(
+            [
+                json.dumps({"step": "phase1_to_phase2", "judge": "self-check", "result": "pass"}),
+                "GATE: the phase 2 step was checked",
+                json.dumps({"step": "workflow_exit", "judge": "self-check", "result": "pass"}),
+            ]
+        )
+        self.assertGreater(score_gate_compliance([], response)["score"], 0.0)
+
+    def test_is_well_formed_gate_rejects_a_string(self):
+        from score_execution import _is_well_formed_gate
+
+        self.assertFalse(_is_well_formed_gate("step judge result pass"))
+
+
+class TestInterrogativeOpenerScope(unittest.TestCase):
+    """The opener must not pair an interrogative with a '?' on another line."""
+
+    def test_a_same_line_question_still_matches(self):
+        from score_execution import INTERROGATIVE_OPENER
+
+        self.assertTrue(
+            INTERROGATIVE_OPENER.search("What artifact type do you want to hone? Pick one.")
+        )
+
+    def test_the_question_mark_may_not_come_from_a_later_line(self):
+        from score_execution import INTERROGATIVE_OPENER
+
+        self.assertIsNone(
+            INTERROGATIVE_OPENER.search("What I did next\nis run the audit. Was that ok?")
+        )
+
+
+class TestRequireTimelineWritesScoresFirst(unittest.TestCase):
+    """One record with no tool calls must not suppress everyone else's scores."""
+
+    def test_scores_are_written_and_the_exit_status_still_fails(self):
+        import subprocess
+        import sys
+
+        records = {
+            "results": [
+                {
+                    "test_id": f"TC-{i:03d}",
+                    "agent_response": "ran it",
+                    "execution_timeline": [
+                        {"step_type": "tool_use", "tool_name": "Read", "tool_input": {}}
+                    ],
+                }
+                for i in range(1, 4)
+            ]
+            + [{"test_id": "TC-GAP", "agent_response": "I would run it", "execution_timeline": []}]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump(records, handle)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "score_execution.py"),
+                    path,
+                    "--type",
+                    "skill",
+                    "--require-timeline",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            scores_path = os.path.join(tmp, "deterministic_scores.json")
+            self.assertTrue(os.path.exists(scores_path), "scores file was not written")
+            with open(scores_path) as handle:
+                scores = json.load(handle)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("TC-GAP", proc.stderr)
+        self.assertEqual(len(scores["per_test"]), 4)
+        self.assertIsNotNone(scores["composite_score"])
+
+
+class TestRequiredAbsentSeesFallbackProse(unittest.TestCase):
+    """`required_absent` asks what the executor SAID, on every path it says it.
+
+    The runner records user-facing prose as `text`, and as
+    `fallback_text_output` / `fallback_output` when AskUserQuestion is
+    unavailable. Scanning `text` alone meant the identical sentence passed on
+    the fallback path and failed on the normal one -- and the fallback path is
+    exactly the one the AskUserQuestion anti-pattern cases police.
+    """
+
+    FORBIDDEN = "... Proceeding to Phase 1 now."
+
+    def _score(self, step_type):
+        from score_execution import score_quality_checks
+
+        return score_quality_checks(
+            "", [{"step_type": step_type, "content": self.FORBIDDEN}], [], ["Phase 1"]
+        )["score"]
+
+    def test_every_authored_step_type_scores_alike(self):
+        scores = {
+            step_type: self._score(step_type)
+            for step_type in ("text", "fallback_text_output", "fallback_output")
+        }
+        self.assertEqual(set(scores.values()), {0.0}, scores)
+
+    def test_tool_result_content_is_still_not_scanned(self):
+        """Reading a file that contains the phrase is not saying it."""
+        self.assertEqual(self._score("tool_result"), 1.0)
+
+
+class TestGateComplianceHaltTail(unittest.TestCase):
+    """The scorer reads the halt tail through the shared helper."""
+
+    def _gate(self, step, result="fail"):
+        return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
+
+    def test_capped_convergence_then_exit_is_compliant(self):
+        result = _score_written_gates([
+            self._gate("phase3_exit"),
+            self._gate("convergence"),
+            self._gate("workflow_exit"),
+        ])
+        self.assertEqual(result["score"], 1.0)
+
+    def test_passing_convergence_is_not_a_halt_for_an_unrelated_fail(self):
+        """convergence(pass) after an unrelated fail is progress, not the cap."""
+        result = _score_written_gates([
+            self._gate("handoff_phase2_apply"),
+            self._gate("convergence", "pass"),
+            self._gate("workflow_exit", "pass"),
+        ])
+        self.assertLess(result["score"], 1.0)
+
+    def test_the_documented_regression_halt_is_compliant(self):
+        """[phase3_exit:fail, convergence:pass, workflow_exit:pass].
+
+        The auto-revert halt in references/phase3-reevaluation.md: step 6
+        records the regression, step 7 runs the mandatory convergence check,
+        which passes on the pre-revert ledger. Scoring that fail as
+        non-compliant penalizes the executor for reporting it.
+        """
+        result = _score_written_gates([
+            self._gate("phase3_exit"),
+            self._gate("convergence", "pass"),
+            self._gate("workflow_exit", "pass"),
+        ])
+        self.assertEqual(result["score"], 1.0)
+        self.assertIn("expected-fail", result["evidence"])

@@ -31,6 +31,7 @@ from hone_common import (
     find_slash_invocations,
     frontmatter_field,
     get,
+    is_halt_tail,
     load_deterministic_scores,
     load_inconclusive_ids,
     match_frontmatter,
@@ -453,3 +454,73 @@ class TestFrontmatterExtraction(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHaltTail(unittest.TestCase):
+    """One definition of a halt tail, shared by validate_gates and the scorer.
+
+    Both used to carry their own copy and the copies had drifted:
+    validate_gates accepted a tail of `convergence` alone, and neither checked
+    that the trailing `convergence` had actually failed.
+    """
+
+    def _gate(self, step, result="fail"):
+        return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
+
+    def test_empty_tail_is_a_halt_only_for_the_exit_event(self):
+        """Nothing after the fail is a halt only when the fail IS the exit.
+
+        SKILL.md mandates `workflow_exit` before any exit, so a run whose last
+        recorded gate is a failing *other* step stopped emitting gates before
+        the event it owed. Reading that as a halt scored an executor that
+        emitted fewer events above one that emitted the honest tail.
+        """
+        self.assertTrue(is_halt_tail([], "workflow_exit"))
+        self.assertFalse(is_halt_tail([], "phase3_exit"))
+        self.assertFalse(is_halt_tail([], None))
+
+    def test_workflow_exit_is_required(self):
+        self.assertFalse(is_halt_tail([self._gate("convergence")]))
+
+    def test_capped_convergence_then_exit_is_a_halt(self):
+        self.assertTrue(is_halt_tail(
+            [self._gate("convergence"), self._gate("workflow_exit")]
+        ))
+
+    def test_passing_convergence_is_not_a_halt_for_an_unrelated_fail(self):
+        """A convergence check that passed says the run converged."""
+        self.assertFalse(is_halt_tail(
+            [self._gate("convergence", "pass"), self._gate("workflow_exit", "pass")],
+            "handoff_phase2_apply",
+        ))
+
+    def test_passing_convergence_after_phase3_exit_is_a_halt(self):
+        """The documented regression auto-revert shape.
+
+        Phase 3 emits `phase3_exit` at step 6 and the mandatory `convergence`
+        check at step 7, so the halt that follows an auto-revert carries a
+        convergence event reporting `in_progress` or `converged` on the
+        pre-revert ledger. Rejecting it scored the documented halt as
+        non-compliant.
+        """
+        self.assertTrue(is_halt_tail(
+            [self._gate("convergence", "pass"), self._gate("workflow_exit", "pass")],
+            "phase3_exit",
+        ))
+
+    def test_passing_workflow_exit_is_still_a_halt(self):
+        self.assertTrue(is_halt_tail([self._gate("workflow_exit", "pass")]))
+
+    def test_a_fail_with_no_exit_after_it_is_not_a_halt(self):
+        self.assertFalse(is_halt_tail(
+            [self._gate("convergence", "fail")], "phase2_to_phase3"
+        ))
+
+    def test_forward_progress_is_not_a_halt(self):
+        self.assertFalse(is_halt_tail(
+            [self._gate("phase2_improve", "pass"), self._gate("workflow_exit")]
+        ))
+
+    def test_non_dict_entries_do_not_read_as_a_halt(self):
+        self.assertFalse(is_halt_tail(["workflow_exit"]))
+        self.assertFalse(is_halt_tail(None))

@@ -40,10 +40,14 @@ Steps:
 2. Re-run eval runner with `--reuse-criteria`.
 3. Run deterministic scoring on re-eval results:
    ```bash
-   python3 <skill-dir>/scripts/score_execution.py $REEVAL_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --json
+   python3 <skill-dir>/scripts/score_execution.py $REEVAL_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --require-timeline --json
    ```
 4. Compare scores: before/after table per-dimension using deterministic scores from workflow state file.
 5. **Regression check (rubric):** Re-read previous scores from the workflow state file (`eval_results.per_test` or last round's recorded scores). Do NOT use in-memory scores from earlier in the conversation. For each dimension, compare new score to previous score read from the state file. If ANY dimension dropped by more than 0.1, flag as regression, then run the variance control below before reverting anything.
+
+   **Before believing any before/after delta, bound it.** Run-to-run variance in agentic evals is large enough to swamp a small-N comparison, and a chunk of it is infrastructure rather than the artifact. Bootstrap a confidence interval over the per-test scores on each side and compare intervals, not point estimates. A delta whose interval straddles zero is not a result in either direction, and neither improving nor reverting on it is justified.
+
+   **Comparability check (before treating any drop as a regression).** Re-scoring fixes a changed *formula*; it cannot fix a changed *input*. If the previous round's records lack a field the current round's records carry (most often `execution_timeline`), every dimension reading that field was unmeasured before and measured now, and will appear to collapse because the absent-evidence path returns a vacuous pass. Classify each regressed dimension as **comparable** (reads only fields present in both rounds) or **not comparable**. Auto-revert only on a comparable drop. Report a not-comparable dimension as a first measurement, never as a delta.
 
    **Variance control (required before auto-revert).** One re-eval run is a single sample per test, and executor behavior varies across runs on anything that depends on tool availability (whether an executor reached for `AskUserQuestion` before falling back to text, whether it emitted a structured gate event). A single noisy sample must not discard working improvements.
 

@@ -191,7 +191,7 @@ json.dump(state.get('fresh_eyes', {}), open('$OUTPUT_DIR/fresh_eyes.json', 'w'),
 
 **Pre-step validation:** Verify `triaged_results` from Step 1: `actionable_failures` is an array (may be empty), each entry has `test_id` and `score` fields. `structural_findings` is an array. If Step 3 ran, verify `fresh_eyes.proposals` is an array. If shape is malformed: STOP, report "P2 Step 4 handoff validation failed."
 
-**Main thread analysis:** For 3+ failing tests, use parallel sonnet subagents. For 1-2, analyze inline. Map each failure to a specific section of the artifact. Classify fix type.
+**Main thread analysis:** For 3+ failing tests, fan out to parallel subagents (inheriting the session model, reduced effort: per-test analysis is bounded work against a single failure). For 1-2, analyze inline. Map each failure to a specific section of the artifact. Classify fix type.
 
 **Reconciliation (when fresh-eyes ran):** Compare the main thread's findings against `fresh_eyes.proposals`:
 
@@ -283,7 +283,7 @@ Re-read the artifact from disk and compare its content to the `artifact_content`
 
 This prevents the exact failure mode where two CC sessions edit the same artifact and last-write-wins silently destroys the other session's work.
 
-Edit the artifact at `{edit_path}`. After all edits, re-read from disk to confirm they persisted.
+Edit the artifact at `{edit_path}`. After all edits, re-read each edited file from disk and confirm the changes are present, then record the outcome as `applied_edits.confirmed_on_disk` in the handoff below. `validate_handoff.py` requires that field, so this read-back is a gate, not a nudge.
 
 **Validator Generation (multi-phase skills and commands only):**
 
