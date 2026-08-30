@@ -2879,3 +2879,63 @@ class TestGateComplianceHaltTail(unittest.TestCase):
         ])
         self.assertEqual(result["score"], 1.0)
         self.assertIn("expected-fail", result["evidence"])
+
+
+class TestQualityCheckCorpusSymmetry(unittest.TestCase):
+    """required_present and required_absent read the same authored corpus."""
+
+    def test_phrase_only_in_a_tool_use_note_does_not_satisfy_required_present(self):
+        from score_execution import score_quality_checks
+
+        timeline = [{
+            "step_type": "tool_use", "tool_name": "Bash",
+            "tool_input": {"command": "grep validate_handoff x.py"},
+            "content": "grepped validate_handoff.py",
+        }]
+        result = score_quality_checks("Halted.", timeline, ["validate_handoff"], [])
+        self.assertEqual(result["score"], 0.0)
+
+    def test_phrase_in_executor_narration_satisfies_required_present(self):
+        from score_execution import score_quality_checks
+
+        timeline = [{"step_type": "text", "content": "Ran validate_handoff, it passed"}]
+        result = score_quality_checks("Halted.", timeline, ["validate_handoff"], [])
+        self.assertEqual(result["score"], 1.0)
+
+    def test_phrase_in_agent_response_satisfies_required_present(self):
+        from score_execution import score_quality_checks
+
+        result = score_quality_checks("Ran validate_handoff.", [], ["validate_handoff"], [])
+        self.assertEqual(result["score"], 1.0)
+
+
+class TestCommaSpliceDoesNotInheritDenial(unittest.TestCase):
+    """A coordinator past the phrase must not make a comma splice a list."""
+
+    def test_trailing_or_does_not_excuse_a_spliced_clause(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertTrue(_has_unnegated_occurrence(
+            "proceeded to Phase 2",
+            "Skipped the audit, the run proceeded to Phase 2 or halted."))
+
+    def test_spliced_clause_without_a_coordinator_still_violates(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertTrue(_has_unnegated_occurrence(
+            "Phase 2", "Skipped the structural audit, the run proceeded to Phase 2."))
+
+    def test_every_item_of_a_real_list_stays_negated(self):
+        from score_execution import _has_unnegated_occurrence
+
+        halt = ("Halted. Stopped without proceeding to structural audit, "
+                "criteria generation, or the eval runner.")
+        for phrase in ("structural audit", "criteria generation", "eval runner"):
+            with self.subTest(phrase=phrase):
+                self.assertFalse(_has_unnegated_occurrence(phrase, halt))
+
+    def test_second_clause_carrying_its_own_cue_is_still_a_denial(self):
+        from score_execution import _has_unnegated_occurrence
+
+        self.assertFalse(_has_unnegated_occurrence(
+            "phase 1", "I did not run the eval, I skipped phase 1 entirely."))
