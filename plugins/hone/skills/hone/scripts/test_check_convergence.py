@@ -341,3 +341,89 @@ class TestLedgerTypeTolerance(unittest.TestCase):
             ]}, 99, 99)
         self.assertIsNone(report["max_rounds"])
         self.assertEqual(report["verdict"], "in_progress")
+
+
+class TestLedgerListTolerance(unittest.TestCase):
+    """A scalar where an array belongs must not raise out of analyze()."""
+
+    def test_scalar_rounds_does_not_raise(self):
+        from check_convergence import analyze
+
+        for bad in ({"rounds": 3}, {"rounds": True}, {"rounds": "1"}):
+            with self.subTest(bad=bad):
+                self.assertEqual(analyze(bad, 3, 3)["rounds_run"], 0)
+
+    def test_scalar_findings_does_not_raise(self):
+        from check_convergence import analyze
+
+        report = analyze({"rounds": [{"round": 1, "findings": 7}]}, 3, 3)
+        self.assertEqual(report["rounds_run"], 1)
+        self.assertEqual(report["open_blocking"], [])
+
+    def test_one_malformed_round_does_not_sink_the_others(self):
+        from check_convergence import analyze
+
+        ledger = {
+            "max_rounds": 3,
+            "rounds": [
+                {"round": 1, "findings": 7},
+                {"round": 2, "findings": [
+                    {"id": "F1", "status": "open", "severity": "critical",
+                     "summary": "real", "file": "a.py"}]},
+            ],
+        }
+        report = analyze(ledger, 3, 3)
+        self.assertEqual([f["id"] for f in report["open_blocking"]], ["F1"])
+
+    def test_cli_rejects_scalar_rounds_with_exit_2(self):
+        import json as _json
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.json"
+            path.write_text(_json.dumps({"max_rounds": 3, "rounds": 3}))
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).parent / "check_convergence.py"),
+                 str(path), "--json"],
+                capture_output=True, text=True,
+            )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("must be a JSON array", result.stderr)
+
+
+class TestReopenCountsVisibleBelowTheBar(unittest.TestCase):
+    """Reaching the reopen bar needs 5 rounds; the count must show before that."""
+
+    @staticmethod
+    def _round(number, status):
+        return {"round": number, "findings": [
+            {"id": "F1", "status": status, "severity": "critical",
+             "summary": "recurring thing", "file": "a.py"}]}
+
+    def test_single_reopen_is_reported_but_does_not_escalate(self):
+        from check_convergence import analyze
+
+        report = analyze({"max_rounds": 3, "rounds": [
+            self._round(1, "open"), self._round(2, "fixed"),
+            self._round(3, "open")]}, 3, 3)
+        self.assertEqual(report["reopen_counts"], {"F1": 1})
+        self.assertEqual(report["reopened"], [])
+        self.assertNotIn("found open again", " ".join(report["reasons"]))
+
+    def test_two_reopens_escalate(self):
+        from check_convergence import analyze
+
+        report = analyze({"max_rounds": 3, "rounds": [
+            self._round(1, "open"), self._round(2, "fixed"),
+            self._round(3, "open"), self._round(4, "fixed"),
+            self._round(5, "open")]}, 3, 3)
+        self.assertEqual(report["reopen_counts"], {"F1": 2})
+        self.assertEqual(report["reopened"], ["F1"])
+        self.assertEqual(report["verdict"], "escalate")
+
+    def test_empty_ledger_carries_the_key(self):
+        from check_convergence import analyze
+
+        self.assertEqual(analyze({"rounds": []}, 3, 3)["reopen_counts"], {})

@@ -70,6 +70,16 @@ DEFAULT_RECURRENCE_LIMIT = 3
 # alternates open/fixed forever never reaches DEFAULT_RECURRENCE_LIMIT -- and
 # it is the first shape the module docstring names. One reopen is an
 # incomplete fix; two is a loop that is not converging on this finding.
+#
+# Reaching 2 needs open->fixed->open->fixed->open, five rounds, and SKILL.md
+# templates max_rounds 3. So this ESCALATES only across runs, not inside one:
+# the ledger is the artifact's memory across invocations, and a finding
+# reopened twice over two runs is exactly the record worth distrusting.
+# Lowering the bar to 1 would fire on the ordinary case where round N's fix is
+# incomplete and round N+1 finishes it, halting a run that was converging.
+# So that the check still pays off inside a single run, `reopen_counts` is
+# reported unconditionally: a run can see "reopened once" as information
+# without that becoming a halt.
 DEFAULT_REOPEN_LIMIT = 2
 
 # Consecutive rounds the blocking count may hold still before it counts as
@@ -87,13 +97,27 @@ def _signature(summary: str) -> str:
 
 def _open_findings(round_entry: dict) -> list[dict]:
     return [
-        f for f in round_entry.get("findings", [])
+        f for f in _as_list(round_entry.get("findings"))
         if isinstance(f, dict) and f.get("status") == "open"
     ]
 
 
 def _blocking(findings: list[dict]) -> list[dict]:
     return [f for f in findings if (f.get("severity") or "").lower() in BLOCKING]
+
+
+def _as_list(value: object) -> list:
+    """A ledger array, or [] when the executor wrote something else there.
+
+    `_as_int` already exists because executors write scalars where numbers
+    belong. They do the same where arrays belong: a truncated or hand-edited
+    ledger carrying `"rounds": 3` or `"findings": 7` reached a bare `for`
+    and raised TypeError out of analyze(), which main() does not catch, so
+    the documented contract for a bad ledger (exit 2) produced a traceback
+    instead. main() rejects a non-list `rounds` loudly; this keeps a single
+    malformed round from taking the whole analysis down with it.
+    """
+    return value if isinstance(value, list) else []
 
 
 def _as_int(value: object, default: int | None = None) -> int | None:
@@ -122,7 +146,7 @@ def _as_int(value: object, default: int | None = None) -> int | None:
 
 def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             reopen_limit: int = DEFAULT_REOPEN_LIMIT) -> dict:
-    rounds = [r for r in ledger.get("rounds", []) if isinstance(r, dict)]
+    rounds = [r for r in _as_list(ledger.get("rounds")) if isinstance(r, dict)]
     rounds.sort(key=lambda r: _as_int(r.get("round"), 0))
     reasons: list[str] = []
 
@@ -134,8 +158,8 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             "verdict": "in_progress", "rounds_run": 0,
             "max_rounds": _as_int(ledger.get("max_rounds")), "reasons": [],
             "open_blocking": [], "open_minor_count": 0,
-            "recurring": [], "reopened": [], "relocations": [],
-            "blocking_counts": [],
+            "recurring": [], "reopened": [], "reopen_counts": {},
+            "relocations": [], "blocking_counts": [],
         }
 
     # The final round's open set decides which escalation reasons are still
@@ -170,7 +194,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     for round_entry in rounds:
         statuses = {
             f.get("id"): f.get("status")
-            for f in round_entry.get("findings", [])
+            for f in _as_list(round_entry.get("findings"))
             if isinstance(f, dict) and f.get("id")
         }
         open_ids = {fid for fid, status in statuses.items() if status == "open"}
@@ -235,7 +259,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     seen_relocations: set[tuple[str, str, str]] = set()
     closed_signatures: dict[str, str] = {}
     for round_entry in rounds:
-        for finding in round_entry.get("findings", []):
+        for finding in _as_list(round_entry.get("findings")):
             if not isinstance(finding, dict):
                 continue
             signature = _signature(finding.get("summary", ""))
@@ -293,6 +317,10 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
         "open_minor_count": open_minor,
         "recurring": recurring,
         "reopened": sorted(reopened),
+        # Every finding that has come back at least once, whether or not it
+        # reached the escalation bar. Below the bar this is the only place the
+        # reopen signal is visible at all.
+        "reopen_counts": {k: v for k, v in sorted(reopens.items()) if v},
         "relocations": relocations,
         "blocking_counts": blocking_counts,
     }
@@ -333,6 +361,19 @@ def main() -> None:
         print(
             f"ERROR: ledger root must be a JSON object, got "
             f"{type(ledger).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # `rounds` carrying a scalar is the same class of mistake as a bare array
+    # at the root, and analyze() now tolerates it by reading zero rounds. That
+    # is the right default for a library call and the wrong one for the CLI:
+    # "no rounds yet" and "your ledger is malformed" are different answers and
+    # both would print `in_progress`. Fail loudly here instead.
+    if "rounds" in ledger and not isinstance(ledger["rounds"], list):
+        print(
+            f"ERROR: ledger 'rounds' must be a JSON array, got "
+            f"{type(ledger['rounds']).__name__}",
             file=sys.stderr,
         )
         sys.exit(2)
