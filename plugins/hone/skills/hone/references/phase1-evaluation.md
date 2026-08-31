@@ -396,6 +396,28 @@ python3 <skill-dir>/scripts/validate_eval_criteria.py {eval_criteria_path}
 
 If validation fails after enrichment, the enrichment introduced invalid entries. Restore from the `.pre-enrich` backup and proceed without enrichment.
 
+### Step 6a: Overfit Classification (skills and commands only)
+
+Criteria derived from the artifact test whether the artifact was *recited*. An artifact that grows a section, plus a check matching that section, scores better every round while behaving identically. Step 6 enrichment derives checks from the artifact, so this step is mandatory after it runs.
+
+```bash
+python3 <skill-dir>/scripts/check_overfit.py {eval_criteria_path} --artifact {artifact_path} --json
+```
+
+Each scored item is classified `outcome`, `technique`, or `vocabulary`. Over the ratio threshold the verdict is `overfit`. A criteria set that yields zero classifiable items returns `not_measurable` and exits non-zero: nothing was measured, so nothing passed, and this gate is not cleared until the set has scored items to classify. Rewrite every flagged item to describe the result the user needed, never the procedure or the artifact's wording. `required_absent` lists are exempt by construction: they assert vocabulary must NOT appear.
+
+### Step 6b: Power Check (all artifact types)
+
+A score is only actionable if the criteria set could have produced a verdict.
+
+```bash
+python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} --json
+```
+
+`underpowered` (fewer than the distinct-case floor) is neither a pass nor a regression. Add cases that discriminate a *different* property; adding near-duplicates of an existing case clears the floor without buying power. Record the verdict in the state file.
+
+**Difficulty calibration.** A case every model tier passes, and one every tier fails, both carry zero ranking signal. If the suite sits near 1.0 across the board, that is evidence it stopped measuring, not evidence the artifact is good. Replace saturated cases with ones drawn from observed failures.
+
 ### Step 7: Side-Effect Guard (all artifact types)
 
 Scan the artifact for commands and tool invocations that cause real-world side effects (PR submissions, messaging service posts, source control mutations). If found, modify the eval criteria to sandbox them so eval runner evaluates the skill's logic without executing dangerous commands.
