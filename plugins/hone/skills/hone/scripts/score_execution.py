@@ -93,6 +93,19 @@ CLAUSE_BREAK_RE = re.compile(
 # parser, not a regex. A semicolon remains a hard break unconditionally.
 LIST_CONTINUATION_RE = re.compile(r"\b(?:or|nor)\b", re.IGNORECASE)
 
+# What may sit between the comma and the phrase for the comma to still be a
+# list separator rather than a clause boundary. A coordinator alone is not
+# enough: `LIST_CONTINUATION_RE` scans the rest of the sentence, so an "or"
+# anywhere past the phrase used to make the comma transparent, and
+# "Skipped the audit, the run proceeded to Phase 2 or halted" inherited the
+# denial from a clause it does not belong to. In a real list the run-up to
+# each item is glue ("A, B, or the C"); in a comma splice it is a clause with
+# its own subject and verb ("the run proceeded to").
+LIST_ITEM_GLUE_RE = re.compile(
+    r"^[\s,]*(?:(?:or|and|nor|the|a|an|its|their|any|then)\b[\s,]*)*$",
+    re.IGNORECASE,
+)
+
 
 def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
     """True when `phrase` appears in `text` outside a negating context.
@@ -115,10 +128,19 @@ def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
             head, sep, _rest = ahead.partition(breaker)
             if sep:
                 ahead = head
+        # Latches once a comma has been accepted as a list separator. Walking
+        # further back inside "A, B, or C" reaches a comma whose run-up to the
+        # next one is a list ITEM (" criteria generation"), not glue, and
+        # re-testing it as glue would end the list at its second element.
+        in_list = False
         for brk in reversed(list(CLAUSE_BREAK_RE.finditer(window))):
             if brk.group() == ",":
                 segment = window[brk.end() :]
-                if LIST_CONTINUATION_RE.search(segment + ahead):
+                if in_list or (
+                    LIST_ITEM_GLUE_RE.match(segment)
+                    and LIST_CONTINUATION_RE.search(segment + ahead)
+                ):
+                    in_list = True
                     continue
             window = window[brk.end() :]
             break
@@ -1504,27 +1526,20 @@ def score_quality_checks(
     if not required_present and not required_absent:
         return {"score": 1.0, "evidence": "No quality assertions defined"}
 
-    combined = agent_response
-    for entry in timeline:
-        content = _entry_text(entry)
-        if content:
-            combined += " " + content
-
-    checks_total = len(required_present) + len(required_absent)
-    checks_passed = 0
-    violations: list[str] = []
-
-    for phrase in required_present:
-        if re.search(re.escape(phrase), combined, re.IGNORECASE):
-            checks_passed += 1
-        else:
-            violations.append(f"MISSING: '{phrase}'")
-
-    # required_absent asks what the executor SAID, not what it looked at.
-    # Scanning tool_result content penalizes an executor for reading a file
-    # containing the phrase, and the file it is told to read is the very
-    # artifact the forbidden vocabulary comes from, so a correct halt fails
-    # the moment its timeline is recorded.
+    # Both assertions read the SAME corpus: what the executor authored, which
+    # is its response plus its own narration. Scanning tool_result content
+    # penalizes an executor for reading a file containing a forbidden phrase,
+    # and the file it is told to read is the very artifact the forbidden
+    # vocabulary comes from, so a correct halt failed the moment its timeline
+    # was recorded.
+    #
+    # The same argument runs in the positive direction, and required_present
+    # used to be exempt from it: if reading a file is not saying a forbidden
+    # phrase, reading a file is not demonstrating a required one either. On
+    # the shipped suite `validate_handoff` was satisfied by an executor that
+    # only ever grepped validate_handoff.py. Measured across the 13-case
+    # suite before the change, 0 of 5 required_present checks flip, so the
+    # symmetry costs no currently-passing check.
     authored = agent_response
     for entry in timeline:
         if (
@@ -1534,6 +1549,16 @@ def score_quality_checks(
             content = _entry_text(entry)
             if content:
                 authored += " " + content
+
+    checks_total = len(required_present) + len(required_absent)
+    checks_passed = 0
+    violations: list[str] = []
+
+    for phrase in required_present:
+        if re.search(re.escape(phrase), authored, re.IGNORECASE):
+            checks_passed += 1
+        else:
+            violations.append(f"MISSING: '{phrase}'")
 
     for phrase in required_absent:
         if not _has_unnegated_occurrence(phrase, authored):
