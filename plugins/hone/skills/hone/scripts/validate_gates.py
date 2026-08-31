@@ -88,13 +88,17 @@ VALID_JUDGES = _load_valid_judges()
 
 # Events required for each run mode. Handoff events (handoff_<name>) are
 # emitted per validation attempt and are not part of a fixed expected set.
+#
+# `convergence` sits in the two modes that reach Phase 3. SKILL.md's gate
+# table marks it mandatory, and a gate the table calls mandatory that this
+# script does not check is prose: nothing stops a run from omitting it.
 REQUIRED_STEPS = {
     "normal": (
-        "phase1_to_phase2", "phase2_to_phase3",
+        "phase1_to_phase2", "phase2_to_phase3", "convergence",
         "phase3_exit", "workflow_exit",
     ),
     "fix-only": (
-        "fixonly_entry", "phase2_to_phase3",
+        "fixonly_entry", "phase2_to_phase3", "convergence",
         "phase3_exit", "workflow_exit",
     ),
     "error-halt": ("workflow_exit",),

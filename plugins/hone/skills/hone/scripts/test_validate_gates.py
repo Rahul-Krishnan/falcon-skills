@@ -15,6 +15,7 @@ def gate(step, result="pass", judge="self-check"):
 NORMAL_RUN = [
     gate("phase1_to_phase2"),
     gate("phase2_to_phase3"),
+    gate("convergence"),
     gate("phase3_exit"),
     gate("workflow_exit"),
 ]
@@ -145,6 +146,7 @@ class TestCompleteness(unittest.TestCase):
         gates = [
             gate("fixonly_entry"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit"),
         ]
@@ -165,6 +167,7 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit", result="fail"),
         ]
@@ -178,6 +181,7 @@ class TestFailSemantics(unittest.TestCase):
             gate("handoff_eval_results", result="pass"),
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit"),
         ]
@@ -189,6 +193,7 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2", result="fail"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit"),
         ]
@@ -214,6 +219,7 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit", result="fail"),
             gate("workflow_exit"),
         ]
@@ -365,6 +371,32 @@ class TestCliStateFileGuards(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
 
+class TestConvergenceIsRequired(unittest.TestCase):
+    """SKILL.md's gate table marks `convergence` mandatory; so does this script."""
+
+    def test_normal_run_without_convergence_is_invalid(self):
+        gates = [g for g in NORMAL_RUN if g["step"] != "convergence"]
+        report = validate_gates(gates, "normal")
+        self.assertFalse(report["valid"])
+        self.assertIn("convergence", report["missing_steps"])
+
+    def test_fix_only_run_without_convergence_is_invalid(self):
+        gates = [
+            gate("fixonly_entry"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("workflow_exit"),
+        ]
+        self.assertIn("convergence", validate_gates(gates, "fix-only")["missing_steps"])
+
+    def test_phase_3_never_ran_so_convergence_is_not_expected(self):
+        gates = [gate("phase1_to_phase2"), gate("workflow_exit")]
+        self.assertTrue(validate_gates(gates, "no-improvement")["valid"])
+        self.assertTrue(
+            validate_gates([gate("workflow_exit", result="fail")], "error-halt")["valid"]
+        )
+
+
 class TestHaltSequenceTail(unittest.TestCase):
     """A fail followed only by workflow_exit is a halt, not progress."""
 
@@ -411,6 +443,7 @@ class TestResumedRuns(unittest.TestCase):
         return [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit"),
             gate("workflow_exit"),
         ]
@@ -429,6 +462,7 @@ class TestResumedRuns(unittest.TestCase):
 
     def test_resumed_is_orthogonal_to_mode(self):
         gates = [gate("resume"), gate("fixonly_entry"), gate("phase2_to_phase3"),
+                 gate("convergence"),
                  gate("phase3_exit"), gate("workflow_exit")]
         self.assertTrue(validate_gates(gates, "fix-only", resumed=True)["valid"])
 
@@ -465,6 +499,7 @@ class TestDocumentedCleanRunValidates(unittest.TestCase):
                 self._gate("phase1_to_phase2"),
                 self._gate("phase2_to_phase3"),
                 self._gate("phase3_exit"),
+                self._gate("convergence"),
                 self._gate("workflow_exit"),
             ],
         }
@@ -484,6 +519,12 @@ class TestDocumentedCleanRunValidates(unittest.TestCase):
     def test_a_fully_documented_normal_run_is_valid(self):
         report = self._report(self._state())
         self.assertTrue(report["valid"], report["errors"])
+
+    def test_omitting_convergence_is_still_caught(self):
+        state = self._state()
+        state["gates"] = [g for g in state["gates"] if g["step"] != "convergence"]
+        self.assertIn("convergence", self._report(state)["missing_steps"])
+
 
 class TestResumedIsDerivedFromState(unittest.TestCase):
     """`resumed` must come off the state file, not a flag the exit gate omits."""

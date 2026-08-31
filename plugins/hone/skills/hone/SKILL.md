@@ -307,7 +307,7 @@ Name tiers, never specific models. Model names go stale within a release or two,
 
 Effort tiers and their token cost are worth measuring on your own suite rather than assumed. Escalating effort on uncertainty buys accuracy at *extra* token cost rather than saving any, so escalate deliberately.
 
-**Python dependency note:** Every bundled script is stdlib-only and works with system Python, including `structural_audit.py`, `score_execution.py`, `analyze_results.py`, `validate_eval_criteria.py` (no PyYAML required since criteria are JSON), and the two criteria checks `check_eval_power.py` and `check_overfit.py`. Each has a `test_*.py` beside it; run `python3 -m unittest discover -s <skill-dir>/scripts` after changing any of them.
+**Python dependency note:** Every bundled script is stdlib-only and works with system Python, including `structural_audit.py`, `score_execution.py`, `analyze_results.py`, `validate_eval_criteria.py` (no PyYAML required since criteria are JSON), and the eval checks `check_eval_power.py`, `check_overfit.py`, and `check_convergence.py`. Each has a `test_*.py` beside it; run `python3 -m unittest discover -s <skill-dir>/scripts` after changing any of them.
 
 ## Execution Efficiency Rules
 
@@ -334,6 +334,7 @@ Emit these flat, with keys in this order, and `result` set to `"pass"` or `"fail
 | `fixonly_entry` | `--fix-only` run, in place of `phase1_to_phase2` | `pass` | yes, on `--fix-only` |
 | `handoff_<name>` | each handoff validation attempt | `fail` then `pass` on repair | yes, when validation runs |
 | `phase2_to_phase3` | entering Phase 3 after edits | `pass` | yes |
+| `convergence` | after the Phase 3 convergence check | `pass`, or **`fail` on escalate or capped** | yes |
 | `phase3_exit` | leaving Phase 3 | `pass`, or **`fail` on regression auto-revert** | yes |
 | `workflow_exit` | before any exit | `pass`, or **`fail` on error halt** | yes |
 
@@ -406,7 +407,7 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 7. **Step 7: Description Trigger Testing** -- Test whether the description triggers correctly on realistic prompts.
 8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`. The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence.
 
-   Findings are nested under the round that produced them. Write exactly this shape:
+   Findings are nested under the round that produced them, and `check_convergence.py` reads that wrapper. A bare array of findings, or findings appended at the top level, parses as zero rounds: the verdict is `in_progress` with `rounds_run: 0` on every round, forever, and the script reports no error. Write exactly this shape:
 
    ```json
    {
@@ -422,7 +423,7 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
    }
    ```
 
-   `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones); `status` is `open`, `fixed`, or `rejected`. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged.
+   `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones the convergence check counts); `status` is `open`, `fixed`, or `rejected`. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged -- that repetition is what lets the check see a finding stay open across rounds.
 
 ## Phase 3: Re-Evaluate
 
@@ -434,8 +435,9 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 2. Run deterministic scoring on re-eval results, then the Step 9a power comparison (`check_eval_power.py --artifact-type <type> --before <prior round> --after <this round>`) and record `power_verdict` beside the composite. `underpowered` and `not_measurable` are never reported as an improvement, and neither justifies an auto-revert either: Phase 3 step 5 withholds the restore on both and hands the suspected regression to the human. On the first round of a `--fix-only` run there is no prior round: run the sizing half alone and record `powered`/`underpowered`; the comparison starts on round 2.
 3. Compare before/after per-dimension. A drop > 0.1 in any dimension flags a regression, but resample first: re-run the tests feeding that dimension twice more and take the median. Auto-revert only if the median still shows the drop. If the prior round's `deterministic_scores.json` records a different `metadata.scorer_fingerprint` than this round's -- or records none, which means an unidentified scorer, not an unchanged one -- re-score the prior round's results with the current scorer before comparing, so a measurement change is not read as an artifact change. The trigger is the recorded fingerprint, not whether this run edited `score_execution.py`: a scorer change that lands through a merged PR touches no run at all. `check_eval_power.py` returns `not_measurable` on a mismatch or an absence, which is already a verdict Phase 3 must not revert on.
 4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid.
-5. Check the mechanical exit gate. It emits `workflow_exit` as the last event before any exit.
-6. If rounds remain and the score is improving: loop back to Phase 2.
+5. Run `check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json`. It returns `converged`, `capped`, `escalate`, or `in_progress`. **Branch on the JSON `verdict`, not the exit code:** only `converged` exits 0, so `in_progress` -- the ordinary continue case in step 7 below -- exits 1 alongside the two halt verdicts. Treat exit 1 as "not converged yet" and read the verdict; only exit 2 (missing or unparseable ledger) is a real failure. On `escalate` the loop is not converging (a finding open three rounds, blocking count flat, or a finding closed in one file reopened in another): halt, emit a `fail` gate event for `convergence`, and report the finding ids. On `capped`, report it as **capped, not converged**, and list the open blocking findings. Never present a capped run as success.
+6. Check the mechanical exit gate. It runs **after** the convergence check, never before it: the gate emits `workflow_exit`, and a `convergence` event recorded after that exit reads as forward progress past the halt rather than as the halt itself. Same order as the Phase 3 reference (steps 7 then 8).
+7. If rounds remain, the verdict is `in_progress`, and the score is improving: loop back to Phase 2.
 
 **Mechanical exit gate** decides when to stop (state file, not LLM judgment). See Phase 3 reference for full BLOCKED/ALLOWED conditions.
 
