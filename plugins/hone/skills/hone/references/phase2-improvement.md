@@ -270,6 +270,20 @@ improvement_plan: {
 }
 ```
 
+### Step 5a: Scope Snapshot (before any edit)
+
+Preference 11 stops hone clobbering someone else's change; nothing stops hone changing a file nobody asked it to touch. Hand the script the artifact path Step 1 discovered and its type, and it derives the guarded tree itself:
+
+```bash
+python3 <skill-dir>/scripts/check_scope.py \
+  --artifact "{artifact_path}" --type <skill|command|hook|script> \
+  --manifest /tmp/scope-${RUN_ID}.json --snapshot --json
+```
+
+The watch root and the permitted scope are separate knobs and pull in opposite directions, so neither is a `dirname` of the other. A skill at `plugins/p/skills/s/` gets a watch root of the whole repository -- otherwise an edit to `plugins/p/commands/`, a sibling plugin, or a repo-root `scripts/` is invisible and `--verify` reports `clean` however much was changed -- and a scope of just its own directory. A single-file artifact (command, hook, or script) gets the narrower pair: the install directory as the watch root, and that one file as the scope, so the sibling hooks in `~/.claude/hooks/` are neither ignored nor editable. Hone discovers artifacts under `~/.claude/skills/`, `$CLAUDE_PLUGIN_ROOT/skills/`, `~/.claude/plugins/*/skills/`, and the other roots in `references/artifact-profiles.md`; the derivation covers all of them.
+
+Watching a repository root is affordable because the snapshot hashes only what git cannot attribute -- files already dirty and files untracked. If the repository is larger than `--max-files` (default 20000) the watch narrows to the install directory and the report carries a `root_fallback` field saying so; treat that as a real gap in coverage, not a clean bill of health.
+
 ### Step 6: Apply Edits
 
 **Pre-step validation:** Verify `improvement_plan` from Step 5: `edits` is a non-empty array, each entry has `id`, `target_section`, and `change` fields, `total_approved >= 1`. If shape is malformed: STOP, report "P2 Step 6 handoff validation failed."
@@ -327,6 +341,27 @@ applied_edits: {
 }
 ```
 Write `artifact_before_snapshot` (pre-edit file content) to the workflow state file before applying edits. Phase 3 reads this for auto-revert on regression.
+
+### Step 6a: Scope Verify (after edits)
+
+```bash
+python3 <skill-dir>/scripts/check_scope.py \
+  --manifest /tmp/scope-${RUN_ID}.json --verify --json
+```
+
+Nothing from Step 5a needs reproducing: the manifest records the root and the scope, and `--verify` reads them back out. That is deliberate. Step 5a and Step 6a are separate Bash tool calls, shell state does not persist between them, and a re-derived `$SCOPE_ROOT` that disagrees with the snapshotted one compares two unrelated trees.
+
+**Emit the `scope_verify` gate event on both paths.** The clean path is the one that gets forgotten, and a check that only records itself when it fails is indistinguishable from a check that never ran:
+
+```json
+{"step": "scope_verify", "judge": "automated", "result": "pass", "ts": "<ISO timestamp>"}
+```
+
+On `clean`: emit that event with `result: "pass"` and continue.
+
+On `scope_violation`: revert **only** the paths listed under `violations`, emit the same event with `result: "fail"`, and halt the round.
+
+**Revert nothing listed under `preexisting_dirty_out_of_scope`.** Those files were already uncommitted when the run started and are byte-identical to the snapshot, so this run did not touch them. Reverting them destroys whatever uncommitted work was sitting there. Git reports a file dirty relative to HEAD; the manifest reports it relative to this run's start, and only the manifest can attribute a change to you.
 
 ### Step 7: Description Trigger Testing (skills and commands only)
 

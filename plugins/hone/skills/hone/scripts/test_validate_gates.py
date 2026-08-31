@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import unittest
 
-from validate_gates import validate_gates
+from validate_gates import derive_edits_applied, validate_gates
 
 
 def gate(step, result="pass", judge="self-check"):
@@ -398,6 +398,63 @@ class TestConvergenceIsRequired(unittest.TestCase):
         )
 
 
+class TestScopeVerifyIsConditional(unittest.TestCase):
+    """`scope_verify` is mandatory exactly when the run applied edits."""
+
+    def test_required_when_edits_were_applied(self):
+        report = validate_gates(NORMAL_RUN, "normal", edits_applied=True)
+        self.assertFalse(report["valid"])
+        self.assertIn("scope_verify", report["missing_steps"])
+
+    def test_an_error_halt_is_not_failed_for_the_missing_event(self):
+        """Phase 2 writes edit_count at Step 6; scope_verify lands at Step 6a.
+
+        A crash between the two is a legitimate halt, and reporting it as a
+        missing required event turned the halt itself into a gate violation.
+        SKILL.md's resume note says the same: in error-halt the only required
+        event is the workflow_exit.
+        """
+        report = validate_gates(
+            [gate("workflow_exit", result="fail")], "error-halt", edits_applied=True
+        )
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["missing_steps"], [])
+
+    def test_an_error_halt_still_warns_about_the_unverified_edits(self):
+        report = validate_gates(
+            [gate("workflow_exit", result="fail")], "error-halt", edits_applied=True
+        )
+        self.assertTrue(any("scope_verify" in w for w in report["warnings"]))
+
+    def test_an_error_halt_that_verified_scope_does_not_warn(self):
+        gates = [gate("scope_verify"), gate("workflow_exit", result="fail")]
+        report = validate_gates(gates, "error-halt", edits_applied=True)
+        self.assertEqual(report["warnings"], [])
+
+    def test_satisfied_by_the_event(self):
+        gates = NORMAL_RUN + [gate("scope_verify")]
+        self.assertTrue(validate_gates(gates, "normal", edits_applied=True)["valid"])
+
+    def test_not_required_when_no_edits_were_applied(self):
+        self.assertTrue(validate_gates(NORMAL_RUN, "normal")["valid"])
+
+
+class TestDeriveEditsApplied(unittest.TestCase):
+    """The condition comes from the state file, never from a caller flag."""
+
+    def test_positive_edit_count(self):
+        self.assertTrue(derive_edits_applied({"applied_edits": {"edit_count": 2}}))
+
+    def test_zero_edit_count(self):
+        self.assertFalse(derive_edits_applied({"applied_edits": {"edit_count": 0}}))
+
+    def test_absent_or_malformed(self):
+        for state in ({}, {"applied_edits": None}, {"applied_edits": {}},
+                      {"applied_edits": {"edit_count": "2"}},
+                      {"applied_edits": {"edit_count": True}}, None, []):
+            self.assertFalse(derive_edits_applied(state), state)
+
+
 class TestHaltSequenceTail(unittest.TestCase):
     """A fail followed only by workflow_exit is a halt, not progress."""
 
@@ -496,10 +553,10 @@ class TestResumedRuns(unittest.TestCase):
 class TestDocumentedCleanRunValidates(unittest.TestCase):
     """A run that emits every documented gate event must pass its own exit gate.
 
-    Events have been added to REQUIRED_STEPS without the instructions that
-    emit them on the clean path, so every compliant run failed here. This
-    pins the two halves together: if the requirement moves, the emission
-    instructions have to move with it.
+    `convergence` and `scope_verify` were added to REQUIRED_STEPS without the
+    instructions that emit them on the clean path, so every compliant run
+    failed here. These pin the two halves together: if the requirement moves,
+    the emission instructions have to move with it.
     """
 
     STEPS = {
@@ -521,9 +578,11 @@ class TestDocumentedCleanRunValidates(unittest.TestCase):
     def _state(self, **overrides):
         state = {
             "steps": dict(self.STEPS),
+            "applied_edits": {"edit_count": 3},
             "gates": [
                 self._gate("phase1_to_phase2"),
                 self._gate("phase2_to_phase3"),
+                self._gate("scope_verify"),
                 self._gate("phase3_exit"),
                 self._gate("convergence"),
                 self._gate("workflow_exit"),
@@ -533,13 +592,18 @@ class TestDocumentedCleanRunValidates(unittest.TestCase):
         return state
 
     def _report(self, state):
-        from validate_gates import derive_resumed, validate_gates
+        from validate_gates import (
+            derive_edits_applied,
+            derive_resumed,
+            validate_gates,
+        )
         from hone_common import derive_gate_mode
 
         return validate_gates(
             state.get("gates", []),
             derive_gate_mode(state.get("steps")) or "normal",
             derive_resumed(state),
+            derive_edits_applied(state),
         )
 
     def test_a_fully_documented_normal_run_is_valid(self):
@@ -550,6 +614,11 @@ class TestDocumentedCleanRunValidates(unittest.TestCase):
         state = self._state()
         state["gates"] = [g for g in state["gates"] if g["step"] != "convergence"]
         self.assertIn("convergence", self._report(state)["missing_steps"])
+
+    def test_omitting_scope_verify_is_still_caught_when_edits_applied(self):
+        state = self._state()
+        state["gates"] = [g for g in state["gates"] if g["step"] != "scope_verify"]
+        self.assertIn("scope_verify", self._report(state)["missing_steps"])
 
 
 class TestResumedIsDerivedFromState(unittest.TestCase):
