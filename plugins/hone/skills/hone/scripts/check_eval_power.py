@@ -94,6 +94,19 @@ DEFAULT_MIN_PROFILES = 2
 # knowledge_extraction from the round's own evidence.
 NON_SCORABLE_PROFILES = frozenset({"knowledge_extraction"})
 
+# Artifact types for which NON_SCORABLE_PROFILES does not apply.
+# `knowledge_extraction` is always inconclusive only on the skill and command
+# scoring paths. score_execution.py's `hook` and `script` branches never
+# consult `test_profile` at all -- they score trigger_accuracy /
+# output_structure / correctness off the run's own evidence -- so a hook or
+# script case carrying that profile does produce a composite and does pair in
+# compare mode. Excluding it there reported a fully pairable suite
+# `underpowered` and attached a warning ("they never pair in compare mode")
+# that was false for that artifact type. The criteria file carries no artifact
+# type of its own, so the caller supplies it with `--artifact-type`; unset
+# keeps the conservative skill/command reading.
+ALWAYS_SCORABLE_ARTIFACT_TYPES = frozenset({"hook", "script"})
+
 ALPHA = 0.05
 
 # Score movement below this is treated as a tie rather than a win or a loss.
@@ -127,8 +140,12 @@ def _profile_of(case: dict) -> str:
 
 
 def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
-                 alpha: float = ALPHA) -> dict:
-    """Assess whether a criteria set is large and varied enough to rule."""
+                 alpha: float = ALPHA, artifact_type: str = "") -> dict:
+    """Assess whether a criteria set is large and varied enough to rule.
+
+    `artifact_type` decides whether NON_SCORABLE_PROFILES applies at all; see
+    ALWAYS_SCORABLE_ARTIFACT_TYPES.
+    """
     # The floor honours alpha, not --min-stimuli alone: 5 cases at alpha 0.01
     # need 7 discordant votes, so no arrangement of wins can ever clear it.
     # min_discordant_for_significance reported that; the verdict ignored it.
@@ -139,7 +156,12 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
     ids = [c.get("id") for c in cases if c.get("id")]
     distinct_ids = sorted(set(ids))
 
-    scorable = [c for c in cases if _profile_of(c) not in NON_SCORABLE_PROFILES]
+    unscorable = (
+        frozenset()
+        if artifact_type in ALWAYS_SCORABLE_ARTIFACT_TYPES
+        else NON_SCORABLE_PROFILES
+    )
+    scorable = [c for c in cases if _profile_of(c) not in unscorable]
     scorable_ids = sorted({c.get("id") for c in scorable if c.get("id")})
     excluded_ids = sorted(set(distinct_ids) - set(scorable_ids))
     # Diversity is measured over the same subset the floor counts. Two profiles
@@ -167,7 +189,7 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
         warnings.append(
             f"{len(excluded_ids)} case(s) {excluded_ids} carry a profile that "
             f"is always inconclusive deterministically "
-            f"{sorted(NON_SCORABLE_PROFILES)}; they never pair in compare "
+            f"{sorted(unscorable)}; they never pair in compare "
             "mode, so adding more of them cannot clear the floor"
         )
     if len(profiles) < min_profiles:
@@ -393,7 +415,7 @@ def _load(path: str) -> dict:
 
 
 def _require_path(path: str) -> None:
-    """Exit 2 on a path that does not exist.
+    """Exit 2 on a path that is not a readable file.
 
     `load_deterministic_scores` only ever looks at `<parent>/
     deterministic_scores.json`, so it does not care whether the path it was
@@ -401,19 +423,41 @@ def _require_path(path: str) -> None:
     and produced a confident verdict off a typo. The documented contract for a
     path that is not there is exit 2, and nothing downstream can restore it
     once the fallback has succeeded.
+
+    A directory is the same failure wearing a plausible shape, and the docs
+    used to invite it by calling `--before` "the previous round's output
+    directory". `--before r1` resolves to `<parent-of-r1>/
+    deterministic_scores.json`: either it does not exist and the run dies on an
+    unhelpful "Is a directory", or it does and both flags silently read the
+    same file, tying every case and reporting `underpowered` forever.
     """
-    if not Path(path).exists():
+    target = Path(path)
+    if not target.exists():
         print(f"ERROR: file not found: {path}", file=sys.stderr)
+        sys.exit(2)
+    if not target.is_file():
+        print(
+            f"ERROR: {path} is a directory; pass the round's "
+            "deterministic_scores.json (or the results.json beside it), not "
+            "the output directory that holds it",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
 
-def _score_source(path: str) -> str:
-    """Which scorer a round's numbers come from: deterministic, or results."""
-    return "deterministic" if load_deterministic_scores(path) else "results"
+def _deterministic_file(path: str) -> Path:
+    """The `deterministic_scores.json` that `load_deterministic_scores` resolves.
+
+    Mirrors hone_common's sibling-file rule rather than importing it, because
+    hone_common exposes the loaded scores and this needs the file's
+    *presence*: a deterministic file that exists and scored nothing is a
+    deterministically scored round, not an unscored one.
+    """
+    return Path(path).parent / "deterministic_scores.json"
 
 
-def _load_round(path: str) -> dict:
-    """Load one round's scores, preferring the deterministic composites.
+def _load_round(path: str) -> tuple[dict, str]:
+    """Load one round's scores and name the scorer they came from.
 
     `path` may be either a round's `deterministic_scores.json` or the
     `results.json` beside it; `load_deterministic_scores` resolves both to the
@@ -421,6 +465,21 @@ def _load_round(path: str) -> dict:
     `_load(path)` keeps the older shapes working (a results.json from a run
     that had an LLM judge, or any payload already carrying per-test scores),
     and keeps the exit-2 contract for a missing or non-object file.
+
+    The source is returned from here rather than inferred separately, because
+    inferring it from `load_deterministic_scores(path)` being truthy conflated
+    two different rounds. A round whose every composite came back null -- the
+    signature of a catastrophic regression, per score_execution.py's
+    inconclusive paths -- has a deterministic file that scored nothing, and the
+    truthiness test called that "results". Paired against a normal round it
+    reported a scorer swap that never happened, burying the real finding under
+    "re-run deterministic scoring on the round that is missing it".
+
+    Such a round also does not fall back to the judge. The deterministic file
+    is present and is the scorer of record; falling through to results.json
+    would swap scorers *within* one side, which is the exact substitution
+    `check_compare` refuses to rule on. It returns no scores instead, so the
+    comparison lands on the accurate "0 paired test case(s)" diagnosis.
     """
     _require_path(path)
     deterministic = load_deterministic_scores(path)
@@ -430,8 +489,10 @@ def _load_round(path: str) -> dict:
                 {"test_id": test_id, "composite": composite}
                 for test_id, composite in deterministic.items()
             ]
-        }
-    return _load(path)
+        }, "deterministic"
+    if _deterministic_file(path).is_file():
+        return {"per_test": []}, "deterministic"
+    return _load(path), "results"
 
 
 def _combined_verdict(sizing: dict, comparison: dict) -> str:
@@ -447,13 +508,28 @@ def _combined_verdict(sizing: dict, comparison: dict) -> str:
     pairing identity has just been declared broken.
 
     What the override must not do is happen quietly. The nested
-    `comparison.verdict` is left intact for a human reading the JSON, and a
-    suppressed non-null result is stated as a warning rather than being
+    `comparison.verdict` is left intact for a human reading the JSON, and
+    anything the override hides is stated as a warning rather than being
     absorbed into a bare "underpowered".
+
+    `not_measurable` gets its own warning because it is the one hidden verdict
+    whose remedy differs. Step 9a records the surface verdict, and the
+    `underpowered` remedy is "add test cases that discriminate a different
+    property" -- which cannot fix a test-id mismatch or an absent
+    deterministic file, the input problems phase1-evaluation.md Step 9a says to
+    fix instead. Without the warning that distinction survived only in the
+    nested JSON nobody reads.
     """
     if sizing["verdict"] == "powered":
         return comparison["verdict"]
-    if comparison["verdict"] not in ("underpowered", "not_measurable"):
+    if comparison["verdict"] == "not_measurable":
+        comparison["warnings"].append(
+            "the comparison was also not_measurable: nothing was compared, "
+            "for an input reason named in comparison.errors. Adding test "
+            "cases, the underpowered remedy, does not fix that -- fix the "
+            "inputs as well as the criteria set"
+        )
+    elif comparison["verdict"] != "underpowered":
         comparison["warnings"].append(
             f"nominal comparison verdict '{comparison['verdict']}' is "
             "suppressed because sizing failed; fix the criteria set and "
@@ -497,6 +573,15 @@ def main() -> None:
              "are read against it separately, so the combined rate is up to "
              f"twice it (reported as two_sided_alpha) (default: {ALPHA})",
     )
+    parser.add_argument(
+        "--artifact-type",
+        choices=("skill", "command", "hook", "script"),
+        default="",
+        help="Artifact the criteria were written for. Hooks and scripts score "
+             "every profile deterministically, so the always-inconclusive "
+             "profile exclusion does not apply to them (default: the "
+             "conservative skill/command reading)",
+    )
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")
     args = parser.parse_args()
 
@@ -508,13 +593,15 @@ def main() -> None:
         sys.exit(2)
 
     criteria = _load(args.criteria_file)
-    sizing = check_sizing(criteria, args.min_stimuli, args.min_profiles, args.alpha)
+    sizing = check_sizing(criteria, args.min_stimuli, args.min_profiles,
+                          args.alpha, args.artifact_type)
 
     report = sizing
     if args.before:
+        before_round, before_source = _load_round(args.before)
+        after_round, after_source = _load_round(args.after)
         comparison = check_compare(
-            _load_round(args.before), _load_round(args.after), args.alpha,
-            _score_source(args.before), _score_source(args.after),
+            before_round, after_round, args.alpha, before_source, after_source,
         )
         report = {"sizing": sizing, "comparison": comparison,
                   "verdict": _combined_verdict(sizing, comparison)}

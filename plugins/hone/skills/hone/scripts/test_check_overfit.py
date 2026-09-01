@@ -126,6 +126,33 @@ class TestCheckOverfit(unittest.TestCase):
         self.assertEqual(report["verdict"], "not_measurable")
         self.assertEqual(report["items_exempt_required_absent"], 1)
 
+    def test_an_empty_artifact_is_not_measurable_rather_than_passing(self):
+        """Same hole as zero classifiable items, on the artifact side: with
+        nothing to compare against, every lift test is vacuous and every item
+        classifies `outcome` for ratio 0.0, clearing the mandatory gate on no
+        evidence."""
+        criteria = {
+            "skill_name": "demo",
+            "test_cases": [{
+                "id": "t1",
+                "required_present": ["validate_handoff"],
+                "checks": [{"description": "Ran Phase 2 and reported the outcome"}],
+            }],
+        }
+        report = check_overfit(criteria, "", "demo", 0.34)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertIsNone(report["overfit_ratio"])
+        self.assertIn("artifact", report["reason"])
+
+    def test_a_whitespace_only_artifact_is_not_measurable(self):
+        """A truncated write leaves whitespace, not an empty string."""
+        criteria = {"skill_name": "demo",
+                    "test_cases": [{"checks": [{"description": "Did the thing"}]}]}
+        self.assertEqual(
+            check_overfit(criteria, "\n \t\n", "demo", 0.34)["verdict"],
+            "not_measurable",
+        )
+
 
 class TestCriteriaRootShape(unittest.TestCase):
     """A non-object criteria root is a usage error, not an AttributeError."""
@@ -208,8 +235,24 @@ class TestEnrichmentAnchorsAreVisible(unittest.TestCase):
         self.assertEqual(report["counts"]["vocabulary"], 2)
         self.assertEqual(report["counts"]["outcome"], 1)
 
-    def test_lifted_markup_anchor_is_vocabulary(self):
-        self.assertEqual(self._report(["##"])["counts"]["vocabulary"], 1)
+    def test_generic_markdown_syntax_is_not_a_lift(self):
+        """`##` is in every markdown artifact by construction, and
+        phase1-evaluation.md recommends it as the minimal structural check.
+        Flagging it made the classifier report its own documented practice as
+        recitation, on a rule with no collision guard of its own."""
+        report = self._report(["##", "---", "```"])
+        self.assertEqual(report["counts"]["vocabulary"], 0)
+
+    def test_distinctive_markup_is_still_a_lift(self):
+        """The exemption is for markdown syntax, not for all punctuation:
+        artifact-specific decoration reproduced verbatim is still recitation."""
+        criteria = {
+            "skill_name": "demo",
+            "test_cases": [{"required_present": ["▓▒░"]}],
+        }
+        artifact = self.ARTIFACT + "Banner: ▓▒░\n"
+        report = check_overfit(criteria, artifact, "demo", 0.34)
+        self.assertEqual(report["counts"]["vocabulary"], 1)
 
     def test_an_anchor_absent_from_the_artifact_is_not_a_lift(self):
         self.assertEqual(self._report(["never_written"])["counts"]["vocabulary"], 0)

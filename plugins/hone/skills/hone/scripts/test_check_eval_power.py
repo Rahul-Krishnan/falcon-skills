@@ -261,7 +261,7 @@ class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
             # round. Before the fix this paired zero cases.
             path = self._round(tmp, "r1", {"tests": [{"id": "TC-001"}]}, deterministic)
             self.assertEqual(
-                _scores_by_id(_load_round(path)), {"TC-001": 0.9, "TC-002": 0.4}
+                _scores_by_id(_load_round(path)[0]), {"TC-001": 0.9, "TC-002": 0.4}
             )
 
     def test_the_deterministic_path_itself_is_accepted(self):
@@ -275,7 +275,7 @@ class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
             results_path = self._round(tmp, "r1", {}, deterministic)
             sibling = os.path.join(os.path.dirname(results_path),
                                    "deterministic_scores.json")
-            self.assertEqual(_scores_by_id(_load_round(sibling)), {"TC-001": 0.75})
+            self.assertEqual(_scores_by_id(_load_round(sibling)[0]), {"TC-001": 0.75})
 
     def test_a_judge_only_round_still_falls_back_to_results(self):
         import tempfile
@@ -286,7 +286,78 @@ class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
             path = self._round(
                 tmp, "r1", {"per_test": [{"test_id": "TC-001", "score": 0.6}]}
             )
-            self.assertEqual(_scores_by_id(_load_round(path)), {"TC-001": 0.6})
+            round_payload, source = _load_round(path)
+            self.assertEqual(_scores_by_id(round_payload), {"TC-001": 0.6})
+            self.assertEqual(source, "results")
+
+    def test_an_all_null_round_is_still_the_deterministic_scorer(self):
+        """A round where every composite came back null is the signature of a
+        catastrophic regression, not a missing scorer. Inferring the source
+        from the score map being truthy called it `results`, so pairing it
+        against a normal round reported a scorer swap that never happened and
+        buried the real finding."""
+        import tempfile
+
+        from check_eval_power import _load_round, _scores_by_id
+
+        deterministic = {"per_test": [
+            {"test_id": "TC-001", "composite": None, "status": "inconclusive"},
+            {"test_id": "TC-002", "composite": None, "status": "inconclusive"},
+        ]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._round(
+                tmp, "r1",
+                {"per_test": [{"test_id": "TC-001", "score": 0.6}]},
+                deterministic,
+            )
+            round_payload, source = _load_round(path)
+            self.assertEqual(source, "deterministic")
+            # And it does not fall through to the judge: that would swap
+            # scorers inside one side of the comparison.
+            self.assertEqual(_scores_by_id(round_payload), {})
+
+    def test_an_all_null_round_reports_the_pairing_failure_not_a_scorer_swap(self):
+        import tempfile
+
+        from check_eval_power import _load_round, check_compare
+
+        good = {"per_test": [{"test_id": f"TC-{i}", "composite": 0.8}
+                             for i in range(6)]}
+        null = {"per_test": [{"test_id": f"TC-{i}", "composite": None}
+                             for i in range(6)]}
+        with tempfile.TemporaryDirectory() as tmp:
+            before_path = self._round(tmp, "r1", {}, good)
+            after_path = self._round(tmp, "r2", {}, null)
+            before, before_source = _load_round(before_path)
+            after, after_source = _load_round(after_path)
+            report = check_compare(before, after, 0.05, before_source, after_source)
+            self.assertEqual(report["verdict"], "not_measurable")
+            said = " ".join(report["errors"])
+            self.assertIn("0 paired test case(s)", said)
+            self.assertNotIn("scorer", said)
+
+
+class TestRoundPathsMustBeFiles(unittest.TestCase):
+    """`--before r1` resolves to `<parent-of-r1>/deterministic_scores.json`:
+    either an unhelpful "Is a directory", or both flags silently reading the
+    same file for an all-ties `underpowered`."""
+
+    def test_a_directory_is_a_usage_error(self):
+        import tempfile
+
+        from check_eval_power import _require_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit) as caught:
+                _require_path(tmp)
+            self.assertEqual(caught.exception.code, 2)
+
+    def test_a_missing_path_is_still_a_usage_error(self):
+        from check_eval_power import _require_path
+
+        with self.assertRaises(SystemExit) as caught:
+            _require_path("/nonexistent/round/deterministic_scores.json")
+        self.assertEqual(caught.exception.code, 2)
 
     def test_the_composite_wins_when_a_record_carries_both(self):
         """Phase 2 decides on the composite, so a record carrying both must
@@ -500,6 +571,52 @@ class TestSizingOverridesAreStated(unittest.TestCase):
         comparison = {"verdict": "underpowered", "warnings": []}
         _combined_verdict({"verdict": "underpowered"}, comparison)
         self.assertFalse(comparison["warnings"])
+
+    def test_a_hidden_not_measurable_says_the_remedy_differs(self):
+        """Step 9a records the surface verdict, and `underpowered`'s remedy is
+        "add test cases" -- which cannot fix the input problem behind a
+        `not_measurable` comparison."""
+        from check_eval_power import _combined_verdict
+
+        comparison = {"verdict": "not_measurable", "warnings": []}
+        self.assertEqual(
+            _combined_verdict({"verdict": "underpowered"}, comparison),
+            "underpowered",
+        )
+        self.assertTrue(
+            any("not_measurable" in w for w in comparison["warnings"])
+        )
+
+
+class TestArtifactTypeScopesTheProfileExclusion(unittest.TestCase):
+    """score_execution.py's `hook` and `script` branches never consult
+    `test_profile`, so excluding `knowledge_extraction` there reported a fully
+    pairable suite `underpowered` with a warning that was false."""
+
+    CRITERIA = {"test_cases": [
+        {"id": f"TC-{i}", "test_profile": "knowledge_extraction"}
+        for i in range(6)
+    ]}
+
+    def test_a_skill_suite_still_excludes_the_profile(self):
+        report = check_sizing(self.CRITERIA, 5, 2, 0.05, "skill")
+        self.assertEqual(report["scorable_cases"], 0)
+        self.assertEqual(report["verdict"], "underpowered")
+
+    def test_an_unset_artifact_type_keeps_the_conservative_reading(self):
+        self.assertEqual(check_sizing(self.CRITERIA, 5, 2, 0.05)["scorable_cases"], 0)
+
+    def test_a_hook_suite_counts_every_case(self):
+        report = check_sizing(self.CRITERIA, 5, 1, 0.05, "hook")
+        self.assertEqual(report["scorable_cases"], 6)
+        self.assertEqual(report["excluded_cases"], [])
+        self.assertEqual(report["verdict"], "powered")
+        self.assertFalse(any("never pair" in w for w in report["warnings"]))
+
+    def test_a_script_suite_counts_every_case(self):
+        self.assertEqual(
+            check_sizing(self.CRITERIA, 5, 1, 0.05, "script")["scorable_cases"], 6
+        )
 
 
 if __name__ == "__main__":

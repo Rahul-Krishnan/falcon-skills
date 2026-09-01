@@ -32,13 +32,20 @@ markup-shaped anchors left the same hole open one step further out: short
 verbatim prose anchors ("gate event", "state file") still diluted the
 denominator, so the gate could be cleared by adding more recitation checks.
 
+Both anchor tests carry a collision guard, because an anchor that matches the
+artifact by accident is not recitation. MIN_ANCHOR_WORDS is the guard on the
+word side; MARKDOWN_SYNTAX_CHARS is its twin on the markup side, exempting
+generic markdown syntax (`##`, `---`) that every markdown artifact contains by
+construction.
+
 `required_absent` lists are exempt by construction. They assert the artifact's
 own vocabulary must NOT appear in output, which is the opposite failure mode
 and a legitimate use of lifted phrasing.
 
 Exit codes: 0 within threshold, 1 over threshold or not measurable, 2 usage
-error. `not_measurable` is the verdict when the criteria set yields zero
-classifiable items -- nothing was measured, so nothing passed.
+error. `not_measurable` is the verdict when nothing could be compared -- the
+criteria set yields zero classifiable items, or the artifact carries no words
+to compare them against. Nothing was measured, so nothing passed.
 
 Stdlib only. Read-only: it reports, it never rewrites criteria.
 """
@@ -87,6 +94,20 @@ WORD = re.compile(r"[a-z0-9]+")
 # including across a separator swap between the anchor and the artifact.
 MARKUP_ANCHOR = re.compile(r"^[^\w\s]{2,}$")
 
+# Characters that carry markdown structure rather than content. A bare-markup
+# anchor that is a run of a single one of them (`##`, `---`, ```` ``` ````) is
+# markdown syntax, not the artifact's vocabulary: it occurs in every markdown
+# artifact by construction, so matching it against the artifact says nothing
+# about whether the artifact was recited. This is the markup-side twin of
+# MIN_ANCHOR_WORDS, which exists on the word side for the same reason -- a
+# single common token collides with almost any artifact by accident, and
+# flagging the collision inflates the very ratio being gated. Without it the
+# rule flagged `"##"`, which phase1-evaluation.md recommends as the minimal
+# structural check, so the classifier reported the practice its own docs
+# prescribe as recitation. A mixed or non-structural run (`▓▒░`, `>>>|<<<`) is
+# artifact-specific decoration and still counts as a lift.
+MARKDOWN_SYNTAX_CHARS = frozenset("#-*_`>|+~=")
+
 # The skill-name rule fires on a bare name only when the name is itself
 # distinctive (multi-segment, like `temper-rework`: no English sentence
 # contains it by accident). A single-word name is matched only in a
@@ -126,12 +147,22 @@ def _contains_phrase(haystack: list[str], phrase: list[str]) -> bool:
     return False
 
 
+def _is_generic_markdown(stripped: str) -> bool:
+    """Is this bare-markup anchor markdown syntax rather than artifact wording?
+
+    True for a run of one structural character (`##`, `---`, `>>`). See
+    MARKDOWN_SYNTAX_CHARS for why those are exempt.
+    """
+    return len(set(stripped)) == 1 and stripped[0] in MARKDOWN_SYNTAX_CHARS
+
+
 def _anchor_lift(stripped: str, artifact_text: str,
                  artifact_words: list[str]) -> str:
     """Why this `required_present` anchor is a verbatim lift, or "" if it is not.
 
     Two shapes, because one of them has no words to compare. Bare markup
-    (`##`) is matched as a raw substring; everything else is matched on its
+    (`▓▒░`) is matched as a raw substring, minus the generic markdown syntax
+    exempted by `_is_generic_markdown`; everything else is matched on its
     normalised words, and only at MIN_ANCHOR_WORDS or more. Below that bar an
     anchor is a common token that collides with almost any artifact by
     accident, and flagging it would inflate the very ratio being gated.
@@ -139,6 +170,8 @@ def _anchor_lift(stripped: str, artifact_text: str,
     if not artifact_text:
         return ""
     if MARKUP_ANCHOR.match(stripped):
+        if _is_generic_markdown(stripped):
+            return ""
         if stripped.lower() in artifact_text.lower():
             return f"markup anchor lifted verbatim from the artifact: '{stripped}'"
         return ""
@@ -287,21 +320,38 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
     total = len(classified)
     overfit = counts["technique"] + counts["vocabulary"]
 
-    # Zero classifiable items is not a pass. `overfit / total` guarded with an
-    # `else 0.0` made an empty ratio indistinguishable from a perfect one, so
-    # a criteria set whose cases carry only `required_absent` lists (exempt by
-    # construction) or no test cases at all cleared Step 6a's mandatory gate
-    # silently, on no evidence. `not_measurable` says what actually happened,
-    # and exits non-zero so the gate cannot read it as within threshold.
-    if total == 0:
+    # Neither zero classifiable items nor a wordless artifact is a pass.
+    #
+    # `overfit / total` guarded with an `else 0.0` made an empty ratio
+    # indistinguishable from a perfect one, so a criteria set whose cases carry
+    # only `required_absent` lists (exempt by construction) or no test cases at
+    # all cleared Step 6a's mandatory gate silently, on no evidence.
+    #
+    # An empty or wordless artifact is the same hole on the other side of the
+    # comparison: `_ngrams` of it is empty and `_anchor_lift` returns "" on its
+    # first line, so every item classifies `outcome` and the ratio is 0.0. A
+    # `--artifact` pointed at a truncated or empty file therefore cleared the
+    # gate while comparing against nothing.
+    #
+    # `not_measurable` says what actually happened in both cases, and exits
+    # non-zero so the gate cannot read it as within threshold.
+    if not artifact_words:
         verdict = "not_measurable"
         ratio = None
+        reason = ("the artifact carries no words, so every lift test compared "
+                  "against nothing")
+    elif total == 0:
+        verdict = "not_measurable"
+        ratio = None
+        reason = "no classifiable items; nothing was measured"
     else:
         ratio = round(overfit / total, 4)
         verdict = "within_threshold" if ratio <= max_ratio else "overfitted"
+        reason = ""
 
     return {
         "verdict": verdict,
+        "reason": reason,
         "skill_name": skill_name,
         "items_classified": total,
         "items_exempt_required_absent": exempt,
@@ -384,8 +434,7 @@ def main() -> None:
     else:
         counts = report["counts"]
         if report["overfit_ratio"] is None:
-            print(f"VERDICT: {report['verdict']} (no classifiable items; "
-                  f"nothing was measured)")
+            print(f"VERDICT: {report['verdict']} ({report['reason']})")
         else:
             print(f"VERDICT: {report['verdict']} (ratio {report['overfit_ratio']}, "
                   f"max {report['max_overfit_ratio']})")
