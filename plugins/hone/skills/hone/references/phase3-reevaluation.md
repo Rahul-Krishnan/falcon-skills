@@ -35,6 +35,14 @@ python3 <skill-dir>/scripts/enrich_programmatic_checks.py \
 
 This is idempotent: it strips stale identifier-shaped `required_present` entries (no longer occurring in the artifact — hand-written phrases are untouched) and adds any new identifiers introduced by Phase 2 edits, so a Phase 2 rename cannot leave a permanently-MISSING check behind.
 
+**Then re-run the overfit gate (Phase 1 Step 6a), because the refresh re-derives anchors from the current artifact.** An identifier Step 6a had you remove as a `vocabulary` lift is still in the artifact and still in the check text, so the refresh adds it back, and without a gate here Phase 3 scores the recitation anchors Step 6a rejected:
+
+```bash
+python3 <skill-dir>/scripts/check_overfit.py {eval_criteria_path} --artifact {artifact_path} --json
+```
+
+Apply Step 6a's rule unchanged: rewrite flagged items, `vocabulary` anchors first, until the verdict is `within_threshold`, and do not touch a set that already reports it. Do this before re-running eval runner, so the after-round is scored against the same kind of criteria the before-round was.
+
 Steps:
 1. Re-read artifact and eval criteria from disk (compaction protection).
 2. Re-run eval runner with `--reuse-criteria`.
@@ -42,6 +50,11 @@ Steps:
    ```bash
    python3 <skill-dir>/scripts/score_execution.py $REEVAL_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --require-timeline --json
    ```
+3a. **Power verdict (Phase 1 Step 9a).** The composite from step 3 is a number, not a result, until the sign test says whether the round's movement is distinguishable from noise. Run the comparison Step 9a specifies, with `$PRIOR_OUTPUT_DIR` set to the `output_dir` recorded under `eval_results` (or the previous round's recorded scores) in the workflow state file and `--after` pointed at this round:
+   ```bash
+   python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} --artifact-type {artifact_type} --before $PRIOR_OUTPUT_DIR/deterministic_scores.json --after $REEVAL_OUTPUT_DIR/deterministic_scores.json --json
+   ```
+   Record `power_verdict`, `power_p_improved`, and `power_discordant` beside this round's composite in the state file, and read the verdict as Step 9a does: `underpowered` and `not_measurable` are neither a pass nor a regression, and neither is ever reported as an improvement. The per-dimension comparison and regression check below still run; the power verdict is recorded alongside them, and the Final Output reports it with the grade.
 4. Compare scores: before/after table per-dimension using deterministic scores from workflow state file.
 5. **Regression check (rubric):** Re-read previous scores from the workflow state file (`eval_results.per_test` or last round's recorded scores). Do NOT use in-memory scores from earlier in the conversation. For each dimension, compare new score to previous score read from the state file. If ANY dimension dropped by more than 0.1, flag as regression, then run the variance control below before reverting anything.
 

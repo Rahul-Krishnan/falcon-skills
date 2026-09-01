@@ -35,9 +35,18 @@ Two modes:
            only."). Pointing this at results.json instead qualified a number
            nobody decides on, and on a deterministic-only run results.json
            carries no per-test `score` at all, so every comparison paired zero
-           cases and reported `underpowered` forever. A round directory is
-           accepted either way: pass the results.json and the sibling
-           deterministic_scores.json is read instead when it exists.
+           cases and reported `underpowered` forever. Pass either the
+           deterministic_scores.json or the results.json beside it; the
+           deterministic sibling is what gets read. A round with no
+           deterministic file at all is `not_measurable`, whichever side it
+           is on: the judge scores in results.json are not the measurement
+           Phase 2 acts on, so two judge files are not compared either.
+
+           A case that scored in the before round and came back inconclusive
+           (composite null) in the after round is also `not_measurable`. Its
+           evidence collapsed rather than its score moving, and a sign test
+           over the cases that still scored reads that collapse as a clean
+           sweep. `inconclusive_after` names the cases.
 
 Thresholds come from the binomial, not from taste. With n discordant votes and
 w wins, p = sum(C(n,k) * 0.5**n for k in w..n). At alpha 0.05 that means 5-7
@@ -70,8 +79,9 @@ from pathlib import Path
 
 # load_deterministic_scores owns the sibling-file rule: given a round's
 # results.json it reads deterministic_scores.json beside it, dropping tests
-# whose composite is null. A second copy here is a second copy to drift.
-from hone_common import load_deterministic_scores
+# whose composite is null. load_inconclusive_ids is the other half of that
+# file: the ids it dropped. A second copy here is a second copy to drift.
+from hone_common import load_deterministic_scores, load_inconclusive_ids
 
 # Minimum distinct test cases before a verdict is meaningful at all. Below this
 # no arrangement of wins can reach p <= 0.05 on a one-sided sign test.
@@ -115,6 +125,28 @@ ALPHA = 0.05
 # band that triggers resampling there.
 TIE_EPSILON = 0.05
 
+# Decimal places a score movement is rounded to before it is classified. The
+# composites are written with a handful of decimals, and `0.85 - 0.80` is
+# 0.04999999999999993 while `0.55 - 0.50` is 0.050000000000000044, so an
+# unrounded `abs(delta) <= TIE_EPSILON` called the same nominal 0.05 movement
+# a tie in one suite and a win in another, and the round's verdict flipped
+# with it. The rounded delta is also the one written to `movements`, so the
+# number a reader sees is the number the decision was taken on.
+DELTA_DECIMALS = 4
+
+# Profiles score_execution.py's `_resolve_test_profile` can return, i.e. the
+# keys of its PROFILE_WEIGHT_MAP. Anything else in `test_profile` is not
+# honoured by the scorer, which falls through to its heuristics and, absent
+# execution evidence, to the artifact-type default -- named `execution` here.
+KNOWN_PROFILES = frozenset({
+    "execution",
+    "knowledge_extraction",
+    "error_handling",
+    "side_effect_guarded",
+    "failure_mode",
+})
+DEFAULT_PROFILE = "execution"
+
 
 def sign_test_p(wins: int, discordant: int) -> float:
     """Exact one-sided binomial p for `wins` successes in `discordant` trials."""
@@ -135,8 +167,27 @@ def min_discordant_for_alpha(alpha: float = ALPHA) -> int:
 
 
 def _profile_of(case: dict) -> str:
-    """The case's declared profile, under the name the scorer resolves it by."""
-    return case.get("test_profile") or case.get("category") or "(unset)"
+    """The case's profile, under the name the scorer resolves it by.
+
+    Mirrors the part of score_execution.py's `_resolve_test_profile` that can
+    be read off the criteria file: an explicit `test_profile` the scorer
+    knows, else `category: error_handling` (the one category its heuristics
+    map to a profile), else the artifact-type default. Falling back to
+    `category` wholesale, as this did, counted a required enum with a
+    different value set as profile diversity: five cases across five
+    categories and no `test_profile` reported five profiles and silenced the
+    min-profiles warning, while the scorer weighted four of them identically.
+    The same five with `test_profile: execution` filled in fired it. The
+    warning flipped on whether an optional field was filled in, not on what
+    the scorer would resolve.
+    """
+    profile = case.get("test_profile")
+    if isinstance(profile, str) and profile in KNOWN_PROFILES:
+        return profile
+    category = case.get("category")
+    if isinstance(category, str) and category.lower().replace("-", "_") == "error_handling":
+        return "error_handling"
+    return DEFAULT_PROFILE
 
 
 def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
@@ -274,6 +325,18 @@ def _scores_by_id(results: dict) -> dict[str, float]:
     return scores
 
 
+def _inconclusive_ids(payload: dict) -> set[str]:
+    """Ids `_load_round` recorded as inconclusive for this side, if any.
+
+    A caller that built the payload by hand (a results.json shape, or a bare
+    per_test mapping) carries none, and the compare then behaves as before.
+    """
+    ids = payload.get("inconclusive") if isinstance(payload, dict) else None
+    if not isinstance(ids, (list, set, tuple)):
+        return set()
+    return {str(test_id) for test_id in ids}
+
+
 def check_compare(before: dict, after: dict, alpha: float,
                   before_source: str = "", after_source: str = "") -> dict:
     """Sign-test the after-round against the before-round, per test case.
@@ -290,10 +353,19 @@ def check_compare(before: dict, after: dict, alpha: float,
     after_scores = _scores_by_id(after)
     shared = sorted(set(before_scores) & set(after_scores))
 
+    # A case that scored in one round and came back inconclusive in the other
+    # is not an unpaired id: the criteria set did not change, the evidence
+    # collapsed. `load_deterministic_scores` drops it, so it used to vanish
+    # from the pairing and the sign test ruled on the survivors.
+    before_inconclusive = _inconclusive_ids(before)
+    after_inconclusive = _inconclusive_ids(after)
+    collapsed = sorted(set(before_scores) & after_inconclusive)
+    recovered = sorted(before_inconclusive & set(after_scores))
+
     wins = losses = ties = 0
     movements = []
     for test_id in shared:
-        delta = after_scores[test_id] - before_scores[test_id]
+        delta = round(after_scores[test_id] - before_scores[test_id], DELTA_DECIMALS)
         if abs(delta) <= TIE_EPSILON:
             ties += 1
             outcome = "tie"
@@ -304,7 +376,7 @@ def check_compare(before: dict, after: dict, alpha: float,
             losses += 1
             outcome = "loss"
         movements.append(
-            {"test_id": test_id, "delta": round(delta, 4), "outcome": outcome}
+            {"test_id": test_id, "delta": delta, "outcome": outcome}
         )
 
     discordant = wins + losses
@@ -312,14 +384,20 @@ def check_compare(before: dict, after: dict, alpha: float,
     p_regress = sign_test_p(losses, discordant)
     floor = min_discordant_for_alpha(alpha)
 
-    unpaired_before = sorted(set(before_scores) - set(after_scores))
-    unpaired_after = sorted(set(after_scores) - set(before_scores))
+    # Unpaired means the id is absent from the other round. A collapsed or
+    # recovered case is present there with a null composite, and is reported
+    # under its own key rather than as a missing id.
+    unpaired_before = sorted(set(before_scores) - set(after_scores) - after_inconclusive)
+    unpaired_after = sorted(set(after_scores) - set(before_scores) - before_inconclusive)
     errors: list[str] = []
     warnings: list[str] = []
 
     scorers_disagree = (
         before_source and after_source and before_source != after_source
     )
+    # Two judge files agree on a scorer, not on the measurement Phase 2 acts
+    # on; this used to reach `improved` exit 0 without naming the scorer.
+    judge_only = before_source == after_source == "results"
     if scorers_disagree:
         verdict = "not_measurable"
         errors.append(
@@ -329,6 +407,28 @@ def check_compare(before: dict, after: dict, alpha: float,
             "the scorer swap rather than the round. Re-run deterministic "
             "scoring on the round that is missing it, or point both flags at "
             "rounds scored the same way"
+        )
+    elif judge_only:
+        verdict = "not_measurable"
+        errors.append(
+            "neither round has a deterministic_scores.json, so both sides "
+            "fell back to the LLM judge scores in results.json. Phase 2 "
+            "decides on the deterministic composite, not the judge, and this "
+            "comparison qualifies nothing it acts on. Run score_execution.py "
+            "on both rounds and point --before/--after at the "
+            "deterministic_scores.json files it writes"
+        )
+    elif collapsed:
+        # A partial evidence loss looks like a clean sweep over the survivors;
+        # Step 9a's input remedy applies, not Step 6b's.
+        verdict = "not_measurable"
+        errors.append(
+            f"{len(collapsed)} case(s) {collapsed} scored in --before and "
+            f"came back inconclusive in --after ({len(shared)} still paired). "
+            "Their execution evidence collapsed rather than their scores "
+            "moving, and a verdict over the survivors would read that loss "
+            "as an improvement. Re-run the after round, or find out why "
+            "those cases produced no scorable evidence, before comparing"
         )
     elif not shared:
         # Zero pairs is a pairing failure, and reporting it as `underpowered`
@@ -358,12 +458,23 @@ def check_compare(before: dict, after: dict, alpha: float,
     else:
         verdict = "inconclusive"
 
+    if recovered:
+        # No before-score means no verdict can be manufactured; named so an
+        # unstable suite is visible.
+        warnings.append(
+            f"{len(recovered)} case(s) {recovered} were inconclusive in "
+            "--before and scored in --after; they have no baseline and were "
+            "not paired"
+        )
+
     return {
         "mode": "compare",
         "verdict": verdict,
         "paired_cases": len(shared),
         "unpaired_before": unpaired_before,
         "unpaired_after": unpaired_after,
+        "inconclusive_after": collapsed,
+        "inconclusive_before": sorted(before_inconclusive),
         "before_score_source": before_source,
         "after_score_source": after_source,
         "wins": wins,
@@ -461,10 +572,19 @@ def _load_round(path: str) -> tuple[dict, str]:
 
     `path` may be either a round's `deterministic_scores.json` or the
     `results.json` beside it; `load_deterministic_scores` resolves both to the
-    deterministic file, which is what Phase 2 decides on. Falling back to
-    `_load(path)` keeps the older shapes working (a results.json from a run
-    that had an LLM judge, or any payload already carrying per-test scores),
-    and keeps the exit-2 contract for a missing or non-object file.
+    deterministic file, which is what Phase 2 decides on. The payload also
+    carries the ids that file marked inconclusive, because a case that scored
+    last round and produced no evidence this round is a finding, not an
+    absent id, and `check_compare` refuses to rule over the survivors.
+
+    Falling back to `_load(path)` when there is no deterministic file keeps
+    the exit-2 contract for a missing or non-object file and lets the report
+    say what it did find (how many judge scores, under which ids). It does
+    not make the judge comparable: `check_compare` returns `not_measurable`
+    whenever either side, or both, came from `results`. Two judge files with
+    matching sources used to sail through the scorer-swap guard and reach
+    `improved` exit 0, with a text report that never said which scorer it
+    had read.
 
     The source is returned from here rather than inferred separately, because
     inferring it from `load_deterministic_scores(path)` being truthy conflated
@@ -478,20 +598,19 @@ def _load_round(path: str) -> tuple[dict, str]:
     Such a round also does not fall back to the judge. The deterministic file
     is present and is the scorer of record; falling through to results.json
     would swap scorers *within* one side, which is the exact substitution
-    `check_compare` refuses to rule on. It returns no scores instead, so the
-    comparison lands on the accurate "0 paired test case(s)" diagnosis.
+    `check_compare` refuses to rule on. It returns no scores and every id as
+    inconclusive instead, so the comparison names the collapse.
     """
     _require_path(path)
     deterministic = load_deterministic_scores(path)
-    if deterministic:
+    if deterministic or _deterministic_file(path).is_file():
         return {
             "per_test": [
                 {"test_id": test_id, "composite": composite}
                 for test_id, composite in deterministic.items()
-            ]
+            ],
+            "inconclusive": sorted(load_inconclusive_ids(path)),
         }, "deterministic"
-    if _deterministic_file(path).is_file():
-        return {"per_test": []}, "deterministic"
     return _load(path), "results"
 
 
@@ -621,7 +740,11 @@ def main() -> None:
             else:
                 print(f"  compare: {section['wins']}W/{section['losses']}L/"
                       f"{section['ties']}T over {section['paired_cases']} paired, "
-                      f"p_improved={section['p_improved']}")
+                      f"p_improved={section['p_improved']}, scorers "
+                      f"{section['before_score_source'] or '?'}/"
+                      f"{section['after_score_source'] or '?'}")
+                if section["inconclusive_after"]:
+                    print(f"  inconclusive after: {section['inconclusive_after']}")
             for error in section["errors"]:
                 print(f"  ERROR: {error}")
             for warning in section["warnings"]:

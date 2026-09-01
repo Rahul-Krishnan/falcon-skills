@@ -153,15 +153,15 @@ Look for `eval_criteria.json` using the resolution order in the artifact profile
 
 **If more than one candidate exists**, report every path found with its test-case count and test IDs, then use the canonical-for-writes path. Do not silently pick the first hit: divergent suites accumulate at these paths (a stale suite may not contain the failure-mode tests at all), and scoring against the wrong one produces a grade for tests the artifact was never evaluated on. Cleaning up the surplus files is a separate manual action, and per the file-safety rule that means `trash`, never `rm`.
 
-- **If `--reuse-criteria` AND criteria exist:** Proceed to Step 4 (Criteria Audit), then Step 6 -> Step 7 -> Step 8. The Side-Effect Guard (Step 7) is NOT skippable on the reuse route: reused criteria only carry SAFETY SANDBOX blocks for side effects that existed when they were generated, so an artifact that gained dangerous commands since then would otherwise run an unattended eval unsandboxed.
+- **If `--reuse-criteria` AND criteria exist:** Proceed to Step 4 (Criteria Audit), then Step 6 -> Step 6a -> Step 6b -> Step 7 -> Step 8. Steps 6a and 6b are not skippable on the reuse route either: a reused suite is exactly the one whose enrichment anchors and case count nobody has re-checked since it was written. The Side-Effect Guard (Step 7) is NOT skippable on the reuse route: reused criteria only carry SAFETY SANDBOX blocks for side effects that existed when they were generated, so an artifact that gained dangerous commands since then would otherwise run an unattended eval unsandboxed.
 - **If `--fix-only`:** Skip to Phase 2.
-- **If criteria exist AND `--auto`:** Proceed to Step 4 (Criteria Audit), then Step 6 -> Step 7 -> Step 8 (same reuse route, same non-skippable Step 7).
+- **If criteria exist AND `--auto`:** Proceed to Step 4 (Criteria Audit), then Step 6 -> Step 6a -> Step 6b -> Step 7 -> Step 8 (same reuse route, same non-skippable Steps 6a, 6b, and 7).
 - **If criteria exist AND `--confirm`:** Ask whether to reuse or regenerate. If reuse: proceed to Step 4.
 - **If no criteria exist:** Proceed to Step 5 (skip Step 4, nothing to audit).
 
 **Gate: Step 3 → Step 4 or Step 5 (checklist)**
 - [ ] Eval criteria path was checked on disk
-- [ ] Routing decision is one of: reuse (Step 4 -> Step 6 -> Step 7 -> Step 8), regenerate (Step 5 -> Step 6 -> Step 7 -> Step 8), fix-only (Phase 2)
+- [ ] Routing decision is one of: reuse (Step 4 -> Step 6 -> Step 6a -> Step 6b -> Step 7 -> Step 8), regenerate (Step 5 -> Step 6 -> Step 6a -> Step 6b -> Step 7 -> Step 8), fix-only (Phase 2). Hooks and scripts skip Steps 6 and 6a but not 6b.
 - [ ] If reusing: file is non-empty and contains at least 3 test cases — 2 for `lightweight`-tier artifacts (quick line count check)
 - [ ] If criteria file exists but is empty or corrupt: treat as "no criteria exist", proceed to Step 5
 
@@ -642,25 +642,30 @@ Step 9 produces a composite. A composite on its own does not say whether the cha
 
 ```bash
 python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} \
+  --artifact-type {artifact_type} \
   --before $PRIOR_OUTPUT_DIR/deterministic_scores.json \
   --after  $OUTPUT_DIR/deterministic_scores.json \
   --json
 ```
+
+`$PRIOR_OUTPUT_DIR` is the `output_dir` recorded under `eval_results` in the workflow state file by the round being compared against: in Phase 3 that is Phase 1's `$OUTPUT_DIR` on the first re-evaluation and the previous `$REEVAL_OUTPUT_DIR` after that, and `$OUTPUT_DIR` is then the current `$REEVAL_OUTPUT_DIR`. Read it from the state file, not from memory. Phase 3 is where this comparison normally runs (see phase3-reevaluation.md, step 3a); a Phase 1 pass that follows an earlier hone run of the same artifact can also compare against that run's recorded `output_dir`. Pass `--artifact-type` exactly as in Step 6b: the sizing half of the report runs again here, and without the flag a hook or script suite Step 6b just certified `powered` is sized in the conservative skill/command reading, which suppresses a genuine `improved` or `regressed` under an `underpowered` top-level verdict.
 
 `--before` names a file from the previous round and `--after` a file from this round -- the `deterministic_scores.json` from each, since those are the numbers Phase 2 acts on per Step 9 above. Passing the `results.json` beside it also works (the script reads the deterministic sibling when one exists), but a `results.json` from a deterministic-only run carries no per-test score, so name the deterministic file directly. Do not pass the round's output *directory*: that is a usage error (exit 2), because a bare directory resolves to the deterministic file of its parent, which is either absent or the same file for both flags.
 
 Record `power_verdict` in the workflow state file alongside the composite:
 
 ```json
-{"composite": 0.82, "power_verdict": "improved", "power_p_improved": 0.0312, "power_discordant": 6}
+{"composite_score": 0.82, "power_verdict": "improved", "power_p_improved": 0.0312, "power_discordant": 6}
 ```
+
+`power_verdict` is a field of `eval_results` (see the handoff interface below and the `eval_results` schema in `scripts/validate_handoff.py`, which enumerates the same six values). Writing anything outside that enum, `"pass"` for instance, fails the pre-Phase-2 `validate_handoff.py` gate.
 
 The verdict is one of `powered` (sizing only, no comparison run), `improved`, `regressed`, `inconclusive`, `underpowered`, or `not_measurable`. Read them as:
 
 - **`improved` / `regressed`** -- the round moved the suite and the sign test cleared alpha. Act on it.
 - **`inconclusive`** -- enough discordant cases to rule, but the wins and losses do not separate. The change is not an improvement; do not report it as one.
 - **`underpowered`** -- too few discordant cases for any arrangement of wins to reach significance, usually because ties hold the count down. This is neither a pass nor a regression. Fix the criteria set (add cases that discriminate a *different* property, per Step 6b) and re-run Phase 1. Never report an `underpowered` run as a pass, and never let it justify a promotion or a revert. This holds when the nested `comparison.verdict` reads `regressed`: a suite too small to promote on is equally too small to revert on, and the sign test is direction-blind under the null. The suppression is stated in the comparison's `warnings` rather than absorbed silently, so a human can see the nominal result and decide.
-- **`not_measurable`** -- nothing was compared, so nothing can be concluded, and Step 6b's remedy does not apply. Two causes, both named in `errors`: no test id appears in both rounds (a criteria-set mismatch between the rounds, or an absent or empty `deterministic_scores.json`), or the two rounds were scored by different scorers (one side fell back to the LLM judge because its deterministic file was missing). Fix the inputs and re-run the comparison; do not add test cases.
+- **`not_measurable`** -- the comparison's inputs cannot support a verdict, so nothing can be concluded, and Step 6b's remedy does not apply. Four causes, each named in `errors`: no test id appears in both rounds (a criteria-set mismatch between the rounds, or an absent or empty `deterministic_scores.json`); the two rounds were scored by different scorers (one side fell back to the LLM judge because its deterministic file was missing); neither round has a deterministic file at all, so both sides would be judge scores, which Phase 2 does not decide on; or one or more cases that scored in the before round came back inconclusive (composite null) in the after round, named in `inconclusive_after`. That last one is a collapse of execution evidence, not a score movement, and a sign test over the cases that still scored would read it as a clean sweep. Fix the inputs and re-run the comparison; do not add test cases.
 
 `alpha` is a **per-direction** level. `improved` and `regressed` are separate one-sided tests read against it, so the rate at which either fires on noise is up to twice it; the combined figure is reported as `two_sided_alpha`.
 
@@ -850,7 +855,11 @@ eval_results: {
     failure_type?: "criteria_bug" | "variance" | "real_issue",
     dimension_scores: {[dimension: string]: number}
   }],
-  actionable_failures: number        // count of real_issue failures
+  actionable_failures: number,       // count of real_issue failures
+  power_verdict: "powered" | "underpowered" | "improved" | "regressed" | "inconclusive" | "not_measurable",
+                                     // Step 6b sizing on a first round; Step 9a comparison otherwise
+  power_p_improved?: number,         // compare mode only
+  power_discordant?: number          // compare mode only
 }
 ```
 Write this to workflow state file before entering Phase 2. Phase 2 reads from the file, not from memory.

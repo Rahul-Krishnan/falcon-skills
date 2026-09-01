@@ -333,7 +333,10 @@ class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
             report = check_compare(before, after, 0.05, before_source, after_source)
             self.assertEqual(report["verdict"], "not_measurable")
             said = " ".join(report["errors"])
-            self.assertIn("0 paired test case(s)", said)
+            # Every case collapsed, and the diagnosis says so by name rather
+            # than reporting a bare pairing failure or a scorer swap.
+            self.assertIn("came back inconclusive in --after", said)
+            self.assertEqual(report["inconclusive_after"], [f"TC-{i}" for i in range(6)])
             self.assertNotIn("scorer", said)
 
 
@@ -617,6 +620,235 @@ class TestArtifactTypeScopesTheProfileExclusion(unittest.TestCase):
         self.assertEqual(
             check_sizing(self.CRITERIA, 5, 1, 0.05, "script")["scorable_cases"], 6
         )
+
+
+def _deterministic(scores, inconclusive=()):
+    """One round in the shape `_load_round` builds from deterministic_scores.json."""
+    return {
+        "per_test": [{"test_id": k, "composite": v} for k, v in scores.items()],
+        "inconclusive": sorted(inconclusive),
+    }
+
+
+class TestInconclusiveCasesAreNotSilentlyDropped(unittest.TestCase):
+    """A case that scored last round and produced no evidence this round is a
+    finding. `load_deterministic_scores` drops it from the score map, so the
+    comparison used to rule on the survivors: eight cases at 0.7, then five at
+    0.8 and three inconclusive, read `improved` with exit 0 and no warning."""
+
+    def _rounds(self, tmp):
+        import json
+        import os
+
+        before = {"per_test": [
+            {"test_id": f"t{i}", "composite": 0.7, "status": "pass"} for i in range(8)
+        ]}
+        after = {"per_test": [
+            {"test_id": f"t{i}", "composite": 0.8, "status": "pass"} for i in range(5)
+        ] + [
+            {"test_id": f"t{i}", "composite": None, "status": "inconclusive"}
+            for i in range(5, 8)
+        ]}
+        paths = []
+        for name, payload in (("r1", before), ("r2", after)):
+            os.makedirs(os.path.join(tmp, name))
+            path = os.path.join(tmp, name, "deterministic_scores.json")
+            with open(path, "w") as handle:
+                json.dump(payload, handle)
+            paths.append(path)
+        return paths
+
+    def test_a_partial_collapse_is_not_an_improvement(self):
+        import tempfile
+
+        from check_eval_power import _load_round
+
+        with tempfile.TemporaryDirectory() as tmp:
+            before_path, after_path = self._rounds(tmp)
+            before, before_source = _load_round(before_path)
+            after, after_source = _load_round(after_path)
+        report = check_compare(before, after, 0.05, before_source, after_source)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["inconclusive_after"], ["t5", "t6", "t7"])
+        self.assertEqual(report["paired_cases"], 5)
+        said = " ".join(report["errors"])
+        self.assertIn("t5", said)
+        self.assertIn("inconclusive in --after", said)
+
+    def test_the_collapsed_ids_are_not_reported_as_missing(self):
+        before = _deterministic({f"t{i}": 0.7 for i in range(8)})
+        after = _deterministic({f"t{i}": 0.8 for i in range(5)}, inconclusive=["t5", "t6", "t7"])
+        report = check_compare(before, after, 0.05, "deterministic", "deterministic")
+        self.assertEqual(report["unpaired_before"], [])
+        self.assertEqual(report["inconclusive_after"], ["t5", "t6", "t7"])
+
+    def test_the_loader_carries_the_inconclusive_ids(self):
+        import tempfile
+
+        from check_eval_power import _load_round
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, after_path = self._rounds(tmp)
+            payload, _ = _load_round(after_path)
+        self.assertEqual(payload["inconclusive"], ["t5", "t6", "t7"])
+
+    def test_a_recovered_case_is_a_warning_not_a_verdict(self):
+        """The other direction has no baseline to rule from, so the case is
+        simply not paired; it is named so an unstable suite is visible."""
+        before = _deterministic({f"t{i}": 0.7 for i in range(5)}, inconclusive=["t5"])
+        after = _deterministic({f"t{i}": 0.9 for i in range(6)})
+        report = check_compare(before, after, 0.05, "deterministic", "deterministic")
+        self.assertEqual(report["verdict"], "improved")
+        self.assertEqual(report["unpaired_after"], [])
+        self.assertTrue(any("t5" in w and "inconclusive in --before" in w
+                            for w in report["warnings"]))
+
+    def test_hand_built_payloads_still_compare(self):
+        report = check_compare(
+            _results({f"t{i}": 0.4 for i in range(6)}),
+            _results({f"t{i}": 0.9 for i in range(6)}),
+            0.05,
+        )
+        self.assertEqual(report["verdict"], "improved")
+        self.assertEqual(report["inconclusive_after"], [])
+
+
+class TestTieClassificationSurvivesFloatRepresentation(unittest.TestCase):
+    """`0.85 - 0.80` is 0.04999999999999993 and `0.55 - 0.50` is
+    0.050000000000000044, so an unrounded comparison against TIE_EPSILON
+    called the same nominal movement a tie in one suite and a win in the
+    other, flipping the round's verdict."""
+
+    def _shift(self, start, end, n=8):
+        before = _deterministic({f"t{i}": start for i in range(n)})
+        after = _deterministic({f"t{i}": end for i in range(n)})
+        return check_compare(before, after, 0.05, "deterministic", "deterministic")
+
+    def test_the_same_nominal_movement_classifies_the_same_way(self):
+        low = self._shift(0.50, 0.55)
+        high = self._shift(0.80, 0.85)
+        self.assertEqual(
+            (low["wins"], low["ties"], low["verdict"]),
+            (high["wins"], high["ties"], high["verdict"]),
+        )
+
+    def test_a_movement_at_the_epsilon_is_a_tie_on_both_sides_of_the_float(self):
+        for start, end in ((0.50, 0.55), (0.80, 0.85), (0.10, 0.15), (0.30, 0.35)):
+            report = self._shift(start, end)
+            self.assertEqual(report["ties"], 8, (start, end))
+            self.assertEqual(report["verdict"], "underpowered", (start, end))
+
+    def test_the_recorded_delta_is_the_classified_one(self):
+        report = self._shift(0.80, 0.85)
+        self.assertEqual({m["delta"] for m in report["movements"]}, {0.05})
+
+    def test_a_movement_just_over_the_epsilon_is_still_a_win(self):
+        report = self._shift(0.80, 0.86)
+        self.assertEqual(report["wins"], 8)
+        self.assertEqual(report["verdict"], "improved")
+
+
+class TestTwoJudgeRoundsAreNotCompared(unittest.TestCase):
+    """Both sides falling back to results.json agree on a scorer, but not on
+    the one Phase 2 acts on. Judge 0.2 -> 0.9 on six ids used to read
+    `improved` with exit 0 and a text report that never named the scorer."""
+
+    def _judge_round(self, tmp, name, score, n=6):
+        import json
+        import os
+
+        os.makedirs(os.path.join(tmp, name))
+        path = os.path.join(tmp, name, "results.json")
+        with open(path, "w") as handle:
+            json.dump({"per_test": [{"test_id": f"t{i}", "score": score}
+                                    for i in range(n)]}, handle)
+        return path
+
+    def test_matching_judge_sources_are_not_measurable(self):
+        before = _results({f"t{i}": 0.2 for i in range(6)})
+        after = _results({f"t{i}": 0.9 for i in range(6)})
+        report = check_compare(before, after, 0.05, "results", "results")
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(any("deterministic_scores.json" in e for e in report["errors"]))
+
+    def test_the_cli_exits_1_and_names_the_scorer(self):
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = os.path.join(tmp, "criteria.json")
+            with open(criteria, "w") as handle:
+                json.dump({"test_cases": [{"id": f"t{i}", "test_profile": "execution"}
+                                          for i in range(6)]}, handle)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "check_eval_power.py"),
+                    criteria,
+                    "--before", self._judge_round(tmp, "r1", 0.2),
+                    "--after", self._judge_round(tmp, "r2", 0.9),
+                ],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("VERDICT: not_measurable", proc.stdout)
+        self.assertIn("scorers results/results", proc.stdout)
+
+    def test_deterministic_rounds_still_rule(self):
+        before = _deterministic({f"t{i}": 0.2 for i in range(6)})
+        after = _deterministic({f"t{i}": 0.9 for i in range(6)})
+        report = check_compare(before, after, 0.05, "deterministic", "deterministic")
+        self.assertEqual(report["verdict"], "improved")
+
+
+class TestProfileMirrorsTheScorer(unittest.TestCase):
+    """`category` is a required enum with a different value set from
+    `test_profile`, and the scorer maps only `error_handling` from it. Falling
+    back to it wholesale counted five categories as five profiles."""
+
+    CATEGORIES = ("invocation", "execution", "edge_case", "task_completion", "error_handling")
+
+    def test_categories_are_not_profiles(self):
+        criteria = {"test_cases": [
+            {"id": f"tc{i}", "category": category}
+            for i, category in enumerate(self.CATEGORIES)
+        ]}
+        report = check_sizing(criteria, 5, 2)
+        self.assertEqual(report["profiles"], ["error_handling", "execution"])
+
+    def test_the_diversity_warning_does_not_depend_on_filling_in_test_profile(self):
+        bare = {"test_cases": [
+            {"id": f"tc{i}", "category": category}
+            for i, category in enumerate(("invocation", "execution", "edge_case",
+                                          "task_completion", "invocation"))
+        ]}
+        explicit = {"test_cases": [
+            {**case, "test_profile": "execution"} for case in bare["test_cases"]
+        ]}
+        bare_report = check_sizing(bare, 5, 2)
+        explicit_report = check_sizing(explicit, 5, 2)
+        self.assertEqual(bare_report["profiles"], ["execution"])
+        self.assertEqual(bare_report["profiles"], explicit_report["profiles"])
+        self.assertTrue(any("profile(s)" in w for w in bare_report["warnings"]))
+        self.assertTrue(any("profile(s)" in w for w in explicit_report["warnings"]))
+
+    def test_an_unknown_test_profile_is_the_default(self):
+        """The scorer does not honour a profile it does not know, so neither
+        does the floor's diversity count."""
+        report = check_sizing({"test_cases": [
+            {"id": f"tc{i}", "test_profile": "made_up"} for i in range(5)
+        ]}, 5, 2)
+        self.assertEqual(report["profiles"], ["execution"])
+
+    def test_the_error_handling_category_still_resolves(self):
+        report = check_sizing({"test_cases": [
+            {"id": f"tc{i}", "category": "error-handling"} for i in range(5)
+        ]}, 5, 1)
+        self.assertEqual(report["profiles"], ["error_handling"])
 
 
 if __name__ == "__main__":

@@ -336,6 +336,20 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
                 non_empty=True,
             ),
             "actionable_failures": _num(min_value=0),
+            # Step 9a (references/phase1-evaluation.md): the power verdict
+            # recorded beside the composite. `powered` is the sizing-only
+            # value a first round writes; the other five come from the
+            # before/after comparison. Enumerated so that a value outside
+            # the set ("pass") fails the gate; optional for now because the
+            # existing eval_results fixtures predate the field. Making it
+            # required is the follow-up once those fixtures carry it.
+            "power_verdict": _enum(
+                ["powered", "underpowered", "improved", "regressed",
+                 "inconclusive", "not_measurable"],
+                required=False,
+            ),
+            "power_p_improved": _num(required=False, min_value=0.0, max_value=1.0),
+            "power_discordant": _num(required=False, min_value=0),
         },
     },
     # P2 Step 1 -> Step 1.7
