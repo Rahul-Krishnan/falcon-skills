@@ -404,7 +404,9 @@ Criteria derived from the artifact test whether the artifact was *recited*. An a
 python3 <skill-dir>/scripts/check_overfit.py {eval_criteria_path} --artifact {artifact_path} --json
 ```
 
-Each scored item is classified `outcome`, `technique`, or `vocabulary`. Over the ratio threshold the verdict is `overfit`. A criteria set that yields zero classifiable items returns `not_measurable` and exits non-zero: nothing was measured, so nothing passed, and this gate is not cleared until the set has scored items to classify. Rewrite every flagged item to describe the result the user needed, never the procedure or the artifact's wording. `required_absent` lists are exempt by construction: they assert vocabulary must NOT appear.
+Each scored item is classified `outcome`, `technique`, or `vocabulary`. Over the ratio threshold the verdict is `overfitted` (exit 1); at or under it, `within_threshold` (exit 0). A criteria set that yields zero classifiable items returns `not_measurable` and exits non-zero: nothing was measured, so nothing passed, and this gate is not cleared until the set has scored items to classify.
+
+**Rewrite flagged items until the verdict is `within_threshold`, not until the flagged list is empty.** The gate passes at a ratio at or under the threshold, so a `within_threshold` run needs no rewriting at all. Some flagged items are legitimate: a check that reads "traces the execution path step by step" names a numbered position because that is the knowledge being extracted, and rewriting it to clear a gate it already cleared makes the criteria vaguer and the suite weaker. When the verdict is `overfitted`, rewrite the least defensible flagged items — the `vocabulary` ones first, since a literal anchor lifted out of the artifact by Step 6 enrichment measures recitation and nothing else — until the ratio drops under the threshold. Rewrite toward the result the user needed, never the procedure or the artifact's wording. `required_absent` lists are exempt by construction: they assert vocabulary must NOT appear.
 
 ### Step 6b: Power Check (all artifact types)
 
@@ -628,6 +630,33 @@ Score (LLM judge, ref): 0.78 (B)
 ```
 
 Phase 2 decisions use the deterministic score. The LLM judge score is a reference signal only.
+
+### Step 9a: Power Verdict (when a prior round exists)
+
+Step 9 produces a composite. A composite on its own does not say whether the change it reflects is distinguishable from noise, and the sign test is what decides that. Skip this step only on a first round, where there is nothing to compare against.
+
+```bash
+python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} \
+  --before $PRIOR_OUTPUT_DIR/deterministic_scores.json \
+  --after  $OUTPUT_DIR/deterministic_scores.json \
+  --json
+```
+
+`--before` is the previous round's output directory, `--after` this round's. Pass the `deterministic_scores.json` from each: those are the numbers Phase 2 acts on, per Step 9 above. Passing the `results.json` beside it also works (the script reads the deterministic sibling when one exists), but a `results.json` from a deterministic-only run carries no per-test score, so name the deterministic file directly.
+
+Record `power_verdict` in the workflow state file alongside the composite:
+
+```json
+{"composite": 0.82, "power_verdict": "improved", "power_p_improved": 0.0312, "power_discordant": 6}
+```
+
+The verdict is one of `powered` (sizing only, no comparison run), `improved`, `regressed`, `inconclusive`, or `underpowered`. Read them as:
+
+- **`improved` / `regressed`** -- the round moved the suite and the sign test cleared alpha. Act on it.
+- **`inconclusive`** -- enough discordant cases to rule, but the wins and losses do not separate. The change is not an improvement; do not report it as one.
+- **`underpowered`** -- too few discordant cases for any arrangement of wins to reach significance, usually because ties hold the count down. This is neither a pass nor a regression. Fix the criteria set (add cases that discriminate a *different* property, per Step 6b) and re-run Phase 1. Never report an `underpowered` run as a pass, and never let it justify a promotion or a revert.
+
+A composite without a power verdict is a number, not a result. Exit code is 0 only for `powered` or `improved`.
 
 ### Step 10: Generate Spec-Format Artifacts
 

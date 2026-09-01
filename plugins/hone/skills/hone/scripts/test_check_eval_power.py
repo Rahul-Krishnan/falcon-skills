@@ -144,10 +144,6 @@ class TestCompare(unittest.TestCase):
         self.assertEqual(report["wins"], 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCriteriaRootShape(unittest.TestCase):
     """A non-object criteria root is a usage error, not an AttributeError."""
 
@@ -201,3 +197,95 @@ class TestSizingHonoursAlpha(unittest.TestCase):
                          min_discordant_for_alpha(0.2))
         self.assertNotEqual(default["min_discordant_for_significance"],
                             loose["min_discordant_for_significance"])
+
+    def test_a_stricter_alpha_raises_the_floor_and_the_verdict(self):
+        """Reporting the alpha floor is not enforcing it: five cases at
+        alpha 0.01 need seven discordant votes, so no arrangement of wins can
+        reach significance and `powered` was arithmetically false."""
+        from check_eval_power import check_sizing
+
+        criteria = {"test_cases": [
+            {"id": f"TC-00{i}", "test_profile": "execution"} for i in range(1, 6)
+        ]}
+        self.assertEqual(check_sizing(criteria, 5, 2)["verdict"], "powered")
+
+        strict = check_sizing(criteria, 5, 2, alpha=0.01)
+        self.assertEqual(strict["verdict"], "underpowered")
+        self.assertEqual(strict["effective_floor"], 7)
+        self.assertTrue(strict["errors"])
+
+    def test_the_floor_never_drops_below_min_stimuli(self):
+        """A loose alpha must not let a caller under --min-stimuli through."""
+        from check_eval_power import check_sizing
+
+        criteria = {"test_cases": [
+            {"id": f"TC-00{i}", "test_profile": "execution"} for i in range(1, 5)
+        ]}
+        loose = check_sizing(criteria, 5, 2, alpha=0.2)
+        self.assertEqual(loose["effective_floor"], 5)
+        self.assertEqual(loose["verdict"], "underpowered")
+
+
+class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
+    """Phase 2 decides on the deterministic composite, so the sign test must
+    run over that file and not over results.json, which carries a per-test
+    `score` only when an LLM judge ran."""
+
+    def _round(self, tmp, name, results, deterministic=None):
+        import json
+        import os
+
+        directory = os.path.join(tmp, name)
+        os.makedirs(directory)
+        results_path = os.path.join(directory, "results.json")
+        with open(results_path, "w") as handle:
+            json.dump(results, handle)
+        if deterministic is not None:
+            with open(os.path.join(directory, "deterministic_scores.json"), "w") as handle:
+                json.dump(deterministic, handle)
+        return results_path
+
+    def test_a_results_path_reads_the_sibling_deterministic_file(self):
+        import tempfile
+
+        from check_eval_power import _load_round, _scores_by_id
+
+        deterministic = {"per_test": [
+            {"test_id": "TC-001", "composite": 0.9},
+            {"test_id": "TC-002", "composite": 0.4},
+        ]}
+        with tempfile.TemporaryDirectory() as tmp:
+            # results.json holds no per-test score at all: a deterministic-only
+            # round. Before the fix this paired zero cases.
+            path = self._round(tmp, "r1", {"tests": [{"id": "TC-001"}]}, deterministic)
+            self.assertEqual(
+                _scores_by_id(_load_round(path)), {"TC-001": 0.9, "TC-002": 0.4}
+            )
+
+    def test_the_deterministic_path_itself_is_accepted(self):
+        import os
+        import tempfile
+
+        from check_eval_power import _load_round, _scores_by_id
+
+        deterministic = {"per_test": [{"test_id": "TC-001", "composite": 0.75}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            results_path = self._round(tmp, "r1", {}, deterministic)
+            sibling = os.path.join(os.path.dirname(results_path),
+                                   "deterministic_scores.json")
+            self.assertEqual(_scores_by_id(_load_round(sibling)), {"TC-001": 0.75})
+
+    def test_a_judge_only_round_still_falls_back_to_results(self):
+        import tempfile
+
+        from check_eval_power import _load_round, _scores_by_id
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._round(
+                tmp, "r1", {"per_test": [{"test_id": "TC-001", "score": 0.6}]}
+            )
+            self.assertEqual(_scores_by_id(_load_round(path)), {"TC-001": 0.6})
+
+
+if __name__ == "__main__":
+    unittest.main()

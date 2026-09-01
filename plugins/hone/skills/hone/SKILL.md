@@ -356,7 +356,7 @@ Load before Step 1 (Discover). Skip this phase entirely if `--fix-only` flag is 
 4. **Step 4: Criteria Audit** -- Audit existing criteria for setup issues (skills/commands only).
 5. **Step 5: Generate criteria** -- Create eval test cases per artifact type profile.
 6. **Step 6: Programmatic Enrichment** -- Add deterministic `required_present` checks from artifact.
-6a. **Step 6a: Overfit Classification** -- Run `check_overfit.py <criteria> --artifact <path> --json` (preference 20). Rewrite every `technique` and `vocabulary` item as an outcome before proceeding. Enrichment derives checks from the artifact, so this is not optional after Step 6 runs.
+6a. **Step 6a: Overfit Classification** -- Run `check_overfit.py <criteria> --artifact <path> --json` (preference 20). Rewrite flagged items until the verdict is `within_threshold`; a run that already reports `within_threshold` needs no rewriting, since some flagged items are legitimate and vaguening them to empty the flagged list degrades the suite. Enrichment derives checks from the artifact, so this is not optional after Step 6 runs.
 6b. **Step 6b: Power Check** -- Run `check_eval_power.py <criteria> --json` (preference 19). Below the distinct-case floor, add cases discriminating a different property; never add repeats to clear the floor.
 7. **Step 7: Side-Effect Guard** -- Sandbox dangerous commands (git push, gh pr create, external messaging) in eval criteria.
 8. **Step 8: Run eval runner** -- Pre-launch `validate_eval_criteria.py` gate (mandatory), then execute evaluation.

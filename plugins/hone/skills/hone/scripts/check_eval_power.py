@@ -13,11 +13,22 @@ Two modes:
            verdict at all? Below the floor the correct answer is "underpowered",
            which is neither a pass nor a regression.
 
-  compare  (--before/--after) -- Given two rounds of results, run an exact
+  compare  (--before/--after) -- Given two rounds of scores, run an exact
            one-sided sign test over the discordant (non-tied) test cases. Ties
            are not discarded: they hold the discordant count down, which is the
            point. A round that moves two cases and ties six has not shown
            anything, and reporting it as an improvement is the failure mode.
+
+           The scores compared are the deterministic composites from
+           `deterministic_scores.json`, because those are the numbers Phase 2
+           acts on (phase1-evaluation.md Step 9: "Phase 2 decisions use the
+           deterministic score. The LLM judge score is a reference signal
+           only."). Pointing this at results.json instead qualified a number
+           nobody decides on, and on a deterministic-only run results.json
+           carries no per-test `score` at all, so every comparison paired zero
+           cases and reported `underpowered` forever. A round directory is
+           accepted either way: pass the results.json and the sibling
+           deterministic_scores.json is read instead when it exists.
 
 Thresholds come from the binomial, not from taste. With n discordant votes and
 w wins, p = sum(C(n,k) * 0.5**n for k in w..n). At alpha 0.05 that means 5-7
@@ -36,6 +47,11 @@ import argparse
 import json
 import math
 import sys
+
+# load_deterministic_scores owns the sibling-file rule: given a round's
+# results.json it reads deterministic_scores.json beside it, dropping tests
+# whose composite is null. A second copy here is a second copy to drift.
+from hone_common import load_deterministic_scores
 
 # Minimum distinct test cases before a verdict is meaningful at all. Below this
 # no arrangement of wins can reach p <= 0.05 on a one-sided sign test.
@@ -75,6 +91,12 @@ def min_discordant_for_alpha(alpha: float = ALPHA) -> int:
 def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
                  alpha: float = ALPHA) -> dict:
     """Assess whether a criteria set is large and varied enough to rule."""
+    # The floor honours alpha, not --min-stimuli alone: 5 cases at alpha 0.01
+    # need 7 discordant votes, so no arrangement of wins can ever clear it.
+    # min_discordant_for_significance reported that; the verdict ignored it.
+    alpha_floor = min_discordant_for_alpha(alpha)
+    floor = max(min_stimuli, alpha_floor)
+
     cases = criteria.get("test_cases") or []
     ids = [c.get("id") for c in cases if isinstance(c, dict) and c.get("id")]
     distinct_ids = sorted(set(ids))
@@ -92,10 +114,12 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
             f"duplicate test case ids {duplicates}; ids are the comparison "
             "identity across rounds, so duplicates make pairing ambiguous"
         )
-    if len(distinct_ids) < min_stimuli:
+    if len(distinct_ids) < floor:
         errors.append(
-            f"{len(distinct_ids)} distinct test case(s), floor is {min_stimuli}; "
-            f"no arrangement of wins reaches p<={alpha} below the floor"
+            f"{len(distinct_ids)} distinct test case(s), floor is {floor} "
+            f"(max of --min-stimuli {min_stimuli} and {alpha_floor} required by "
+            f"alpha {alpha}); no arrangement of wins reaches p<={alpha} below "
+            "the floor"
         )
     if len(profiles) < min_profiles:
         warnings.append(
@@ -110,6 +134,7 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
         "verdict": "powered" if powered else "underpowered",
         "distinct_cases": len(distinct_ids),
         "min_stimuli": min_stimuli,
+        "effective_floor": floor,
         "profiles": profiles,
         "min_discordant_for_significance": min_discordant_for_alpha(alpha),
         "errors": errors,
@@ -266,13 +291,42 @@ def _load(path: str) -> dict:
     return loaded
 
 
+def _load_round(path: str) -> dict:
+    """Load one round's scores, preferring the deterministic composites.
+
+    `path` may be either a round's `deterministic_scores.json` or the
+    `results.json` beside it; `load_deterministic_scores` resolves both to the
+    deterministic file, which is what Phase 2 decides on. Falling back to
+    `_load(path)` keeps the older shapes working (a results.json from a run
+    that had an LLM judge, or any payload already carrying per-test scores),
+    and keeps the exit-2 contract for a missing or non-object file.
+    """
+    deterministic = load_deterministic_scores(path)
+    if deterministic:
+        return {
+            "per_test": [
+                {"test_id": test_id, "composite": composite}
+                for test_id, composite in deterministic.items()
+            ]
+        }
+    return _load(path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Power check for hone eval criteria and round comparisons"
     )
     parser.add_argument("criteria_file", help="Path to eval_criteria.json")
-    parser.add_argument("--before", help="Prior round results.json (compare mode)")
-    parser.add_argument("--after", help="Current round results.json (compare mode)")
+    parser.add_argument(
+        "--before",
+        help="Prior round deterministic_scores.json, or the results.json "
+             "beside it (compare mode)",
+    )
+    parser.add_argument(
+        "--after",
+        help="Current round deterministic_scores.json, or the results.json "
+             "beside it (compare mode)",
+    )
     parser.add_argument(
         "--min-stimuli",
         type=int,
@@ -301,7 +355,9 @@ def main() -> None:
 
     report = sizing
     if args.before:
-        comparison = check_compare(_load(args.before), _load(args.after), args.alpha)
+        comparison = check_compare(
+            _load_round(args.before), _load_round(args.after), args.alpha
+        )
         report = {"sizing": sizing, "comparison": comparison,
                   "verdict": comparison["verdict"]
                   if sizing["verdict"] == "powered" else "underpowered"}

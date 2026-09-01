@@ -19,6 +19,16 @@ distinctive phrase in it appears verbatim in the artifact; `technique` when it
 names internal machinery (a bundled script, a numbered phase or step, or the
 artifact itself). Everything else is `outcome`.
 
+"Distinctive phrase" is tested two ways, because criteria hold two kinds of
+item. Prose (check descriptions, rubric bands) is tested by NGRAM_SIZE-word
+overlap, so ordinary English is not flagged. A `required_present` entry is a
+literal match anchor, not prose, and the whole entry is the phrase: an
+enrichment-shaped anchor (an identifier or bare markup) present verbatim in
+the artifact is a lift however short it is. Without that second test the
+identifiers Step 6 enrichment lifts from the artifact were invisible here --
+classified `outcome`, and padding the denominator so that enriching a set
+*lowered* its ratio.
+
 `required_absent` lists are exempt by construction. They assert the artifact's
 own vocabulary must NOT appear in output, which is the opposite failure mode
 and a legitimate use of lifted phrasing.
@@ -59,6 +69,25 @@ TECHNIQUE_PATTERNS = (
 
 WORD = re.compile(r"[a-z0-9]+")
 
+# An anchor is enrichment-shaped when it is a single token that no one would
+# write as prose: an underscore/hyphen identifier (`validate_handoff`,
+# `gate-compliance`) or bare markup (`##`). enrich_programmatic_checks.py only
+# ever emits the first kind -- its IDENTIFIER_RE requires an underscore -- so
+# these two shapes cover its entire output. Ordinary short anchors ("OK", "id",
+# "42") deliberately do not match: a literal assertion on a common token is not
+# a vocabulary lift, and flagging it would inflate the very ratio being gated.
+IDENTIFIER_ANCHOR = re.compile(r"^[a-z0-9]+(?:[_-][a-z0-9]+)+$", re.I)
+MARKUP_ANCHOR = re.compile(r"^[^\w\s]{2,}$")
+
+# The skill-name rule fires on a bare name only when the name is itself
+# distinctive (multi-segment, like `temper-rework`: no English sentence
+# contains it by accident). A single-word name is matched only in a
+# technique-signalling context, because a skill named `commit` or `forge`
+# otherwise reclassifies every genuine outcome check that uses the ordinary
+# verb, pushing the ratio over the threshold with nothing the author can
+# legitimately rewrite.
+NAME_CONTEXT_WORDS = r"skill|command|hook|artifact|invoke[ds]?|invoking|ran|run|use[ds]?|using"
+
 
 def _normalize(text: str) -> list[str]:
     return WORD.findall(text.lower())
@@ -70,8 +99,31 @@ def _ngrams(words: list[str], size: int) -> set[tuple[str, ...]]:
     return {tuple(words[i : i + size]) for i in range(len(words) - size + 1)}
 
 
-def classify_item(text: str, artifact_ngrams: set, skill_name: str) -> dict:
-    """Classify one criteria item and explain the classification."""
+def _names_the_artifact(text: str, skill_name: str) -> bool:
+    """Does `text` reference the artifact under test, rather than use a word?"""
+    if not skill_name:
+        return False
+    name = re.escape(skill_name)
+    if "-" in skill_name or "_" in skill_name:
+        return bool(re.search(rf"\b{name}\b", text, re.I))
+    # Single-word name: require a marker that the word is the artifact.
+    patterns = (
+        rf"/{name}\b",                                   # /forge
+        rf"`{name}`",                                    # `forge`
+        rf"\b(?:{NAME_CONTEXT_WORDS})\s+(?:the\s+)?{name}\b",   # ran forge
+        rf"\b{name}\s+(?:{NAME_CONTEXT_WORDS})\b",       # forge skill
+    )
+    return any(re.search(p, text, re.I) for p in patterns)
+
+
+def classify_item(text: str, artifact_ngrams: set, skill_name: str,
+                  artifact_text: str = "", literal_anchor: bool = False) -> dict:
+    """Classify one criteria item and explain the classification.
+
+    `literal_anchor` marks a `required_present` entry: matched verbatim
+    against output, so the whole entry is the phrase and the n-gram rule does
+    not apply to it. See the module docstring for why that second test exists.
+    """
     reasons: list[str] = []
     label = "outcome"
 
@@ -81,9 +133,17 @@ def classify_item(text: str, artifact_ngrams: set, skill_name: str) -> dict:
             label = "technique"
             reasons.append(f"{why}: '{match.group(0)}'")
 
-    if skill_name and re.search(rf"\b{re.escape(skill_name)}\b", text, re.I):
+    if _names_the_artifact(text, skill_name):
         label = "technique"
         reasons.append(f"names the artifact under test: '{skill_name}'")
+
+    stripped = text.strip()
+    is_enrichment_shaped = literal_anchor and (
+        IDENTIFIER_ANCHOR.match(stripped) or MARKUP_ANCHOR.match(stripped)
+    )
+    if is_enrichment_shaped and artifact_text and stripped.lower() in artifact_text.lower():
+        label = "vocabulary"
+        reasons.append(f"literal anchor lifted verbatim from the artifact: '{stripped}'")
 
     overlap = _ngrams(_normalize(text), NGRAM_SIZE) & artifact_ngrams
     if overlap:
@@ -94,9 +154,14 @@ def classify_item(text: str, artifact_ngrams: set, skill_name: str) -> dict:
     return {"text": text[:160], "class": label, "reasons": reasons}
 
 
-def _collect_items(criteria: dict) -> tuple[list[str], int]:
-    """Return (scored item texts, count of exempt required_absent entries)."""
-    items: list[str] = []
+def _collect_items(criteria: dict) -> tuple[list[tuple[str, bool]], int]:
+    """Return (scored items as (text, is_literal_anchor), exempt count).
+
+    The flag travels with the item because `required_present` entries are
+    literal match anchors and the rest are prose; they need different lift
+    tests. See classify_item.
+    """
+    items: list[tuple[str, bool]] = []
     exempt = 0
     for case in criteria.get("test_cases") or []:
         if not isinstance(case, dict):
@@ -104,19 +169,19 @@ def _collect_items(criteria: dict) -> tuple[list[str], int]:
         exempt += len(case.get("required_absent") or [])
         for present in case.get("required_present") or []:
             if isinstance(present, str):
-                items.append(present)
+                items.append((present, True))
         for check in case.get("checks") or []:
             if not isinstance(check, dict):
                 continue
             description = check.get("description")
             if isinstance(description, str):
-                items.append(description)
+                items.append((description, False))
             rubric = check.get("rubric")
             if isinstance(rubric, dict):
                 # Only the top band matters: it defines what scoring well means.
                 top = max(rubric, key=lambda k: _as_int(k), default=None)
                 if top is not None and isinstance(rubric[top], str):
-                    items.append(rubric[top])
+                    items.append((rubric[top], False))
     return items, exempt
 
 
@@ -132,7 +197,10 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
     artifact_ngrams = _ngrams(_normalize(artifact_text), NGRAM_SIZE)
     items, exempt = _collect_items(criteria)
 
-    classified = [classify_item(t, artifact_ngrams, skill_name) for t in items]
+    classified = [
+        classify_item(text, artifact_ngrams, skill_name, artifact_text, literal)
+        for text, literal in items
+    ]
     counts = {"outcome": 0, "technique": 0, "vocabulary": 0}
     for item in classified:
         counts[item["class"]] += 1
@@ -191,6 +259,12 @@ def main() -> None:
         sys.exit(2)
     except json.JSONDecodeError as exc:
         print(f"ERROR: criteria file is not valid JSON: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except OSError as exc:
+        # A directory or an unreadable path is a usage error with the
+        # documented exit 2, not a traceback. Matches check_eval_power._load.
+        print(f"ERROR: cannot read criteria file {args.criteria_file}: {exc}",
+              file=sys.stderr)
         sys.exit(2)
 
     # A list- or scalar-rooted criteria file reaches `.get()` below and raises
