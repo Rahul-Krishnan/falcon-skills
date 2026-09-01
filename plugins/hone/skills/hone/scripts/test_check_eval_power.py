@@ -286,6 +286,64 @@ class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
             )
             self.assertEqual(_scores_by_id(_load_round(path)), {"TC-001": 0.6})
 
+    def test_the_composite_wins_when_a_record_carries_both(self):
+        """Phase 2 decides on the composite, so a record carrying both must
+        be compared on the composite, not the judge's score."""
+        from check_eval_power import _scores_by_id
+
+        entries = {"results": [{"test_id": "TC-001", "score": 0.4,
+                                "composite": 0.9}]}
+        self.assertEqual(_scores_by_id(entries), {"TC-001": 0.9})
+
+    def test_a_null_composite_falls_through_to_the_judge_score(self):
+        """A present-but-null key escapes a `get` default; dropping the pair
+        instead of falling back manufactures an `underpowered` verdict."""
+        from check_eval_power import _scores_by_id
+
+        entries = {"results": [{"test_id": "TC-001", "composite": None,
+                                "score": 0.8},
+                               {"test_id": "TC-002", "score": None,
+                                "composite": 0.5}]}
+        self.assertEqual(_scores_by_id(entries), {"TC-001": 0.8, "TC-002": 0.5})
+
+
+class TestSizingLinePrintsTheEnforcedFloor(unittest.TestCase):
+    """The human-readable line and the error must not disagree about which
+    floor is in force: alpha can raise the floor above --min-stimuli."""
+
+    def test_the_printed_floor_is_the_effective_one(self):
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        from check_eval_power import min_discordant_for_alpha
+
+        criteria = {"test_cases": [
+            {"id": f"tc{i}", "test_profile": "p1"} for i in range(6)
+        ]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "criteria.json")
+            with open(path, "w") as handle:
+                json.dump(criteria, handle)
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "check_eval_power.py"),
+                    path,
+                    "--alpha",
+                    "0.001",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        floor = min_discordant_for_alpha(0.001)
+        self.assertGreater(floor, 5)
+        self.assertIn(f"floor {floor},", proc.stdout)
+        self.assertNotIn("floor 5,", proc.stdout)
+        self.assertIn(f"floor is {floor}", proc.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

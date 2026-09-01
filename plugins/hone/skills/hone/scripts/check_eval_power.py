@@ -186,7 +186,12 @@ def _scores_by_id(results: dict) -> dict[str, float]:
         if not isinstance(entry, dict):
             continue
         test_id = entry.get("test_id") or entry.get("id") or entry.get("name")
-        raw = entry.get("score", entry.get("composite"))
+        # Composite first (Phase 2 decides on it), and two separate lookups:
+        # a `get` default misses `"score": null`, which hone_common emits when
+        # the judge errored, silently dropping the pair.
+        raw = entry.get("composite")
+        if raw is None:
+            raw = entry.get("score")
         if test_id is None or raw is None:
             continue
         try:
@@ -372,7 +377,7 @@ def main() -> None:
                 continue
             if section["mode"] == "sizing":
                 print(f"  sizing: {section['distinct_cases']} distinct case(s), "
-                      f"floor {section['min_stimuli']}, profiles {section['profiles']}")
+                      f"floor {section['effective_floor']}, profiles {section['profiles']}")
             else:
                 print(f"  compare: {section['wins']}W/{section['losses']}L/"
                       f"{section['ties']}T over {section['paired_cases']} paired, "
