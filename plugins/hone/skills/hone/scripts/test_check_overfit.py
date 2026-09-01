@@ -229,11 +229,92 @@ class TestEnrichmentAnchorsAreVisible(unittest.TestCase):
         self.assertLess(bare["overfit_ratio"], enriched["overfit_ratio"])
         self.assertEqual(enriched["verdict"], "overfitted")
 
-    def test_prose_in_required_present_still_uses_the_ngram_rule(self):
-        """A multi-word entry is prose, not an enrichment anchor: a short
-        overlap with the artifact is ordinary English, not a lift."""
+    def test_a_multi_word_anchor_absent_from_the_artifact_is_not_a_lift(self):
+        """The anchor rule is verbatim containment, not word membership:
+        `record the gate` uses only artifact words but never in that order."""
         report = self._report(["record the gate"])
         self.assertEqual(report["counts"]["vocabulary"], 0)
+
+    def test_a_short_verbatim_prose_anchor_is_a_lift(self):
+        """The identifier/markup rule left the dilution loophole open one step
+        out: `before the gate` is prose, is under NGRAM_SIZE, is verbatim in
+        the artifact, and used to land in the denominator as `outcome`."""
+        report = self._report(["before the gate"])
+        self.assertEqual(report["counts"]["vocabulary"], 1)
+
+    def test_recitation_anchors_cannot_clear_the_gate(self):
+        """The reported exploit: appending verbatim anchors moved the ratio
+        *down*, so an overfitted set cleared the threshold by adding more
+        recitation checks."""
+        bare = self._report([])
+        padded = self._report(["before the gate", "start with", "in the report"])
+        self.assertGreater(padded["overfit_ratio"], bare["overfit_ratio"])
+
+    def test_an_anchor_matches_across_a_separator_swap(self):
+        """`gate-compliance` and the artifact's `gate_compliance` are the same
+        lift; a raw substring test scores it as an outcome item."""
+        self.assertEqual(self._report(["gate-compliance"])["counts"]["vocabulary"], 1)
+
+    def test_an_anchor_matches_across_a_line_break(self):
+        """An anchor that evades the check by wrapping is free denominator."""
+        criteria = {
+            "skill_name": "demo",
+            "test_cases": [{"required_present": ["before the gate"]}],
+        }
+        wrapped = "Call validate_handoff before\nthe gate, then record it.\n"
+        report = check_overfit(criteria, wrapped, "demo", 0.34)
+        self.assertEqual(report["counts"]["vocabulary"], 1)
+
+
+class TestFlaggedItemsAreLocatable(unittest.TestCase):
+    """Step 6a says "rewrite flagged items", so a flagged item has to name the
+    test case and the field it came from, and must not arrive truncated."""
+
+    def test_flagged_entries_carry_case_id_and_location(self):
+        criteria = {
+            "skill_name": "demo",
+            "test_cases": [
+                {"id": "TC-001",
+                 "checks": [{"description": "Agent ran structural_audit.py"}]},
+                {"id": "TC-002",
+                 "checks": [{"description": "Agent ran structural_audit.py"}]},
+            ],
+        }
+        report = check_overfit(criteria, ARTIFACT, "demo", 0.34)
+        located = {(i["case_id"], i["location"]) for i in report["flagged"]}
+        self.assertEqual(
+            located,
+            {("TC-001", "checks[0].description"), ("TC-002", "checks[0].description")},
+        )
+
+    def test_a_case_without_an_id_is_located_by_index(self):
+        criteria = {
+            "skill_name": "demo",
+            "test_cases": [{"checks": [{"description": "Agent completed Phase 2"}]}],
+        }
+        report = check_overfit(criteria, ARTIFACT, "demo", 0.34)
+        self.assertEqual(report["flagged"][0]["case_id"], "test_cases[0]")
+
+    def test_a_rubric_band_names_its_check_and_band(self):
+        criteria = {
+            "skill_name": "demo",
+            "test_cases": [
+                {"id": "TC-001",
+                 "checks": [{"description": "Reached a correct result",
+                             "rubric": {"1": "no", "5": "Agent completed Phase 2"}}]}
+            ],
+        }
+        report = check_overfit(criteria, ARTIFACT, "demo", 0.34)
+        self.assertEqual(report["flagged"][0]["location"], "checks[0].rubric[5]")
+
+    def test_flagged_text_is_not_truncated(self):
+        long_text = "Agent completed Phase 2 after " + "a very long preamble " * 20
+        criteria = {
+            "skill_name": "demo",
+            "test_cases": [{"id": "TC-001", "checks": [{"description": long_text}]}],
+        }
+        report = check_overfit(criteria, ARTIFACT, "demo", 0.34)
+        self.assertEqual(report["flagged"][0]["text"], long_text)
 
 
 class TestSkillNameRuleIgnoresOrdinaryWords(unittest.TestCase):
