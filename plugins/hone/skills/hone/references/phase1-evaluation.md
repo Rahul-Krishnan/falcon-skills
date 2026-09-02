@@ -207,14 +207,14 @@ This step audits existing eval criteria for common setup and effectiveness issue
 
 7. If no findings: log "Criteria audit: clean."
 
-**Gate: Step 4 → Step 5 or Step 8 (checklist)**
+**Gate: Step 4 → Step 5 or Step 6 (checklist)**
 - [ ] Audit script ran and produced valid JSON output (parseable, has `findings` array)
 - [ ] All fixable findings were applied via Edit tool
 - [ ] If `should_regenerate`: criteria file was deleted (verified), routing overridden to "regenerate"
 - [ ] LLM classification completed for all test cases with `checks` entries
 - [ ] Workflow state updated with `criteria_audit` result
 
-**Handoff interface (Step 4 → Step 5 or Step 8):**
+**Handoff interface (Step 4 → Step 5 or Step 6):**
 ```
 criteria_audit: {
   criteria_existed: boolean,
@@ -648,17 +648,17 @@ python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} \
   --json
 ```
 
-`$PRIOR_OUTPUT_DIR` is the `output_dir` recorded under `eval_results` in the workflow state file by the round being compared against: in Phase 3 that is Phase 1's `$OUTPUT_DIR` on the first re-evaluation and the previous `$REEVAL_OUTPUT_DIR` after that, and `$OUTPUT_DIR` is then the current `$REEVAL_OUTPUT_DIR`. Read it from the state file, not from memory. Phase 3 is where this comparison normally runs (see phase3-reevaluation.md, step 3a); a Phase 1 pass that follows an earlier hone run of the same artifact can also compare against that run's recorded `output_dir`. Pass `--artifact-type` exactly as in Step 6b: the sizing half of the report runs again here, and without the flag a hook or script suite Step 6b just certified `powered` is sized in the conservative skill/command reading, which suppresses a genuine `improved` or `regressed` under an `underpowered` top-level verdict.
+`$PRIOR_OUTPUT_DIR` is the output directory the workflow state file records for the round being compared against: `eval_results.output_dir` (Phase 1's baseline) on the first re-evaluation, and `round_{N-1}_scores.output_dir` (which phase3-reevaluation.md step 6 writes) on every re-evaluation after that; `$OUTPUT_DIR` is then the current `$REEVAL_OUTPUT_DIR`. Read it from the state file, not from memory. Phase 3 is where this comparison normally runs (see phase3-reevaluation.md, step 3a); a Phase 1 pass that follows an earlier hone run of the same artifact can also compare against that run's recorded `output_dir`. The sizing half of the report runs again here. In compare mode it is sized under the `metadata.artifact_type` that `score_execution.py` recorded in both rounds' `deterministic_scores.json`, which is the type whose scoring path produced the composites being compared, so a hook or script suite is not misread in the conservative skill/command reading when the flag is left off. Pass `--artifact-type` as in Step 6b anyway; a flag that disagrees with the recorded type is warned about and the recorded type wins, and rounds that record two different types fall back to the flag with a warning.
 
 `--before` names a file from the previous round and `--after` a file from this round -- the `deterministic_scores.json` from each, since those are the numbers Phase 2 acts on per Step 9 above. Passing the `results.json` beside it also works (the script reads the deterministic sibling when one exists), but a `results.json` from a deterministic-only run carries no per-test score, so name the deterministic file directly. Do not pass the round's output *directory*: that is a usage error (exit 2), because a bare directory resolves to the deterministic file of its parent, which is either absent or the same file for both flags.
 
-Record `power_verdict` in the workflow state file alongside the composite:
+Record `power_verdict` in the workflow state file alongside the composite. The compare-mode report is `{"mode": "compare", "sizing": {...}, "comparison": {...}, "verdict": ...}` (sizing-only runs emit the flat sizing report, with `"mode": "sizing"`); the three fields come from the top-level `verdict`, `comparison.p_improved`, and `comparison.discordant` respectively:
 
 ```json
 {"composite_score": 0.82, "power_verdict": "improved", "power_p_improved": 0.0312, "power_discordant": 6}
 ```
 
-`power_verdict` is a field of `eval_results` (see the handoff interface below and the `eval_results` schema in `scripts/validate_handoff.py`, which enumerates the same six values). Writing anything outside that enum, `"pass"` for instance, fails the pre-Phase-2 `validate_handoff.py` gate.
+`power_verdict` is a required field of `eval_results` (see the handoff interface below and the `eval_results` schema in `scripts/validate_handoff.py`, which enumerates the same six values). Omitting it, or writing anything outside that enum, `"pass"` for instance, fails the pre-Phase-2 `validate_handoff.py` gate. A first round with no comparison records the Step 6b sizing verdict (`powered` or `underpowered`).
 
 The verdict is one of `powered` (sizing only, no comparison run), `improved`, `regressed`, `inconclusive`, `underpowered`, or `not_measurable`. Read them as:
 

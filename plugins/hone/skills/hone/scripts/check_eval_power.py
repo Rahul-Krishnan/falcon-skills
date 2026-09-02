@@ -81,7 +81,15 @@ from pathlib import Path
 # results.json it reads deterministic_scores.json beside it, dropping tests
 # whose composite is null. load_inconclusive_ids is the other half of that
 # file: the ids it dropped. A second copy here is a second copy to drift.
-from hone_common import load_deterministic_scores, load_inconclusive_ids
+# extract_results and _raw_llm_score own the results.json shape (which key
+# carries the entries, which field carries the judge score); the fallback
+# below reads through them for the same reason.
+from hone_common import (
+    _raw_llm_score,
+    extract_results,
+    load_deterministic_scores,
+    load_inconclusive_ids,
+)
 
 # Minimum distinct test cases before a verdict is meaningful at all. Below this
 # no arrangement of wins can reach p <= 0.05 on a one-sided sign test.
@@ -116,6 +124,10 @@ NON_SCORABLE_PROFILES = frozenset({"knowledge_extraction"})
 # type of its own, so the caller supplies it with `--artifact-type`; unset
 # keeps the conservative skill/command reading.
 ALWAYS_SCORABLE_ARTIFACT_TYPES = frozenset({"hook", "script"})
+
+# Every type score_execution.py scores, i.e. the values `--artifact-type`
+# accepts and `metadata.artifact_type` in deterministic_scores.json can carry.
+ARTIFACT_TYPES = ("skill", "command", "hook", "script")
 
 ALPHA = 0.05
 
@@ -166,6 +178,12 @@ def min_discordant_for_alpha(alpha: float = ALPHA) -> int:
     return n
 
 
+def _case_id(case: dict) -> str | None:
+    """The case's id as the string compare mode pairs on, or None if absent."""
+    raw = case.get("id")
+    return None if raw is None else str(raw)
+
+
 def _profile_of(case: dict) -> str:
     """The case's profile, under the name the scorer resolves it by.
 
@@ -204,16 +222,16 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
     floor = max(min_stimuli, alpha_floor)
 
     cases = [c for c in (criteria.get("test_cases") or []) if isinstance(c, dict)]
-    ids = [c.get("id") for c in cases if c.get("id")]
+    # Ids are compared as strings, the way `_scores_by_id` keys them, so an
+    # integer id is a case rather than a falsy value to drop (0 vanished) or a
+    # sort-time TypeError against a string neighbour.
+    ids = [_case_id(c) for c in cases if _case_id(c) is not None]
     distinct_ids = sorted(set(ids))
 
-    unscorable = (
-        frozenset()
-        if artifact_type in ALWAYS_SCORABLE_ARTIFACT_TYPES
-        else NON_SCORABLE_PROFILES
-    )
+    profile_scoped = artifact_type not in ALWAYS_SCORABLE_ARTIFACT_TYPES
+    unscorable = NON_SCORABLE_PROFILES if profile_scoped else frozenset()
     scorable = [c for c in cases if _profile_of(c) not in unscorable]
-    scorable_ids = sorted({c.get("id") for c in scorable if c.get("id")})
+    scorable_ids = sorted({_case_id(c) for c in scorable if _case_id(c) is not None})
     excluded_ids = sorted(set(distinct_ids) - set(scorable_ids))
     # Diversity is measured over the same subset the floor counts. Two profiles
     # of which only one can ever be scored is one profile of evidence.
@@ -243,7 +261,10 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
             f"{sorted(unscorable)}; they never pair in compare "
             "mode, so adding more of them cannot clear the floor"
         )
-    if len(profiles) < min_profiles:
+    # The hook and script scoring paths never read test_profile, so profile
+    # diversity says nothing about what they measure; the warning pointed at a
+    # remedy (vary test_profile) that changes nothing for those types.
+    if profile_scoped and len(profiles) < min_profiles:
         warnings.append(
             f"{len(profiles)} distinct scorable test profile(s) {profiles}, "
             f"recommended minimum is {min_profiles}; cases that all exercise "
@@ -254,6 +275,7 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
     return {
         "mode": "sizing",
         "verdict": "powered" if powered else "underpowered",
+        "artifact_type": artifact_type,
         "distinct_cases": len(distinct_ids),
         "scorable_cases": len(scorable_ids),
         "excluded_cases": excluded_ids,
@@ -282,6 +304,14 @@ def _scores_by_id(results: dict) -> dict[str, float]:
     mapping branch called `float()` on the record itself whenever the record
     carried no `"score"` key -- which is every hone record, since hone names
     that field `"composite"` -- and raised an uncaught TypeError.
+
+    A raw results.json is read through `hone_common.extract_results`, which
+    owns the key precedence (`results` before `test_results`), and its judge
+    score through `_raw_llm_score`, which owns the `final_score` alias. A
+    private key list here had the precedence reversed, carried a `tests`
+    alias no producer emits, and missed the alias, so a skill-creator-shaped
+    file (`test_results` + `final_score`) yielded `{}` and the report said
+    "0 scored" about a round it had in hand.
     """
     if isinstance(results, list):
         entries = results
@@ -294,14 +324,10 @@ def _scores_by_id(results: dict) -> dict[str, float]:
                 else {"test_id": key, "score": value}
                 for key, value in per_test.items()
             ]
+        elif isinstance(per_test, list):
+            entries = per_test
         else:
-            entries = (
-                per_test
-                or results.get("test_results")
-                or results.get("results")
-                or results.get("tests")
-                or []
-            )
+            entries, _key = extract_results(results)
     if not isinstance(entries, list):
         return {}
 
@@ -315,7 +341,7 @@ def _scores_by_id(results: dict) -> dict[str, float]:
         # the judge errored, silently dropping the pair.
         raw = entry.get("composite")
         if raw is None:
-            raw = entry.get("score")
+            raw = _raw_llm_score(entry)
         if test_id is None or raw is None:
             continue
         try:
@@ -395,6 +421,7 @@ def check_compare(before: dict, after: dict, alpha: float,
     scorers_disagree = (
         before_source and after_source and before_source != after_source
     )
+    no_baseline = not shared and bool(recovered) and not unpaired_after
     # Two judge files agree on a scorer, not on the measurement Phase 2 acts
     # on; this used to reach `improved` exit 0 without naming the scorer.
     judge_only = before_source == after_source == "results"
@@ -430,6 +457,17 @@ def check_compare(before: dict, after: dict, alpha: float,
             "as an improvement. Re-run the after round, or find out why "
             "those cases produced no scorable evidence, before comparing"
         )
+    elif no_baseline:
+        # Mirror image of `collapsed`: the ids match, the baseline produced no
+        # evidence. The mismatch message below sent the agent to check paths.
+        verdict = "not_measurable"
+        errors.append(
+            f"0 paired test case(s): all {len(recovered)} case(s) that scored "
+            f"in --after {recovered} were inconclusive in --before, so there "
+            "is no baseline to compare against. The test ids match; the "
+            "before round produced no scorable evidence. Re-run the before "
+            "round, or treat this round as the new baseline"
+        )
     elif not shared:
         # Zero pairs is a pairing failure, and reporting it as `underpowered`
         # sent the agent to Step 6b's remedy ("add cases that discriminate a
@@ -458,9 +496,10 @@ def check_compare(before: dict, after: dict, alpha: float,
     else:
         verdict = "inconclusive"
 
-    if recovered:
+    if recovered and not no_baseline:
         # No before-score means no verdict can be manufactured; named so an
-        # unstable suite is visible.
+        # unstable suite is visible. When nothing paired at all the error
+        # above already names them.
         warnings.append(
             f"{len(recovered)} case(s) {recovered} were inconclusive in "
             "--before and scored in --after; they have no baseline and were "
@@ -600,18 +639,60 @@ def _load_round(path: str) -> tuple[dict, str]:
     would swap scorers *within* one side, which is the exact substitution
     `check_compare` refuses to rule on. It returns no scores and every id as
     inconclusive instead, so the comparison names the collapse.
+
+    The deterministic file is parsed with `_load` first, because hone_common's
+    loaders swallow a JSONDecodeError or a non-object root to `{}`, and `{}`
+    is indistinguishable from a round that scored nothing: a truncated
+    deterministic file came back as a zero-pair criteria mismatch that never
+    named the file, sending the agent to re-check test ids. Invalid JSON is
+    the documented exit 2 everywhere else and is here too.
+
+    The payload also carries `metadata.artifact_type` when the scorer wrote
+    one, so compare mode can size the criteria under the type that actually
+    scored the rounds rather than a flag the caller may have left off.
     """
     _require_path(path)
+    deterministic_path = _deterministic_file(path)
+    metadata: dict = {}
+    if deterministic_path.is_file():
+        loaded = _load(str(deterministic_path))
+        if isinstance(loaded.get("metadata"), dict):
+            metadata = loaded["metadata"]
     deterministic = load_deterministic_scores(path)
-    if deterministic or _deterministic_file(path).is_file():
+    if deterministic or deterministic_path.is_file():
         return {
             "per_test": [
                 {"test_id": test_id, "composite": composite}
                 for test_id, composite in deterministic.items()
             ],
             "inconclusive": sorted(load_inconclusive_ids(path)),
+            "artifact_type": metadata.get("artifact_type"),
         }, "deterministic"
     return _load(path), "results"
+
+
+def _recorded_artifact_type(*rounds: dict) -> tuple[str, str]:
+    """The artifact type the rounds were scored under, and a caveat if unclear.
+
+    score_execution.py writes `metadata.artifact_type` into every
+    deterministic_scores.json (`--type`), and that is the type whose scoring
+    path produced the composites being compared. Returns ("", "") when neither
+    round recorded one, and ("", reason) when the two rounds disagree, which
+    is a pair no single sizing reading fits.
+    """
+    recorded = sorted({
+        r.get("artifact_type") for r in rounds
+        if isinstance(r, dict) and r.get("artifact_type") in ARTIFACT_TYPES
+    })
+    if not recorded:
+        return "", ""
+    if len(recorded) > 1:
+        return "", (
+            f"the two rounds record different artifact types {recorded} in "
+            "metadata.artifact_type; they were scored on different paths and "
+            "the sizing reading falls back to --artifact-type"
+        )
+    return recorded[0], ""
 
 
 def _combined_verdict(sizing: dict, comparison: dict) -> str:
@@ -694,12 +775,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--artifact-type",
-        choices=("skill", "command", "hook", "script"),
+        choices=ARTIFACT_TYPES,
         default="",
         help="Artifact the criteria were written for. Hooks and scripts score "
              "every profile deterministically, so the always-inconclusive "
-             "profile exclusion does not apply to them (default: the "
-             "conservative skill/command reading)",
+             "profile exclusion does not apply to them. In compare mode the "
+             "type recorded in the rounds' deterministic_scores.json "
+             "(metadata.artifact_type) is used and this flag is checked "
+             "against it (default: the conservative skill/command reading)",
     )
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")
     args = parser.parse_args()
@@ -712,17 +795,34 @@ def main() -> None:
         sys.exit(2)
 
     criteria = _load(args.criteria_file)
-    sizing = check_sizing(criteria, args.min_stimuli, args.min_profiles,
-                          args.alpha, args.artifact_type)
 
-    report = sizing
-    if args.before:
+    if not args.before:
+        report = check_sizing(criteria, args.min_stimuli, args.min_profiles,
+                              args.alpha, args.artifact_type)
+    else:
         before_round, before_source = _load_round(args.before)
         after_round, after_source = _load_round(args.after)
+        # Size under the type that scored the rounds: trusting the flag alone
+        # buried a hook suite's genuine `improved` under `underpowered`.
+        recorded_type, type_caveat = _recorded_artifact_type(before_round, after_round)
+        artifact_type = recorded_type or args.artifact_type
+        sizing = check_sizing(criteria, args.min_stimuli, args.min_profiles,
+                              args.alpha, artifact_type)
+        if type_caveat:
+            sizing["warnings"].append(type_caveat)
+        elif recorded_type and args.artifact_type and args.artifact_type != recorded_type:
+            sizing["warnings"].append(
+                f"--artifact-type {args.artifact_type} disagrees with the "
+                f"{recorded_type} recorded in both rounds' "
+                "metadata.artifact_type; the rounds were scored as a "
+                f"{recorded_type} and are sized as one"
+            )
         comparison = check_compare(
             before_round, after_round, args.alpha, before_source, after_source,
         )
-        report = {"sizing": sizing, "comparison": comparison,
+        # A top-level `mode`, like the sizing report's, so a consumer can tell
+        # the two shapes apart without probing for a `comparison` key.
+        report = {"mode": "compare", "sizing": sizing, "comparison": comparison,
                   "verdict": _combined_verdict(sizing, comparison)}
 
     if args.json:
@@ -730,6 +830,7 @@ def main() -> None:
         print()
     else:
         print(f"VERDICT: {report['verdict']}")
+        sizing = report["sizing"] if report["mode"] == "compare" else report
         for section in (sizing, report.get("comparison")):
             if not section:
                 continue

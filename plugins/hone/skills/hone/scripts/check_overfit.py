@@ -78,11 +78,24 @@ DEFAULT_MAX_OVERFIT_RATIO = 0.34
 # Internal machinery: a bundled script, a numbered workflow position, or an
 # explicit instruction to use the artifact. These make a check measure
 # adherence rather than outcome.
+#
+# The step rule admits a letter suffix (`Step 6a`) because hone's own workflow
+# numbers sub-steps that way, and a check reciting one is as much a recitation
+# as `Step 6`. The script rule is case-insensitive for the same reason a
+# capitalised `Score_Execution.py` is still the script. The invocation rule
+# spells out its verb forms rather than tacking `d|s|ing` onto stems (which
+# produced `invokeing` and never matched `called`), and allows one name token
+# between the article and `skill` so `calls the /hone skill` is caught
+# (only after `the` or with a leading slash, so `calls their skill set` is not).
 TECHNIQUE_PATTERNS = (
-    (re.compile(r"\b[a-z_][a-z0-9_]*\.(?:py|sh|js)\b"), "names a bundled script"),
-    (re.compile(r"\b(?:phase|step|stage)\s+\d+\b", re.I), "names a numbered workflow position"),
-    (re.compile(r"\b(?:invoke|call|use|run|dispatch)(?:d|s|ing)?\s+(?:the\s+)?/?[a-z-]*skill\b", re.I),
-     "rewards invoking the skill"),
+    (re.compile(r"\b[a-z_][a-z0-9_]*\.(?:py|sh|js)\b", re.I), "names a bundled script"),
+    (re.compile(r"\b(?:phase|step|stage)\s+\d+[a-z]?\b", re.I), "names a numbered workflow position"),
+    (re.compile(
+        r"\b(?:invok(?:e|ed|es|ing)|call(?:s|ed|ing)?|us(?:e|ed|es|ing)"
+        r"|run(?:s|ning)?|ran|dispatch(?:es|ed|ing)?|trigger(?:s|ed|ing)?)"
+        r"\s+(?:the\s+(?:/?[a-z][a-z0-9_-]*\s+)?|/[a-z][a-z0-9_-]*\s+)?skill\b",
+        re.I,
+    ), "rewards invoking the skill"),
 )
 
 WORD = re.compile(r"[a-z0-9]+")
@@ -266,7 +279,9 @@ def _collect_items(criteria: dict) -> tuple[list[dict], int]:
     for index, case in enumerate(criteria.get("test_cases") or []):
         if not isinstance(case, dict):
             continue
-        case_id = case.get("id") or f"test_cases[{index}]"
+        # An integer id 0 is an id, not a missing one; it is stringified so
+        # the flagged entry names the case the way compare mode pairs it.
+        case_id = str(case["id"]) if case.get("id") is not None else f"test_cases[{index}]"
         exempt += len(case.get("required_absent") or [])
         for slot, present in enumerate(case.get("required_present") or []):
             if isinstance(present, str):
@@ -369,7 +384,10 @@ def main() -> None:
     parser.add_argument("criteria_file", help="Path to eval_criteria.json")
     parser.add_argument(
         "--artifact",
-        help="Path to the artifact under test (default: inferred from criteria)",
+        required=True,
+        help="Path to the artifact under test: the SKILL.md (or command/hook/"
+             "script file) the criteria were written for, as Step 1 discovery "
+             "resolved it",
     )
     parser.add_argument(
         "--max-ratio",
@@ -407,17 +425,11 @@ def main() -> None:
         sys.exit(2)
 
     skill_name = criteria.get("skill_name") or ""
+    # No guessed default. `~/.claude/skills/<name>/SKILL.md` is the path
+    # phase1-evaluation.md says never to hardcode (wrong for plugin installs),
+    # and a stale copy there produced a within_threshold verdict against a
+    # file that was not the artifact under test, with nothing on stderr.
     artifact_path = args.artifact
-    if not artifact_path and skill_name:
-        guess = Path.home() / ".claude" / "skills" / skill_name / "SKILL.md"
-        artifact_path = str(guess) if guess.exists() else None
-    if not artifact_path:
-        print(
-            "ERROR: no artifact found; pass --artifact with the path to the "
-            "SKILL.md (or command/hook/script) the criteria were written for",
-            file=sys.stderr,
-        )
-        sys.exit(2)
 
     try:
         artifact_text = Path(artifact_path).read_text(encoding="utf-8", errors="replace")

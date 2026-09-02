@@ -172,6 +172,7 @@ class TestCriteriaRootShape(unittest.TestCase):
                     sys.executable,
                     os.path.join(os.path.dirname(__file__), "check_overfit.py"),
                     path,
+                    "--artifact", path,
                     "--json",
                 ],
                 capture_output=True,
@@ -194,6 +195,7 @@ class TestCriteriaRootShape(unittest.TestCase):
                     sys.executable,
                     os.path.join(os.path.dirname(__file__), "check_overfit.py"),
                     tmp,
+                    "--artifact", tmp,
                     "--json",
                 ],
                 capture_output=True,
@@ -380,3 +382,82 @@ class TestSkillNameRuleIgnoresOrdinaryWords(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestArtifactPathIsNeverGuessed(unittest.TestCase):
+    """`--artifact` is required. The old default of `~/.claude/skills/<name>/
+    SKILL.md` is the path phase1-evaluation.md says never to hardcode, and a
+    stale copy there returned within_threshold against a file that was not
+    the artifact under test, with nothing on stderr."""
+
+    def test_omitting_the_artifact_is_a_usage_error(self):
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "criteria.json")
+            with open(path, "w") as handle:
+                handle.write('{"skill_name": "hone", "test_cases": []}')
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "check_overfit.py"),
+                    path,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HOME": tmp},
+            )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--artifact", proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+
+class TestTechniquePatternsCoverTheWorkflowVocabulary(unittest.TestCase):
+    """The step rule stopped at a digit, so the lettered sub-steps this very
+    workflow uses (Step 6a, 9a, 3a) classified `outcome` and a recitation
+    check about them lowered the ratio instead of raising it; the script rule
+    was case-sensitive; the invocation rule only knew `invoked the skill`."""
+
+    def _class(self, text):
+        return classify_item(text, set(), "")["class"]
+
+    def test_a_lettered_sub_step_is_technique(self):
+        for text in ("Completes Step 6a before scoring", "runs step 9a", "Phase 3A exit"):
+            self.assertEqual(self._class(text), "technique", text)
+
+    def test_a_bare_step_number_is_still_technique(self):
+        self.assertEqual(self._class("Runs Step 6 first"), "technique")
+
+    def test_a_capitalised_script_name_is_technique(self):
+        self.assertEqual(self._class("Runs Score_Execution.py first"), "technique")
+
+    def test_invocation_verb_forms_are_technique(self):
+        for text in (
+            "called the skill",
+            "dispatched the skill",
+            "calls the /hone skill",
+            "invoking the skill",
+            "uses the hone skill",
+            "ran the skill",
+        ):
+            self.assertEqual(self._class(text), "technique", text)
+
+    def test_the_word_skill_in_ordinary_prose_stays_outcome(self):
+        for text in (
+            "the user calls their skill set impressive",
+            "a skilled reply that covers the edge case",
+        ):
+            self.assertEqual(self._class(text), "outcome", text)
+
+
+class TestIntegerIdsAreIds(unittest.TestCase):
+    def test_an_id_of_zero_is_not_replaced_by_the_index_label(self):
+        criteria = {"test_cases": [
+            {"id": 0, "checks": [{"description": "Runs step 1"}]},
+        ]}
+        flagged = check_overfit(criteria, "some artifact words here", "", 0.34)["flagged"]
+        self.assertEqual(flagged[0]["case_id"], "0")

@@ -851,5 +851,220 @@ class TestProfileMirrorsTheScorer(unittest.TestCase):
         self.assertEqual(report["profiles"], ["error_handling"])
 
 
+def _run_cli(*argv):
+    import os
+    import subprocess
+    import sys
+
+    return subprocess.run(
+        [sys.executable, os.path.join(os.path.dirname(__file__), "check_eval_power.py"), *argv],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _write_round(tmp, name, per_test, artifact_type=None, raw=None):
+    """A round directory holding a deterministic_scores.json; returns its path."""
+    import json
+    import os
+
+    os.makedirs(os.path.join(tmp, name))
+    path = os.path.join(tmp, name, "deterministic_scores.json")
+    with open(path, "w") as handle:
+        if raw is not None:
+            handle.write(raw)
+        else:
+            payload = {"per_test": per_test}
+            if artifact_type:
+                payload["metadata"] = {"artifact_type": artifact_type}
+            json.dump(payload, handle)
+    return path
+
+
+def _write_criteria(tmp, cases):
+    import json
+    import os
+
+    path = os.path.join(tmp, "criteria.json")
+    with open(path, "w") as handle:
+        json.dump({"test_cases": cases}, handle)
+    return path
+
+
+class TestCompareModeReadsTheRecordedArtifactType(unittest.TestCase):
+    """score_execution.py records `metadata.artifact_type` in every
+    deterministic_scores.json. Sizing off the flag alone buried a hook suite's
+    genuine `improved` under `underpowered` whenever the flag was left off, and
+    Step 9a records the top-level verdict."""
+
+    CASES = [{"id": f"t{i}", "test_profile": "execution"} for i in range(4)] + [
+        {"id": "t4", "test_profile": "knowledge_extraction"}
+    ]
+
+    def _rounds(self, tmp, before_type="hook", after_type="hook"):
+        before = [{"test_id": f"t{i}", "composite": 0.5} for i in range(5)]
+        after = [{"test_id": f"t{i}", "composite": 0.9} for i in range(5)]
+        return (
+            _write_round(tmp, "r1", before, before_type),
+            _write_round(tmp, "r2", after, after_type),
+        )
+
+    def test_the_recorded_type_sizes_the_suite_without_the_flag(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = _write_criteria(tmp, self.CASES)
+            before, after = self._rounds(tmp)
+            proc = _run_cli(criteria, "--before", before, "--after", after, "--json")
+        report = json.loads(proc.stdout)
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(report["mode"], "compare")
+        self.assertEqual(report["verdict"], "improved")
+        self.assertEqual(report["sizing"]["artifact_type"], "hook")
+
+    def test_a_disagreeing_flag_is_warned_and_overridden(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = _write_criteria(tmp, self.CASES)
+            before, after = self._rounds(tmp)
+            proc = _run_cli(criteria, "--artifact-type", "skill",
+                            "--before", before, "--after", after, "--json")
+        report = json.loads(proc.stdout)
+        self.assertEqual(report["verdict"], "improved")
+        self.assertTrue(any("disagrees" in w for w in report["sizing"]["warnings"]))
+
+    def test_rounds_recording_different_types_fall_back_to_the_flag(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = _write_criteria(tmp, self.CASES)
+            before, after = self._rounds(tmp, "hook", "skill")
+            proc = _run_cli(criteria, "--before", before, "--after", after, "--json")
+        report = json.loads(proc.stdout)
+        self.assertEqual(report["verdict"], "underpowered")
+        self.assertTrue(any("different artifact types" in w for w in report["sizing"]["warnings"]))
+
+    def test_rounds_without_metadata_keep_the_flag(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = _write_criteria(tmp, self.CASES)
+            before, after = self._rounds(tmp, None, None)
+            proc = _run_cli(criteria, "--artifact-type", "hook",
+                            "--before", before, "--after", after, "--json")
+        self.assertEqual(json.loads(proc.stdout)["verdict"], "improved")
+
+
+class TestACorruptDeterministicFileIsAUsageError(unittest.TestCase):
+    """hone_common's loaders swallow a JSONDecodeError to `{}`, which reported
+    a truncated deterministic file as a zero-pair criteria mismatch that never
+    named the file."""
+
+    def test_invalid_json_exits_2_and_names_the_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = _write_criteria(tmp, [{"id": f"t{i}"} for i in range(5)])
+            before = _write_round(tmp, "r1", [{"test_id": "t0", "composite": 0.5}])
+            after = _write_round(tmp, "r2", None, raw="{not json")
+            proc = _run_cli(criteria, "--before", before, "--after", after)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("not valid JSON", proc.stderr)
+        self.assertIn("deterministic_scores.json", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_a_list_rooted_deterministic_file_exits_2(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = _write_criteria(tmp, [{"id": f"t{i}"} for i in range(5)])
+            before = _write_round(tmp, "r1", [{"test_id": "t0", "composite": 0.5}])
+            after = _write_round(tmp, "r2", None, raw="[]")
+            proc = _run_cli(criteria, "--before", before, "--after", after)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("root must be a JSON object", proc.stderr)
+
+
+class TestAMissingBaselineIsNamedAsSuch(unittest.TestCase):
+    """Every --before case inconclusive and every --after case scored is a
+    round with no baseline, not a criteria mismatch; the mismatch message sent
+    the agent to check paths and test ids that were fine."""
+
+    def test_all_recovered_cases_name_the_missing_baseline(self):
+        before = _deterministic({}, inconclusive=[f"t{i}" for i in range(5)])
+        after = _deterministic({f"t{i}": 0.9 for i in range(5)})
+        report = check_compare(before, after, 0.05, "deterministic", "deterministic")
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertIn("no baseline", report["errors"][0])
+        self.assertNotIn("no test id is present in both rounds", report["errors"][0])
+        # Named once, in the error, not again as a warning.
+        self.assertFalse(any("no baseline" in w for w in report["warnings"]))
+
+    def test_a_genuine_id_mismatch_still_reads_as_one(self):
+        before = _deterministic({}, inconclusive=["t0"])
+        after = _deterministic({"t0": 0.9, "other": 0.9})
+        report = check_compare(before, after, 0.05, "deterministic", "deterministic")
+        self.assertIn("no test id is present in both rounds", report["errors"][0])
+        self.assertTrue(any("inconclusive in --before" in w for w in report["warnings"]))
+
+
+class TestIdsAreComparedAsStrings(unittest.TestCase):
+    """`_scores_by_id` keys on `str(test_id)`; sizing dropped an integer 0 as
+    falsy and raised TypeError sorting mixed int/str ids."""
+
+    def test_an_integer_zero_id_is_a_case(self):
+        report = check_sizing({"test_cases": [{"id": i} for i in range(5)]}, 5, 1)
+        self.assertEqual(report["distinct_cases"], 5)
+        self.assertEqual(report["verdict"], "powered")
+
+    def test_mixed_id_types_do_not_raise(self):
+        report = check_sizing({"test_cases": [{"id": "a"}, {"id": 1}]}, 5, 1)
+        self.assertEqual(report["distinct_cases"], 2)
+
+    def test_a_numeric_and_string_spelling_of_one_id_are_duplicates(self):
+        report = check_sizing({"test_cases": [{"id": 1}, {"id": "1"}]}, 5, 1)
+        self.assertTrue(any("duplicate" in e for e in report["errors"]))
+
+
+class TestProfileDiversityIsNotAskedOfHooksAndScripts(unittest.TestCase):
+    """The hook and script scoring paths never read test_profile, so the
+    min-profiles warning pointed those suites at a remedy that changes nothing."""
+
+    CASES = [{"id": f"t{i}"} for i in range(5)]
+
+    def test_a_hook_suite_does_not_warn_at_the_default_floor(self):
+        report = check_sizing({"test_cases": self.CASES}, 5, 2, 0.05, "hook")
+        self.assertEqual(report["warnings"], [])
+
+    def test_a_skill_suite_still_warns(self):
+        report = check_sizing({"test_cases": self.CASES}, 5, 2, 0.05, "skill")
+        self.assertTrue(any("profile" in w for w in report["warnings"]))
+
+
+class TestResultsFallbackSharesHoneCommonsShape(unittest.TestCase):
+    """The raw results.json fallback reads through hone_common, so a
+    skill-creator-shaped file (`test_results` + `final_score`) is seen."""
+
+    def test_final_score_alias_is_read(self):
+        from check_eval_power import _scores_by_id
+
+        scores = _scores_by_id({"test_results": [{"test_id": "a", "final_score": 0.5}]})
+        self.assertEqual(scores, {"a": 0.5})
+
+    def test_results_key_takes_precedence_over_test_results(self):
+        from check_eval_power import _scores_by_id
+
+        scores = _scores_by_id({
+            "results": [{"test_id": "a", "score": 0.5}],
+            "test_results": [{"test_id": "b", "score": 0.1}],
+        })
+        self.assertEqual(scores, {"a": 0.5})
+
+
 if __name__ == "__main__":
     unittest.main()

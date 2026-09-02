@@ -352,10 +352,38 @@ class TestValidateHandoff(unittest.TestCase):
                     },
                 ],
                 "actionable_failures": 1,
+                "power_verdict": "powered",
             },
         }
         result = validate_handoff(state, "eval_results")
         self.assertTrue(result.valid, f"Errors: {[e.message for e in result.errors]}")
+
+    def test_eval_results_without_a_power_verdict_fails(self) -> None:
+        # Step 9a: a composite without a power verdict is a number, not a
+        # result, and the gate is what enforces that.
+        state = {
+            "eval_results": {
+                "composite_score": 0.85,
+                "grade": "B",
+                "per_test": [{"test_id": "t", "score": 0.85, "status": "pass"}],
+                "actionable_failures": 0,
+            },
+        }
+        result = validate_handoff(state, "eval_results")
+        self.assertFalse(result.valid)
+        self.assertTrue(any(e.path == "eval_results.power_verdict" for e in result.errors))
+
+    def test_eval_results_power_verdict_outside_the_enum_fails(self) -> None:
+        state = {
+            "eval_results": {
+                "composite_score": 0.85,
+                "grade": "B",
+                "per_test": [{"test_id": "t", "score": 0.85, "status": "pass"}],
+                "actionable_failures": 0,
+                "power_verdict": "pass",
+            },
+        }
+        self.assertFalse(validate_handoff(state, "eval_results").valid)
 
     def test_eval_results_score_out_of_range(self) -> None:
         state = {
@@ -364,6 +392,7 @@ class TestValidateHandoff(unittest.TestCase):
                 "grade": "A",
                 "per_test": [{"test_id": "t", "score": 0.5, "status": "pass"}],
                 "actionable_failures": 0,
+                "power_verdict": "powered",
             },
         }
         result = validate_handoff(state, "eval_results")
@@ -376,6 +405,7 @@ class TestValidateHandoff(unittest.TestCase):
                 "grade": "F",
                 "per_test": [],
                 "actionable_failures": 0,
+                "power_verdict": "powered",
             },
         }
         result = validate_handoff(state, "eval_results")
@@ -448,6 +478,7 @@ class TestValidateStep(unittest.TestCase):
                 "grade": "B",
                 "per_test": [{"test_id": "t", "score": 0.8, "status": "pass"}],
                 "actionable_failures": 0,
+                "power_verdict": "powered",
             },
         }
         results = validate_step(state, "phase1_evaluate")
@@ -508,6 +539,7 @@ class TestValidateStep(unittest.TestCase):
                 "grade": "A",
                 "per_test": [{"test_id": "t", "score": 0.9, "status": "pass"}],
                 "actionable_failures": 0,
+                "power_verdict": "improved",
             },
         }
         results = validate_step(state, "phase3_reevaluate")
