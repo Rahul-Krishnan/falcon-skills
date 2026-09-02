@@ -7,7 +7,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from check_overfit import check_overfit, classify_item  # noqa: E402
+from check_overfit import (  # noqa: E402
+    MARKDOWN_SYNTAX_CHARS,
+    check_overfit,
+    classify_item,
+)
 
 ARTIFACT = (
     "# Demo Skill\n"
@@ -608,3 +612,69 @@ class TestMixedCharacterMarkdownIsGeneric(unittest.TestCase):
 
     def test_non_ascii_decoration_is_still_a_lift(self):
         self.assertEqual(self._vocabulary("▓▒░"), 1)
+
+
+class TestEveryExemptCharacterReachesTheExemption(unittest.TestCase):
+    """r4-B1. Third appearance of the denominator-dilution exploit, and the
+    first test written against the whole exempt set rather than one example.
+
+    `MARKUP_ANCHOR`/`BARE_MARKUP` used `[^\\w\\s]`, which never matches `_`
+    because `\\w` counts it as a word character. So `___` -- a markdown
+    horizontal rule, and `_` is a MARKDOWN_SYNTAX_CHARS member -- reached
+    neither pattern, never reached `_is_generic_markdown`, and was classified
+    `outcome`. 17 of them dropped a ratio-1.0 criteria set to 0.1053 and
+    cleared Step 6a's mandatory gate on no evidence.
+
+    Two earlier fixes each closed one door on this exploit and left another
+    open, so this asserts the property per character, driven off the set
+    itself: a character added to MARKDOWN_SYNTAX_CHARS that the patterns
+    cannot reach fails here rather than at the gate."""
+
+    ARTIFACT = (
+        "# Title\n\nRun validate_handoff then gate_compliance.\n\n"
+        "## Section\n\n---\n\n___\n\n**bold**\n\n| a | b |\n|---|---|\n"
+    )
+
+    def _report(self, present):
+        criteria = {"skill_name": "x", "test_cases": [
+            {"id": "t1", "required_present": present},
+        ]}
+        return check_overfit(criteria, self.ARTIFACT, "x", 0.34)
+
+    def test_each_syntax_character_is_exempt_alone_and_as_a_run(self):
+        for char in sorted(MARKDOWN_SYNTAX_CHARS):
+            for anchor in (char, char * 2, char * 3):
+                report = self._report(["validate_handoff", anchor])
+                self.assertEqual(
+                    report["items_exempt_generic_markdown"], 1, repr(anchor)
+                )
+                self.assertEqual(report["items_classified"], 1, repr(anchor))
+
+    def test_no_syntax_character_can_dilute_the_ratio(self):
+        bare = self._report(["validate_handoff", "gate_compliance"])
+        self.assertEqual(bare["verdict"], "overfitted")
+        for char in sorted(MARKDOWN_SYNTAX_CHARS):
+            padded = self._report(
+                ["validate_handoff", "gate_compliance"] + [char * 3] * 17
+            )
+            self.assertEqual(padded["verdict"], "overfitted", repr(char))
+            self.assertEqual(
+                padded["overfit_ratio"], bare["overfit_ratio"], repr(char)
+            )
+
+    def test_underscore_runs_are_the_reported_exploit(self):
+        padded = self._report(
+            ["validate_handoff", "gate_compliance"] + ["___"] * 17
+        )
+        self.assertEqual(padded["items_classified"], 2)
+        self.assertEqual(padded["items_exempt_generic_markdown"], 17)
+        self.assertEqual(padded["overfit_ratio"], 1.0)
+
+    def test_a_character_outside_the_set_still_scores(self):
+        # The exemption is the set, not "anything wordless". Decoration is
+        # artifact-specific, so it stays in the scored set and is tested for
+        # a lift like any other anchor.
+        report = self._report(["validate_handoff", "▓▒░"])
+        self.assertEqual(report["items_exempt_generic_markdown"], 0)
+        self.assertEqual(report["items_classified"], 2)
+

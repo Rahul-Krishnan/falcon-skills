@@ -182,10 +182,26 @@ def min_discordant_for_alpha(alpha: float = ALPHA) -> int:
     return n
 
 
+def _id_of(entry: dict, keys: tuple[str, ...]) -> str | None:
+    """The first of `keys` carrying a non-null value, as the string ids pair on.
+
+    "Non-null", not "truthy": an integer id `0` is an id, and an `or` chain
+    over the key names drops it. `_case_id` had that fixed and `_scores_by_id`
+    reintroduced it on the results.json fallback path, so `"test_id": 0` was
+    counted by sizing and silently unpaired by the comparison, missing from
+    `paired_cases` and from both unpaired lists. One resolver, so the two
+    cannot disagree about what an id is again.
+    """
+    for key in keys:
+        raw = entry.get(key)
+        if raw is not None:
+            return str(raw)
+    return None
+
+
 def _case_id(case: dict) -> str | None:
     """The case's id as the string compare mode pairs on, or None if absent."""
-    raw = case.get("id")
-    return None if raw is None else str(raw)
+    return _id_of(case, ("id",))
 
 
 def _profile_of(case: dict) -> str:
@@ -341,7 +357,7 @@ def _scores_by_id(results: dict) -> dict[str, float]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        test_id = entry.get("test_id") or entry.get("id") or entry.get("name")
+        test_id = _id_of(entry, ("test_id", "id", "name"))
         # Composite first (Phase 2 decides on it), and two separate lookups:
         # a `get` default misses `"score": null`, which hone_common emits when
         # the judge errored, silently dropping the pair.
@@ -351,7 +367,7 @@ def _scores_by_id(results: dict) -> dict[str, float]:
         if test_id is None or raw is None:
             continue
         try:
-            scores[str(test_id)] = float(raw)
+            scores[test_id] = float(raw)
         except (TypeError, ValueError):
             continue
     return scores
@@ -427,7 +443,13 @@ def check_compare(before: dict, after: dict, alpha: float,
     scorers_disagree = (
         before_source and after_source and before_source != after_source
     )
-    no_baseline = not shared and bool(recovered) and not unpaired_after
+    # `unpaired_after` deliberately does NOT gate this. It used to, and one
+    # genuinely new case in the after round was then enough to hand a
+    # collapsed baseline back to the generic mismatch message below ("check
+    # that both paths name rounds of the same criteria set"), the precise
+    # misdirection this branch exists to prevent, since the ids in `recovered`
+    # do match. New after-only ids are named in the message instead.
+    no_baseline = not shared and bool(recovered)
     # Two judge files agree on a scorer, not on the measurement Phase 2 acts
     # on; this used to reach `improved` exit 0 without naming the scorer.
     judge_only = before_source == after_source == "results"
@@ -467,12 +489,17 @@ def check_compare(before: dict, after: dict, alpha: float,
         # Mirror image of `collapsed`: the ids match, the baseline produced no
         # evidence. The mismatch message below sent the agent to check paths.
         verdict = "not_measurable"
+        also_new = (
+            f" A further {len(unpaired_after)} case(s) {unpaired_after} are "
+            "new in --after and have no baseline either." if unpaired_after else ""
+        )
         errors.append(
-            f"0 paired test case(s): all {len(recovered)} case(s) that scored "
-            f"in --after {recovered} were inconclusive in --before, so there "
-            "is no baseline to compare against. The test ids match; the "
-            "before round produced no scorable evidence. Re-run the before "
-            "round, or treat this round as the new baseline"
+            f"0 paired test case(s): all {len(recovered)} case(s) the before "
+            f"round knows and --after scored {recovered} were inconclusive in "
+            f"--before, so there is no baseline to compare against.{also_new} "
+            "Those test ids match; the before round produced no scorable "
+            "evidence. Re-run the before round, or treat this round as the "
+            "new baseline"
         )
     elif not shared:
         # Zero pairs is a pairing failure, and reporting it as `underpowered`

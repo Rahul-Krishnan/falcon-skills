@@ -1007,11 +1007,28 @@ class TestAMissingBaselineIsNamedAsSuch(unittest.TestCase):
         self.assertFalse(any("no baseline" in w for w in report["warnings"]))
 
     def test_a_genuine_id_mismatch_still_reads_as_one(self):
-        before = _deterministic({}, inconclusive=["t0"])
-        after = _deterministic({"t0": 0.9, "other": 0.9})
+        # Nothing recovered: the before round scored ids the after round has
+        # never heard of, which really is a pairing failure.
+        before = _deterministic({"t0": 0.4})
+        after = _deterministic({"other": 0.9})
         report = check_compare(before, after, 0.05, "deterministic", "deterministic")
         self.assertIn("no test id is present in both rounds", report["errors"][0])
-        self.assertTrue(any("inconclusive in --before" in w for w in report["warnings"]))
+
+    def test_one_new_after_case_does_not_suppress_the_diagnosis(self):
+        # r4-N1. `no_baseline` was gated on `not unpaired_after`, so a single
+        # genuinely new case in the after round handed a collapsed baseline
+        # back to the generic mismatch text, sending the agent to check paths
+        # and test ids that match. The new id is a second fact about the same
+        # round, so it is named rather than allowed to change the diagnosis.
+        before = _deterministic({}, inconclusive=[f"t{i}" for i in range(5)])
+        after = _deterministic({f"t{i}": 0.9 for i in range(5)} | {"new1": 0.9})
+        report = check_compare(before, after, 0.05, "deterministic", "deterministic")
+        self.assertEqual(report["verdict"], "not_measurable")
+        error = report["errors"][0]
+        self.assertIn("no baseline", error)
+        self.assertNotIn("no test id is present in both rounds", error)
+        self.assertIn("new1", error)
+        self.assertIn("new in --after", error)
 
 
 class TestIdsAreComparedAsStrings(unittest.TestCase):
@@ -1110,6 +1127,43 @@ class TestPhase3ReScoreUsesTheBaselineArtifact(unittest.TestCase):
         self.assertIn("--fix-only", step3a)
         self.assertIn("--artifact-type {artifact_type} --json", step3a)
         self.assertIn("round 2", step3a)
+
+
+class TestFalsyIdsSurviveTheResultsFallback(unittest.TestCase):
+    """r4-N2. `_scores_by_id` resolved the id with an `or` chain over
+    `test_id`/`id`/`name`, which drops an integer `0`. `check_sizing._case_id`
+    already handled that case deliberately, so a round carrying `"test_id": 0`
+    was counted by sizing and silently unpaired by the comparison: the pair
+    vanished from `paired_cases` and appeared in neither unpaired list, which
+    is the one report that would have surfaced it."""
+
+    def test_an_integer_zero_id_pairs(self):
+        before = {"test_results": [{"test_id": 0, "score": 0.4},
+                                   {"test_id": 1, "score": 0.4}]}
+        after = {"test_results": [{"test_id": 0, "score": 0.9},
+                                  {"test_id": 1, "score": 0.9}]}
+        report = check_compare(before, after, 0.05, "deterministic", "deterministic")
+        self.assertEqual(report["paired_cases"], 2)
+        self.assertEqual(report["unpaired_before"], [])
+        self.assertEqual(report["unpaired_after"], [])
+        self.assertIn("0", [m["test_id"] for m in report["movements"]])
+
+    def test_the_fallback_keys_agree_with_case_id(self):
+        # Same rule on every key the fallback tries: present-and-not-null wins,
+        # so `id: 0` is not passed over for a `name` further down the chain.
+        for key in ("test_id", "id", "name"):
+            before = {"test_results": [{key: 0, "score": 0.4}]}
+            after = {"test_results": [{key: 0, "score": 0.9}]}
+            report = check_compare(
+                before, after, 0.05, "deterministic", "deterministic"
+            )
+            self.assertEqual(report["paired_cases"], 1, key)
+
+    def test_a_null_id_is_still_absent(self):
+        before = {"test_results": [{"test_id": None, "score": 0.4}]}
+        after = {"test_results": [{"test_id": None, "score": 0.9}]}
+        report = check_compare(before, after, 0.05, "deterministic", "deterministic")
+        self.assertEqual(report["paired_cases"], 0)
 
 
 if __name__ == "__main__":

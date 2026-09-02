@@ -189,6 +189,13 @@ Do **not** re-emit events already on disk; they survived, the resume is what did
 
 Both records matter. The `resumed` field is what makes the `resume` event *required*: the exit gate below runs `validate_gates.py` with no flags, and it reads that field to decide whether to demand the event. Setting the field and omitting the event fails the exit gate, which is the point. Do not run the gate check here — mid-run, steps are still `pending`, the derived mode is `error-halt`, and its only required event is the `workflow_exit` you have not reached yet, so it reports a failure every time. Validate at the exit gate, once, like every other run.
 
+**Resuming a state file written by an older version of this skill.** `eval_results.output_dir` and `eval_results.power_verdict` are both required by the pre-Phase-2 gate, and both arrived after some state files were already on disk. A run resumed across that boundary fails `validate_handoff.py --all` with `required field missing` on one or the other. That is the gate working; migrate the record rather than deleting fields from the schema:
+
+- **`output_dir` missing** — set it to the directory holding that round's `results.json` and `deterministic_scores.json`. It is a **directory**, not the path to `results.json`; the older meaning was the file. An old value pointing at the file is reported as `expected a directory, got a path to a file`, because Phase 3 step 3a appends to it (`$PRIOR_OUTPUT_DIR/deterministic_scores.json`) and a file path there resolves to nothing. Keep the file path in `results_path`.
+- **`power_verdict` missing** — run `scripts/check_eval_power.py` over that round's `output_dir` and record its top-level `verdict`. A round with no earlier round to compare against records the Step 6b sizing verdict (`powered` or `underpowered`) instead.
+
+`validate_handoff.py` prints both remedies with the failure, so the state file is the only thing you need in hand.
+
 **Recovering RUN_ID after compaction:** the timestamp is not reconstructible from memory, so do not try to recompute it. Recover the path by globbing for the most recent match:
 ```bash
 STATE_FILE=$(ls -t /tmp/workflow-hone-{name}-*.json 2>/dev/null | head -1)

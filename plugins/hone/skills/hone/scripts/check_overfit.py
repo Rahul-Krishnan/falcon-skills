@@ -123,18 +123,27 @@ JS_TECHNOLOGY_NAMES = frozenset({
 
 WORD = re.compile(r"[a-z0-9]+")
 
+# "Wordless" is no letters and no digits. Deliberately not `\W`, because `\w`
+# counts `_` as a word character and `_` is a MARKDOWN_SYNTAX_CHARS member
+# (`___` is a horizontal rule): under `[^\w\s]` an underscore run matched
+# neither pattern below, never reached `_is_generic_markdown`, and was
+# classified `outcome`, so 17 `"___"` anchors dropped a ratio-1.0 criteria
+# set to 0.1053. Spelled out rather than borrowed from `\w` so it cannot
+# drift from MARKDOWN_SYNTAX_CHARS again.
+WORDLESS_CHAR = r"[^0-9A-Za-z\s]"
+
 # Bare markup (`##`, `---`) carries no words at all, so the word-sequence test
 # below can never see it; it is matched as a raw substring instead. Identifier
 # anchors (`validate_handoff`, `gate-compliance`) need no special case: they
 # normalise to two or more words and the word-sequence test catches them,
 # including across a separator swap between the anchor and the artifact.
-MARKUP_ANCHOR = re.compile(r"^[^\w\s]{2,}$")
+MARKUP_ANCHOR = re.compile(rf"^{WORDLESS_CHAR}{{2,}}$")
 
 # Any wordless anchor, one character included. MARKUP_ANCHOR's two-character
 # floor is the lift test's collision guard; the exemption in _collect_items
 # needs none, since a lone `#` is markdown syntax as much as `##` and, left
 # in the scored set, pads the denominator.
-BARE_MARKUP = re.compile(r"^[^\w\s]+$")
+BARE_MARKUP = re.compile(rf"^{WORDLESS_CHAR}+$")
 
 # Characters that carry markdown structure rather than content. A bare-markup
 # anchor that is a run of a single one of them (`##`, `---`, ```` ``` ````) is
@@ -153,6 +162,24 @@ BARE_MARKUP = re.compile(r"^[^\w\s]+$")
 # counts as a lift. An exempt anchor leaves the scored set entirely (see
 # _collect_items), so widening the exemption cannot dilute the ratio.
 MARKDOWN_SYNTAX_CHARS = frozenset("#-*_`>|+~=:<!")
+
+# Every character the set claims must be able to REACH the exemption, which
+# sits behind BARE_MARKUP: a character MARKDOWN_SYNTAX_CHARS names and
+# BARE_MARKUP rejects is exempt in name only, and anchors built from it pad
+# the denominator instead of leaving the scored set. That gap is how `_`
+# reopened the dilution exploit after two fixes each closed one door, so
+# widening the set past what WORDLESS_CHAR admits fails here at import rather
+# than silently at the gate a phase later. test_check_overfit.py asserts the
+# same property end to end, once per character.
+_UNREACHABLE_SYNTAX_CHARS = sorted(
+    char for char in MARKDOWN_SYNTAX_CHARS if not BARE_MARKUP.match(char)
+)
+if _UNREACHABLE_SYNTAX_CHARS:
+    raise AssertionError(
+        "MARKDOWN_SYNTAX_CHARS members cannot reach the generic-markdown "
+        f"exemption through BARE_MARKUP: {_UNREACHABLE_SYNTAX_CHARS}. Widen "
+        "WORDLESS_CHAR to admit them, or drop them from the set."
+    )
 
 # The skill-name rule fires on a bare name only when the name is itself
 # distinctive (multi-segment, like `temper-rework`: no English sentence

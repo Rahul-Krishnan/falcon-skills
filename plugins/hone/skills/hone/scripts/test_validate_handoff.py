@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from validate_handoff import (
     HANDOFF_SCHEMAS,
+    ROUND_SCORES_SCHEMA,
     STEP_CONTRACTS,
     validate_all,
     validate_fields,
@@ -1240,6 +1241,115 @@ class TestRoundScoresHaveASchema(unittest.TestCase):
                 text=True,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class TestPreMigrationStateFilesGetAMigrationPath(unittest.TestCase):
+    """r4-S1. `eval_results.output_dir` went optional -> required-non-empty and
+    `power_verdict` was added as required, so a state file written before this
+    change and resumed after it (SKILL.md's resume protocol keeps runs alive
+    across sessions) hard-stops at the mandatory pre-Phase-2 gate. The stop is
+    correct; a stop that says only "required field missing" is a dead end."""
+
+    PRE_MIGRATION = {
+        "results_path": "/tmp/skill-eval/demo/baseline/results.json",
+        "composite_score": 0.71,
+        "grade": "B",
+        "per_test": [{"test_id": "t1", "score": 0.71, "status": "pass"}],
+        "actionable_failures": 0,
+    }
+
+    def _messages(self, record):
+        result = validate_handoff({"eval_results": record}, "eval_results")
+        self.assertFalse(result.valid)
+        return {e.path: e.message for e in result.errors}
+
+    def test_both_new_required_fields_name_their_migration(self) -> None:
+        messages = self._messages(self.PRE_MIGRATION)
+        output_dir = messages["eval_results.output_dir"]
+        self.assertIn("required field missing", output_dir)
+        self.assertIn("Migration:", output_dir)
+        self.assertIn("results_path", output_dir)
+        verdict = messages["eval_results.power_verdict"]
+        self.assertIn("required field missing", verdict)
+        self.assertIn("check_eval_power.py", verdict)
+
+    def test_the_old_output_dir_meaning_is_rejected_not_accepted(self) -> None:
+        # Pre-change, `output_dir` held the path to results.json. That value is
+        # a legal non-empty string, so without the directory check it validated
+        # clean here and Phase 3 step 3a then resolved
+        # `.../results.json/deterministic_scores.json`, a path that cannot
+        # exist, reading the baseline as absent with nothing on stderr.
+        record = dict(
+            self.PRE_MIGRATION,
+            output_dir="/tmp/skill-eval/demo/baseline/results.json",
+            power_verdict="powered",
+        )
+        message = self._messages(record)["eval_results.output_dir"]
+        self.assertIn("expected a directory", message)
+        self.assertIn("Migration:", message)
+
+    def test_a_directory_value_passes(self) -> None:
+        record = dict(
+            self.PRE_MIGRATION,
+            output_dir="/tmp/skill-eval/demo/baseline",
+            power_verdict="powered",
+        )
+        result = validate_handoff({"eval_results": record}, "eval_results")
+        self.assertTrue(result.valid, [e.message for e in result.errors])
+
+    def test_round_scores_carries_the_same_migration(self) -> None:
+        record = {
+            "output_dir": "/tmp/skill-eval/demo/reeval-1/results.json",
+            "composite_score": 0.82,
+            "per_test": [{"test_id": "t", "score": 0.82, "status": "pass"}],
+            "power_verdict": "improved",
+        }
+        result = validate_handoff({"round_2_scores": record}, "round_2_scores")
+        self.assertFalse(result.valid)
+        self.assertIn("expected a directory", result.errors[0].message)
+
+
+class TestSchemaListingsMatchWhatHandoffAccepts(unittest.TestCase):
+    """r4-N3. `--list-schemas` and the unknown-name error both printed
+    `round_scores` as a valid `--handoff` name, but `_schema_name` rejects it
+    by design, so `--handoff round_scores` exits 2. Only `main()`'s message
+    carried the clarifying parenthetical."""
+
+    def _cli(self, *args):
+        import json
+        import subprocess
+        import tempfile
+
+        script = str(Path(__file__).parent / "validate_handoff.py")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_path = Path(tmp_dir) / "state.json"
+            state_path.write_text(json.dumps({}))
+            return subprocess.run(
+                [sys.executable, script, str(state_path), *args],
+                capture_output=True,
+                text=True,
+            )
+
+    def test_list_schemas_says_how_round_scores_is_addressed(self) -> None:
+        out = self._cli("--list-schemas").stdout
+        line = next(
+            l for l in out.splitlines() if l.strip().startswith(ROUND_SCORES_SCHEMA)
+        )
+        self.assertIn("round_<N>_scores", line)
+
+    def test_the_unknown_name_error_says_the_same_thing(self) -> None:
+        result = self._cli("--handoff", ROUND_SCORES_SCHEMA)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("round_<N>_scores", result.stderr)
+
+    def test_every_listed_name_except_the_template_is_addressable(self) -> None:
+        for name in sorted(HANDOFF_SCHEMAS):
+            if name == ROUND_SCORES_SCHEMA:
+                continue
+            result = validate_handoff({}, name)
+            self.assertNotIn(
+                "unknown handoff schema", result.errors[0].message, name
+            )
 
 
 if __name__ == "__main__":
