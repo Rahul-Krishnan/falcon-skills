@@ -592,9 +592,10 @@ class TestSizingOverridesAreStated(unittest.TestCase):
 
 
 class TestArtifactTypeScopesTheProfileExclusion(unittest.TestCase):
-    """score_execution.py's `hook` and `script` branches never consult
-    `test_profile`, so excluding `knowledge_extraction` there reported a fully
-    pairable suite `underpowered` with a warning that was false."""
+    """score_execution.py's `hook` and `script` branches score the same
+    dimensions for every profile (the profile only moves the critical-dim cap),
+    so excluding `knowledge_extraction` there reported a fully pairable suite
+    `underpowered` with a warning that was false."""
 
     CRITERIA = {"test_cases": [
         {"id": f"TC-{i}", "test_profile": "knowledge_extraction"}
@@ -1032,8 +1033,9 @@ class TestIdsAreComparedAsStrings(unittest.TestCase):
 
 
 class TestProfileDiversityIsNotAskedOfHooksAndScripts(unittest.TestCase):
-    """The hook and script scoring paths never read test_profile, so the
-    min-profiles warning pointed those suites at a remedy that changes nothing."""
+    """The hook and script scoring paths score the same dimensions for every
+    profile, so the min-profiles warning pointed those suites at a remedy that
+    changes no measured property."""
 
     CASES = [{"id": f"t{i}"} for i in range(5)]
 
@@ -1064,6 +1066,50 @@ class TestResultsFallbackSharesHoneCommonsShape(unittest.TestCase):
             "test_results": [{"test_id": "b", "score": 0.1}],
         })
         self.assertEqual(scores, {"a": 0.5})
+
+
+
+class TestPhase3ReScoreUsesTheBaselineArtifact(unittest.TestCase):
+    """r3-B1 / r3-S2 / r3-S3. The Phase 3 criteria-change re-score feeds this
+    script's `--before`. It once passed the post-Phase-2 `--artifact-path`, so
+    a heading Phase 2 added was counted as a step the baseline skipped and the
+    sign test credited a measurement change to the artifact; it rewrote the
+    deterministic file 3a reads without giving step 5's per-dimension check
+    the same adjusted baseline; and it named a Phase 1 baseline that a
+    `--fix-only` run never writes. These pin the doc's contract, since the
+    reproduction lives in score_execution.py's artifact-derived dimensions."""
+
+    DOC = Path(__file__).parent.parent / "references" / "phase3-reevaluation.md"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = cls.DOC.read_text(encoding="utf-8")
+
+    def _rescore_lines(self):
+        return [
+            line for line in self.text.splitlines()
+            if "score_execution.py" in line and "$PRIOR_OUTPUT_DIR/results.json" in line
+        ]
+
+    def test_the_prior_round_is_rescored_against_the_pre_edit_snapshot(self):
+        lines = self._rescore_lines()
+        self.assertTrue(lines, "no prior-round re-score command in the doc")
+        for line in lines:
+            self.assertIn("--artifact-path {artifact_before_snapshot}", line)
+            self.assertNotIn("--artifact-path {artifact_path}", line)
+
+    def test_the_regression_check_reads_the_adjusted_baseline(self):
+        self.assertIn("baseline_adjusted", self.text)
+        step5 = self.text[self.text.index("5. **Regression check"):]
+        step5 = step5[:step5.index("6. Write this round")]
+        self.assertIn("baseline_adjusted", step5)
+
+    def test_a_fix_only_first_round_runs_sizing_only(self):
+        step3a = self.text[self.text.index("3a. **Power verdict"):]
+        step3a = step3a[:step3a.index("4. Compare scores")]
+        self.assertIn("--fix-only", step3a)
+        self.assertIn("--artifact-type {artifact_type} --json", step3a)
+        self.assertIn("round 2", step3a)
 
 
 if __name__ == "__main__":

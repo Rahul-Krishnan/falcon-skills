@@ -35,8 +35,10 @@ denominator, so the gate could be cleared by adding more recitation checks.
 Both anchor tests carry a collision guard, because an anchor that matches the
 artifact by accident is not recitation. MIN_ANCHOR_WORDS is the guard on the
 word side; MARKDOWN_SYNTAX_CHARS is its twin on the markup side, exempting
-generic markdown syntax (`##`, `---`) that every markdown artifact contains by
-construction.
+generic markdown syntax (`##`, `---`, `|---|`) that every markdown artifact
+contains by construction. Exempt anchors of either kind leave the denominator,
+the way `required_absent` entries do; classifying them `outcome` let a set be
+padded to `within_threshold` with `##`/`---`/`**`.
 
 `required_absent` lists are exempt by construction. They assert the artifact's
 own vocabulary must NOT appear in output, which is the opposite failure mode
@@ -87,8 +89,16 @@ DEFAULT_MAX_OVERFIT_RATIO = 0.34
 # produced `invokeing` and never matched `called`), and allows one name token
 # between the article and `skill` so `calls the /hone skill` is caught
 # (only after `the` or with a leading slash, so `calls their skill set` is not).
+#
+# The script rule is split by extension. `.py` and `.sh` names are scripts
+# whatever their case. `.js` is also how JavaScript technologies are spelled
+# (`Node.js`, `Next.js`, `vue.js`), and a check that says "a valid Node.js
+# project" is an outcome check about the deliverable, not a recitation of a
+# bundled script; matching it pushed every JS-oriented suite over the
+# threshold with nothing legitimately rewritable. So a `.js` name counts only
+# when it is lowercase and is not a well-known runtime or framework.
 TECHNIQUE_PATTERNS = (
-    (re.compile(r"\b[a-z_][a-z0-9_]*\.(?:py|sh|js)\b", re.I), "names a bundled script"),
+    (re.compile(r"\b[a-z_][a-z0-9_]*\.(?:py|sh)\b", re.I), "names a bundled script"),
     (re.compile(r"\b(?:phase|step|stage)\s+\d+[a-z]?\b", re.I), "names a numbered workflow position"),
     (re.compile(
         r"\b(?:invok(?:e|ed|es|ing)|call(?:s|ed|ing)?|us(?:e|ed|es|ing)"
@@ -98,6 +108,19 @@ TECHNIQUE_PATTERNS = (
     ), "rewards invoking the skill"),
 )
 
+# Lowercase `.js` names, filtered against JS_TECHNOLOGY_NAMES at match time.
+# Case-sensitive: `Node.js` in prose is a proper noun, not a bundled script.
+JS_SCRIPT = re.compile(r"\b[a-z_][a-z0-9_]*\.js\b")
+
+# Runtimes and frameworks conventionally spelled with `.js`; the ones a
+# deliverable description names ("a valid node.js project"), not every library.
+JS_TECHNOLOGY_NAMES = frozenset({
+    "node", "next", "nuxt", "vue", "react", "angular", "ember", "svelte",
+    "express", "three", "d3", "p5", "chart", "moment", "backbone", "knockout",
+    "meteor", "alpine", "preact", "pixi", "babylon", "socket", "hapi", "koa",
+    "nest", "gatsby", "remix", "astro", "solid", "qwik", "lit", "stimulus",
+})
+
 WORD = re.compile(r"[a-z0-9]+")
 
 # Bare markup (`##`, `---`) carries no words at all, so the word-sequence test
@@ -106,6 +129,12 @@ WORD = re.compile(r"[a-z0-9]+")
 # normalise to two or more words and the word-sequence test catches them,
 # including across a separator swap between the anchor and the artifact.
 MARKUP_ANCHOR = re.compile(r"^[^\w\s]{2,}$")
+
+# Any wordless anchor, one character included. MARKUP_ANCHOR's two-character
+# floor is the lift test's collision guard; the exemption in _collect_items
+# needs none, since a lone `#` is markdown syntax as much as `##` and, left
+# in the scored set, pads the denominator.
+BARE_MARKUP = re.compile(r"^[^\w\s]+$")
 
 # Characters that carry markdown structure rather than content. A bare-markup
 # anchor that is a run of a single one of them (`##`, `---`, ```` ``` ````) is
@@ -117,9 +146,13 @@ MARKUP_ANCHOR = re.compile(r"^[^\w\s]{2,}$")
 # flagging the collision inflates the very ratio being gated. Without it the
 # rule flagged `"##"`, which phase1-evaluation.md recommends as the minimal
 # structural check, so the classifier reported the practice its own docs
-# prescribe as recitation. A mixed or non-structural run (`▓▒░`, `>>>|<<<`) is
-# artifact-specific decoration and still counts as a lift.
-MARKDOWN_SYNTAX_CHARS = frozenset("#-*_`>|+~=")
+# prescribe as recitation. The set covers the characters markdown builds
+# tables, rules, arrows, comments and emphasis from, so mixed-character
+# structure (`|---|`, `|:--|`, `->`, `<!--`) is exempt as well as a run of
+# one. Decoration outside the set (`▓▒░`) is artifact-specific and still
+# counts as a lift. An exempt anchor leaves the scored set entirely (see
+# _collect_items), so widening the exemption cannot dilute the ratio.
+MARKDOWN_SYNTAX_CHARS = frozenset("#-*_`>|+~=:<!")
 
 # The skill-name rule fires on a bare name only when the name is itself
 # distinctive (multi-segment, like `temper-rework`: no English sentence
@@ -163,10 +196,15 @@ def _contains_phrase(haystack: list[str], phrase: list[str]) -> bool:
 def _is_generic_markdown(stripped: str) -> bool:
     """Is this bare-markup anchor markdown syntax rather than artifact wording?
 
-    True for a run of one structural character (`##`, `---`, `>>`). See
-    MARKDOWN_SYNTAX_CHARS for why those are exempt.
+    True when every character is a structural one (`##`, `---`, `|---|`,
+    `->`, `<!--`). See MARKDOWN_SYNTAX_CHARS for why those are exempt. The
+    earlier test, a run of ONE structural character, exempted `---` and then
+    flagged the table separator `|---|` built from the same characters, so a
+    hand-written "outputs a table" check against any artifact with a table in
+    it was reported as a verbatim lift. Non-ASCII decoration (`▓▒░`) shares no
+    character with the set and stays a lift.
     """
-    return len(set(stripped)) == 1 and stripped[0] in MARKDOWN_SYNTAX_CHARS
+    return bool(stripped) and set(stripped) <= MARKDOWN_SYNTAX_CHARS
 
 
 def _anchor_lift(stripped: str, artifact_text: str,
@@ -197,6 +235,19 @@ def _anchor_lift(stripped: str, artifact_text: str,
     return ""
 
 
+def _names_a_js_script(text: str) -> str:
+    """The first lowercase `.js` script named in `text`, or "" if none is.
+
+    See JS_SCRIPT and JS_TECHNOLOGY_NAMES for why this is not a third entry
+    in TECHNIQUE_PATTERNS.
+    """
+    for match in JS_SCRIPT.finditer(text):
+        stem = match.group(0)[:-3]
+        if stem not in JS_TECHNOLOGY_NAMES:
+            return match.group(0)
+    return ""
+
+
 def _names_the_artifact(text: str, skill_name: str) -> bool:
     """Does `text` reference the artifact under test, rather than use a word?"""
     if not skill_name:
@@ -204,9 +255,14 @@ def _names_the_artifact(text: str, skill_name: str) -> bool:
     name = re.escape(skill_name)
     if "-" in skill_name or "_" in skill_name:
         return bool(re.search(rf"\b{name}\b", text, re.I))
-    # Single-word name: require a marker that the word is the artifact.
+    # Single-word name: require a marker that the word is the artifact. The
+    # slash form is the skill-invocation spelling, so it must stand alone: a
+    # `/forge` that is a segment of a longer path (`~/forge/output.md`,
+    # `src/forge/cli`) is a directory the skill happens to share a name with,
+    # and matching it there flagged every outcome check that named the
+    # skill's own output paths.
     patterns = (
-        rf"/{name}\b",                                   # /forge
+        rf"(?<![\w.~/])/{name}\b(?![\w./-])",            # /forge, not ~/forge/x
         rf"`{name}`",                                    # `forge`
         rf"\b(?:{NAME_CONTEXT_WORDS})\s+(?:the\s+)?{name}\b",   # ran forge
         rf"\b{name}\s+(?:{NAME_CONTEXT_WORDS})\b",       # forge skill
@@ -239,6 +295,11 @@ def classify_item(text: str, artifact_ngrams: set, skill_name: str,
             label = "technique"
             reasons.append(f"{why}: '{match.group(0)}'")
 
+    js_script = _names_a_js_script(text)
+    if js_script:
+        label = "technique"
+        reasons.append(f"names a bundled script: '{js_script}'")
+
     if _names_the_artifact(text, skill_name):
         label = "technique"
         reasons.append(f"names the artifact under test: '{skill_name}'")
@@ -260,8 +321,8 @@ def classify_item(text: str, artifact_ngrams: set, skill_name: str,
     return {"text": text, "class": label, "reasons": reasons}
 
 
-def _collect_items(criteria: dict) -> tuple[list[dict], int]:
-    """Return (scored items, count of exempt `required_absent` entries).
+def _collect_items(criteria: dict) -> tuple[list[dict], int, int]:
+    """Return (scored items, exempt `required_absent` count, exempt markdown count).
 
     Each item carries where it came from as well as what it says. Step 6a
     tells the agent to rewrite the flagged items, and a flagged item with no
@@ -273,21 +334,42 @@ def _collect_items(criteria: dict) -> tuple[list[dict], int]:
     `literal_anchor` travels with the item because `required_present` entries
     are literal match anchors and the rest are prose; they need different lift
     tests. See classify_item.
+
+    A generic-markdown anchor (`##`, `---`) is exempt the same way a
+    `required_absent` entry is: it leaves the scored set here, before
+    classification, rather than being classified `outcome`. Labelling it
+    `outcome` put it in the denominator, and a denominator that grows on
+    `required_present: ["#", "##", "---", "**"]` is the dilution exploit the
+    anchor rule exists to close, reopened on the one anchor shape the rule
+    exempts.
     """
     items: list[dict] = []
     exempt = 0
+    exempt_markdown = 0
     for index, case in enumerate(criteria.get("test_cases") or []):
         if not isinstance(case, dict):
             continue
         # An integer id 0 is an id, not a missing one; it is stringified so
         # the flagged entry names the case the way compare mode pairs it.
         case_id = str(case["id"]) if case.get("id") is not None else f"test_cases[{index}]"
-        exempt += len(case.get("required_absent") or [])
-        for slot, present in enumerate(case.get("required_present") or []):
-            if isinstance(present, str):
-                items.append({"text": present, "literal_anchor": True,
-                              "case_id": case_id,
-                              "location": f"required_present[{slot}]"})
+        absent = case.get("required_absent")
+        exempt += len(absent) if isinstance(absent, list) else 0
+        # A string here is malformed, not a one-anchor list: iterated, each
+        # character became an `outcome` item and sixteen of them cleared the
+        # gate at 0.0 (Step 6a runs before the Step 8 validate gate).
+        present_list = case.get("required_present")
+        if not isinstance(present_list, list):
+            present_list = []
+        for slot, present in enumerate(present_list):
+            if not isinstance(present, str):
+                continue
+            stripped = present.strip()
+            if BARE_MARKUP.match(stripped) and _is_generic_markdown(stripped):
+                exempt_markdown += 1
+                continue
+            items.append({"text": present, "literal_anchor": True,
+                          "case_id": case_id,
+                          "location": f"required_present[{slot}]"})
         for slot, check in enumerate(case.get("checks") or []):
             if not isinstance(check, dict):
                 continue
@@ -299,12 +381,17 @@ def _collect_items(criteria: dict) -> tuple[list[dict], int]:
             rubric = check.get("rubric")
             if isinstance(rubric, dict):
                 # Only the top band matters: it defines what scoring well means.
-                top = max(rubric, key=lambda k: _as_int(k), default=None)
+                # Rank numeric keys only: `max` over `_as_int` tied every
+                # non-numeric key at -1 and picked by JSON key order, so
+                # `{"excellent": ..., "poor": ...}` flipped class on
+                # reserialisation. No numeric band, no item.
+                numeric = [k for k in rubric if _as_int(k) >= 0]
+                top = max(numeric, key=_as_int, default=None)
                 if top is not None and isinstance(rubric[top], str):
                     items.append({"text": rubric[top], "literal_anchor": False,
                                   "case_id": case_id,
                                   "location": f"checks[{slot}].rubric[{top}]"})
-    return items, exempt
+    return items, exempt, exempt_markdown
 
 
 def _as_int(value) -> int:
@@ -318,7 +405,7 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
                   max_ratio: float) -> dict:
     artifact_words = _normalize(artifact_text)
     artifact_ngrams = _ngrams(artifact_words, NGRAM_SIZE)
-    items, exempt = _collect_items(criteria)
+    items, exempt, exempt_markdown = _collect_items(criteria)
 
     classified = []
     for item in items:
@@ -339,8 +426,9 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
     #
     # `overfit / total` guarded with an `else 0.0` made an empty ratio
     # indistinguishable from a perfect one, so a criteria set whose cases carry
-    # only `required_absent` lists (exempt by construction) or no test cases at
-    # all cleared Step 6a's mandatory gate silently, on no evidence.
+    # only exempt entries (`required_absent` lists, generic-markdown anchors)
+    # or no test cases at all cleared Step 6a's mandatory gate silently, on no
+    # evidence.
     #
     # An empty or wordless artifact is the same hole on the other side of the
     # comparison: `_ngrams` of it is empty and `_anchor_lift` returns "" on its
@@ -370,6 +458,7 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
         "skill_name": skill_name,
         "items_classified": total,
         "items_exempt_required_absent": exempt,
+        "items_exempt_generic_markdown": exempt_markdown,
         "counts": counts,
         "overfit_ratio": ratio,
         "max_overfit_ratio": max_ratio,
@@ -453,7 +542,8 @@ def main() -> None:
         print(f"  {report['items_classified']} item(s): "
               f"{counts['outcome']} outcome, {counts['technique']} technique, "
               f"{counts['vocabulary']} vocabulary "
-              f"({report['items_exempt_required_absent']} required_absent exempt)")
+              f"({report['items_exempt_required_absent']} required_absent, "
+              f"{report['items_exempt_generic_markdown']} generic markdown exempt)")
         for item in report["flagged"]:
             # Truncate for the terminal only. The JSON carries the item whole,
             # because that is the copy the agent rewrites against.

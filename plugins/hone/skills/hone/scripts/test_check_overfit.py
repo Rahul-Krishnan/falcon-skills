@@ -461,3 +461,150 @@ class TestIntegerIdsAreIds(unittest.TestCase):
         ]}
         flagged = check_overfit(criteria, "some artifact words here", "", 0.34)["flagged"]
         self.assertEqual(flagged[0]["case_id"], "0")
+
+
+class TestExemptAnchorsLeaveTheDenominator(unittest.TestCase):
+    """r3-B2. Generic-markdown anchors were exempt from the lift test but still
+    classified `outcome` and counted in `total`, so padding `required_present`
+    with `##`/`---`/`**` diluted the ratio and flipped `overfitted` to
+    `within_threshold`: the exact exploit the anchor rule exists to close,
+    reopened on the one anchor shape it exempts."""
+
+    ARTIFACT = (
+        "# Title\n\nRun validate_handoff then gate_compliance.\n\n"
+        "## Section\n\n---\n\n**bold**\n```\ncode\n```\n"
+    )
+
+    def _report(self, present):
+        criteria = {"skill_name": "x", "test_cases": [
+            {"id": "t1", "required_present": present},
+        ]}
+        return check_overfit(criteria, self.ARTIFACT, "x", 0.34)
+
+    def test_padding_with_generic_markdown_cannot_clear_the_gate(self):
+        bare = self._report(["validate_handoff", "gate_compliance"])
+        padded = self._report(
+            ["validate_handoff", "gate_compliance", "#", "##", "---", "```", "**"]
+        )
+        self.assertEqual(bare["verdict"], "overfitted")
+        self.assertEqual(padded["verdict"], "overfitted")
+        self.assertEqual(padded["overfit_ratio"], bare["overfit_ratio"])
+
+    def test_exempt_anchors_are_counted_separately_not_as_outcome(self):
+        report = self._report(["validate_handoff", "#", "##", "---"])
+        self.assertEqual(report["items_classified"], 1)
+        self.assertEqual(report["counts"]["outcome"], 0)
+        self.assertEqual(report["items_exempt_generic_markdown"], 3)
+
+    def test_only_exempt_anchors_is_not_measurable(self):
+        report = self._report(["##", "---"])
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["items_exempt_generic_markdown"], 2)
+
+
+class TestMalformedCriteriaFieldsAreNotScored(unittest.TestCase):
+    """r3-S4. A string `required_present` was iterated character by character
+    into one-char `outcome` items (sixteen of them cleared the gate at ratio
+    0.0), and the rubric's top band was `max` over keys that all tied at -1,
+    so a non-numeric rubric picked whichever key JSON order served first."""
+
+    ARTIFACT = "Run validate_handoff now and report the result."
+
+    def test_a_string_required_present_yields_no_items(self):
+        criteria = {"skill_name": "x", "test_cases": [
+            {"id": "t1", "required_present": "validate_handoff"},
+        ]}
+        report = check_overfit(criteria, self.ARTIFACT, "x", 0.34)
+        self.assertEqual(report["items_classified"], 0)
+        self.assertEqual(report["verdict"], "not_measurable")
+
+    def test_a_string_required_absent_is_not_counted_as_exempt(self):
+        criteria = {"skill_name": "x", "test_cases": [
+            {"id": "t1", "required_absent": "phase",
+             "checks": [{"description": "Reached a correct result"}]},
+        ]}
+        report = check_overfit(criteria, self.ARTIFACT, "x", 0.34)
+        self.assertEqual(report["items_exempt_required_absent"], 0)
+
+    def test_a_rubric_with_no_numeric_band_is_skipped(self):
+        for rubric in (
+            {"excellent": "Runs Step 3 exactly", "poor": "Correct result"},
+            {"poor": "Correct result", "excellent": "Runs Step 3 exactly"},
+        ):
+            criteria = {"skill_name": "x", "test_cases": [
+                {"id": "t1", "checks": [{"description": "ok", "rubric": rubric}]},
+            ]}
+            report = check_overfit(criteria, self.ARTIFACT, "x", 0.34)
+            self.assertEqual(report["items_classified"], 1, rubric)
+            self.assertEqual(report["counts"]["technique"], 0, rubric)
+
+    def test_the_numeric_top_band_wins_regardless_of_key_order(self):
+        for rubric in (
+            {"5": "Runs Step 3 exactly", "1": "bad", "n/a": "skipped"},
+            {"n/a": "skipped", "1": "bad", "5": "Runs Step 3 exactly"},
+        ):
+            criteria = {"skill_name": "x", "test_cases": [
+                {"id": "t1", "checks": [{"description": "ok", "rubric": rubric}]},
+            ]}
+            report = check_overfit(criteria, self.ARTIFACT, "x", 0.34)
+            self.assertEqual(report["counts"]["technique"], 1, rubric)
+            self.assertEqual(report["flagged"][0]["location"], "checks[0].rubric[5]")
+
+
+class TestTechniqueRulesDoNotOverFire(unittest.TestCase):
+    """r3-S6. The script rule matched JavaScript technology names (`Node.js`)
+    as bundled scripts, and the single-word skill-name rule matched the name
+    as any path segment (`~/forge/output.md`), so a JS-oriented suite or a
+    skill whose name is a directory in its own output paths was pushed over
+    the threshold with nothing legitimately rewritable."""
+
+    def _class(self, text, name=""):
+        return classify_item(text, set(), name)["class"]
+
+    def test_a_javascript_technology_name_is_outcome(self):
+        for text in (
+            "Output is a valid Node.js project",
+            "built with vue.js and Next.js",
+            "ships a three.js scene",
+        ):
+            self.assertEqual(self._class(text), "outcome", text)
+
+    def test_a_lowercase_js_script_is_still_technique(self):
+        self.assertEqual(self._class("runs build_index.js then reports"), "technique")
+
+    def test_a_capitalised_py_script_is_still_technique(self):
+        self.assertEqual(self._class("Runs Score_Execution.py first"), "technique")
+
+    def test_the_name_as_a_path_segment_is_outcome(self):
+        for text in (
+            "writes the report to ~/forge/output.md",
+            "saved under src/forge/cli",
+            "see /forge.md",
+        ):
+            self.assertEqual(self._class(text, "forge"), "outcome", text)
+
+    def test_the_name_in_slash_form_is_still_technique(self):
+        for text in ("invoke /forge on the branch", "/forge writes a plan"):
+            self.assertEqual(self._class(text, "forge"), "technique", text)
+
+
+class TestMixedCharacterMarkdownIsGeneric(unittest.TestCase):
+    """r3-N1. The exemption covered a run of ONE structural character, so the
+    table separator `|---|` built from the same characters as `---` was
+    flagged as a verbatim lift against any artifact with a table in it."""
+
+    ARTIFACT = "| a | b |\n|---|---|\nStep 4 -> Step 5\n<!-- note -->\nBanner: ▓▒░\n"
+
+    def _vocabulary(self, anchor):
+        criteria = {"skill_name": "x", "test_cases": [
+            {"id": "t1", "required_present": [anchor],
+             "checks": [{"description": "Reached a correct result"}]},
+        ]}
+        return check_overfit(criteria, self.ARTIFACT, "x", 0.34)["counts"]["vocabulary"]
+
+    def test_structural_markdown_built_from_several_characters_is_exempt(self):
+        for anchor in ("|---|", "|:--|", "->", "<!--"):
+            self.assertEqual(self._vocabulary(anchor), 0, anchor)
+
+    def test_non_ascii_decoration_is_still_a_lift(self):
+        self.assertEqual(self._vocabulary("▓▒░"), 1)

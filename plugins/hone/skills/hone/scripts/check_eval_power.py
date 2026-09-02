@@ -114,15 +114,19 @@ NON_SCORABLE_PROFILES = frozenset({"knowledge_extraction"})
 
 # Artifact types for which NON_SCORABLE_PROFILES does not apply.
 # `knowledge_extraction` is always inconclusive only on the skill and command
-# scoring paths. score_execution.py's `hook` and `script` branches never
-# consult `test_profile` at all -- they score trigger_accuracy /
-# output_structure / correctness off the run's own evidence -- so a hook or
-# script case carrying that profile does produce a composite and does pair in
-# compare mode. Excluding it there reported a fully pairable suite
-# `underpowered` and attached a warning ("they never pair in compare mode")
-# that was false for that artifact type. The criteria file carries no artifact
-# type of its own, so the caller supplies it with `--artifact-type`; unset
-# keeps the conservative skill/command reading.
+# scoring paths. score_execution.py's `hook` and `script` branches score the
+# same dimensions (trigger_accuracy / output_structure / correctness, off the
+# run's own evidence) for every profile, so a hook or script case carrying
+# that profile does produce a composite and does pair in compare mode.
+# Excluding it there reported a fully pairable suite `underpowered` and
+# attached a warning ("they never pair in compare mode") that was false for
+# that artifact type. The profile does move the critical-dimension cap on
+# those paths (`_score_single_test` swaps `critical_dim` to `error_handling`
+# for knowledge_extraction on every type), so the case is capped under a
+# different rule than its neighbours; it still scores, which is what the
+# floor counts. The criteria file carries no artifact type of its own, so the
+# caller supplies it with `--artifact-type`; unset keeps the conservative
+# skill/command reading.
 ALWAYS_SCORABLE_ARTIFACT_TYPES = frozenset({"hook", "script"})
 
 # Every type score_execution.py scores, i.e. the values `--artifact-type`
@@ -261,9 +265,11 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
             f"{sorted(unscorable)}; they never pair in compare "
             "mode, so adding more of them cannot clear the floor"
         )
-    # The hook and script scoring paths never read test_profile, so profile
-    # diversity says nothing about what they measure; the warning pointed at a
-    # remedy (vary test_profile) that changes nothing for those types.
+    # The hook and script scoring paths score the same dimensions for every
+    # profile (the profile only moves the critical-dimension cap there), so
+    # profile diversity says nothing about what they measure; the warning
+    # pointed at a remedy (vary test_profile) that changes no measured
+    # property for those types.
     if profile_scoped and len(profiles) < min_profiles:
         warnings.append(
             f"{len(profiles)} distinct scorable test profile(s) {profiles}, "
