@@ -329,14 +329,21 @@ Emit these flat, with keys in this order, and `result` set to `"pass"` or `"fail
 
 | `step` | When emitted | Typical `result` | Mandatory |
 |---|---|---|---|
-| `resume` | resuming a run from an existing state file (after compaction, or across sessions) | `pass` | yes, on any resume |
+| `resume` | resuming a run from an existing state file (after compaction, across sessions, or after a `--confirm` grant of more rounds) | `pass` | yes, on any resume |
 | `phase1_to_phase2` | entering Phase 2 after evaluation | `pass` | yes, unless `--fix-only` |
 | `fixonly_entry` | `--fix-only` run, in place of `phase1_to_phase2` | `pass` | yes, on `--fix-only` |
 | `handoff_<name>` | each handoff validation attempt | `fail` then `pass` on repair | yes, when validation runs |
 | `phase2_to_phase3` | entering Phase 3 after edits | `pass` | yes |
 | `phase3_exit` | leaving Phase 3 (reference step 6) | `pass`, or **`fail` on regression auto-revert** | yes |
-| `convergence` | after the Phase 3 convergence check (reference step 7) | `pass`, or **`fail` on escalate or capped** | yes |
+| `convergence` | after each Phase 3 convergence check (reference step 7), including the exit-2 ledger-repair re-run | `pass`, or **`fail` on escalate or capped** | yes |
 | `workflow_exit` | before any exit | `pass`, or **`fail` on error halt** | yes |
+
+**`handoff_<name>` and `convergence` are emitted once per ATTEMPT; every other row is emitted once per occasion.** That distinction is scored, not decorative. A failing gate is compliant when the run halted there, when a later `pass` for the same step records the repair, or -- for these two only -- when a later attempt settles it. The third case is what the exit-2 ledger repair needs: it emits `convergence` with `result: "fail"`, rewrites the ledger, re-runs the check, and emits a second `convergence` that itself fails whenever the re-run returns `escalate` or `capped`, so a correct repair produces no later `pass` at all. `hone_common.fail_is_accounted` is the one statement of this.
+
+A later attempt only settles an earlier failure across an admissible gap, and the gap rule is what keeps this from becoming a scoring bypass. Without it, a run that ignored a `convergence:fail` halt, did another whole round, and failed `convergence` again would be indistinguishable from a repair. Two gaps are admissible:
+
+- **Nothing in between** -- the in-place retry both repair loops perform. The exit-2 ledger repair writes a file and re-runs the check; a handoff repair edits the handoff and re-runs the validator. Neither emits a gate event in between.
+- **The halt, then a `resume`** -- an authorized restart. `capped` in `--confirm` mode is the one path where a human legitimately restarts the loop, and the reference puts that gate outside and after the FORCED halt: the loop stops and emits `workflow_exit` first, and only then is the human asked. So emit the halt's `workflow_exit`, then `resume` when more rounds are granted, then re-enter Phase 2. A `resume` with no exit event in front of it describes a run that never stopped, and reads as an ignored halt.
 
 **The rows are in emission order, and Phase 3 emits `phase3_exit` BEFORE `convergence`** (references/phase3-reevaluation.md steps 6 and 7). The order is load-bearing, not cosmetic: `hone_common.is_halt_tail` decides whether the tail behind a failed gate is a halt or forward progress, and it reads that order. So the documented regression auto-revert halt is `[phase3_exit:fail, convergence, workflow_exit]`.
 
@@ -429,9 +436,9 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
    }
    ```
 
-   Both `max_rounds` and `run` are per-run values; everything else in the file accumulates. Resolve them before writing: `<max_rounds>` is this run's `--rounds N` budget, the same value the state-file template binds to `iteration.target`, and `run` is the resolved `${RUN_ID}` string, not the literal `${RUN_ID}`. A hardcoded `3` is the one that bites silently, because `check_convergence.py` reads `max_rounds` to decide `capped` and `capped` is a FORCED halt: a `--rounds 6` run stops at round 3 and reports itself capped.
+   Both `max_rounds` and `run` are per-run values; everything else in the file accumulates. Resolve them before writing: `<max_rounds>` is this run's `--rounds N` budget, the same value the state-file template binds to `iteration.target`, and `run` is the resolved `${RUN_ID}` string, not the literal `${RUN_ID}`. A hardcoded `3` is the one that bites silently, because `check_convergence.py` reads `max_rounds` to decide `capped` and `capped` is a FORCED halt: a `--rounds 6` run stops at round 3 and reports itself capped. Leaving `<max_rounds>` unresolved is the other way to get it wrong -- valid JSON, an unparseable int -- and `check_convergence.py` exits 2 on it rather than running with `capped` disabled.
 
-   `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones the convergence check counts); `status` is `open`, `fixed`, or `rejected`. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged -- that repetition is what lets the check see a finding stay open across rounds.
+   `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones the convergence check counts); `status` is `open`, `fixed`, or `rejected`. Both are closed vocabularies and the check exits 2 on a value outside them, rather than reading an unknown `severity` as non-blocking or an unknown `status` as not-open -- either of which turns a ledger with blocking work outstanding into `verdict: converged`. Case is folded, so `Open` is accepted. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged -- that repetition is what lets the check see a finding stay open across rounds.
 
 ## Phase 3: Re-Evaluate
 
@@ -447,12 +454,12 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 
    **Emit the `convergence` gate event on every verdict, not only the halting ones.** `result: "pass"` for `converged` and `in_progress` (the check ran and did not stop the loop), `result: "fail"` for `escalate` and `capped`. `validate_gates.py` hard-errors on a missing `convergence` in normal and fix-only runs, so an omitted event on the ordinary round invalidates the state file.
 
-   - `escalate`: the loop is not converging (a finding open three rounds, blocking count flat, or a finding closed in one file reopened in another, each measured within this run). Emit `fail`, report the finding ids, then halt.
+   - `escalate`: the loop is not converging (a finding open four rounds, a blocking count flat for four, or a finding closed in one file reopened in another, each measured within this run). The two counting bars sit one above the templated `max_rounds: 3` on purpose, so a run that merely spends its budget reports `capped` -- which reaches the `--confirm` human gate -- and `escalate` is reserved for a loop still going nowhere with rounds to spare. `scripts/check_convergence.py` is authoritative for both numbers. Emit `fail`, report the finding ids, then halt.
    - `capped`: the round budget ran out with blocking findings still open. Emit `fail`, report it as **capped, not converged**, list the open blocking findings, then halt. Never present a capped run as success.
    - `converged` / `in_progress`: emit `pass` and continue to step 6.
    - **Exit 2** (no ledger, or one the script cannot parse) is a Phase 2 Step 8 omission, and it is repairable rather than fatal. Emit `convergence` with `result: "fail"` and `"reason": "ledger_missing"`, write the ledger from this round's findings per Phase 2 Step 8, and re-run the check once. The re-run's verdict then drives the branches above, and its `pass` closes the failed event as the repair loop the Handoff Validation Protocol already describes. If the second run still exits 2, that is an error halt: report the path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop.
 6. Check the mechanical exit gate. It runs **after** the convergence check, never before it: the gate emits `workflow_exit`, and a `convergence` event recorded after that exit reads as forward progress past the halt rather than as the halt itself. Same order as the Phase 3 reference (steps 7 then 8).
-7. If rounds remain, the verdict is `in_progress`, and the score is improving: loop back to Phase 2.
+7. The mechanical exit gate decides whether to loop, not the convergence verdict. Exit only when the gate FORCES an exit or ALLOWS one; in every other case increment the round and loop back to Phase 2 (reference step 9). Only `escalate` and `capped` halt on the verdict alone. `converged` and `in_progress` are inputs the gate weighs, not loop conditions of their own, so `converged` on round 2 of 3 with the score still moving is BLOCKED and keeps looping -- treating the verdict as the loop condition left that case with no defined action.
 
 **Mechanical exit gate** decides when to stop (state file, not LLM judgment). See Phase 3 reference for full BLOCKED/ALLOWED conditions.
 

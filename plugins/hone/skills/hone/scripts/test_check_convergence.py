@@ -722,3 +722,236 @@ class TestEscalationSignalsAreRunScoped(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMalformedFindingsAreLoud(unittest.TestCase):
+    """A bad `status` or `severity` reported success with work outstanding.
+
+    `_open_findings` compared `status` case-sensitively while `_blocking`
+    lowered `severity`, so `"status": "Open"` was blocking-but-not-open and an
+    omitted `severity` was open-but-not-blocking. Either alone emptied
+    `open_blocking` and returned `converged`, exit 0. Every other malformed
+    ledger shape already exited 2; these were the two that reported success.
+    """
+
+    def _run(self, payload):
+        import json as _json
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.json"
+            path.write_text(_json.dumps(payload))
+            return subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).parent / "check_convergence.py"),
+                 str(path), "--json"],
+                capture_output=True, text=True,
+            )
+
+    def _ledger(self, finding_obj):
+        return {"artifact": "x", "max_rounds": 3,
+                "rounds": [{"round": 1, "findings": [finding_obj]}]}
+
+    def test_a_finding_with_no_severity_exits_2(self):
+        result = self._run(self._ledger(
+            {"id": "F1", "file": "S", "summary": "x", "status": "open"}))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("severity", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_an_unknown_severity_exits_2(self):
+        result = self._run(self._ledger(
+            finding("F1", severity="blocker")))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("blocker", result.stderr)
+
+    def test_an_unknown_status_exits_2(self):
+        result = self._run(self._ledger(finding("F1", status="wontfix")))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("wontfix", result.stderr)
+
+    def test_a_capitalised_status_is_accepted_and_still_blocks(self):
+        """Case is folded, not rejected: `Open` is open, so it cannot converge."""
+        result = self._run(self._ledger(
+            finding("F1", severity="Critical", status="Open")))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('"verdict": "in_progress"', result.stdout)
+        self.assertIn("F1", result.stdout)
+
+    def test_case_variants_count_as_open_in_analyze(self):
+        report = analyze(
+            ledger([[finding("F1", severity="CRITICAL", status="Open")]]), 4, 4)
+        self.assertEqual(len(report["open_blocking"]), 1)
+
+
+class TestUnreadableLedgerIsUsageError(unittest.TestCase):
+    """Exit 1 is a documented verdict code, so a read error must not use it.
+
+    `main()` caught only FileNotFoundError and JSONDecodeError, so passing a
+    directory (`~/skill-eval/{name}/` instead of the ledger inside it) or an
+    unreadable file raised out of `main()` and Python exited 1 -- which this
+    module's docstring and both reference docs define as "not converged yet,
+    read the verdict from --json", with no JSON to read.
+    """
+
+    def _run(self, target):
+        import subprocess
+
+        return subprocess.run(
+            [sys.executable,
+             str(Path(__file__).parent / "check_convergence.py"),
+             str(target), "--json"],
+            capture_output=True, text=True,
+        )
+
+    def test_a_directory_exits_2_not_1(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(tmp)
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("cannot read ledger", result.stderr)
+
+    def test_an_unreadable_file_exits_2_not_1(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.json"
+            path.write_text("{}")
+            os.chmod(path, 0o000)
+            try:
+                result = self._run(path)
+            finally:
+                os.chmod(path, 0o600)
+        if os.geteuid() == 0:
+            self.skipTest("root ignores the permission bits")
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_undecodable_bytes_exit_2_not_1(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.json"
+            path.write_bytes(b"\xff\xfe\x00\x00 not text")
+            result = self._run(path)
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+
+
+class TestUnusableBudgetIsLoud(unittest.TestCase):
+    """An unreadable `max_rounds` silently disabled `capped` forever.
+
+    The templates carry the placeholder `<max_rounds>` rather than a concrete
+    3, and an executor that copies it literally writes valid JSON holding an
+    unparseable int. `bool(max_rounds)` then read it as "no cap", so a run
+    that should have reported `capped` reported `in_progress` with no
+    diagnostic -- and `capped` is the only verdict routed to the `--confirm`
+    human gate.
+    """
+
+    def _run(self, payload):
+        import json as _json
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.json"
+            path.write_text(_json.dumps(payload))
+            return subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).parent / "check_convergence.py"),
+                 str(path), "--json"],
+                capture_output=True, text=True,
+            )
+
+    def _ledger(self, max_rounds):
+        payload = {"artifact": "x",
+                   "rounds": [round_entry(i + 1, [finding("F1")], run="r")
+                              for i in range(3)]}
+        if max_rounds is not None:
+            payload["max_rounds"] = max_rounds
+        return payload
+
+    def test_the_literal_placeholder_exits_2(self):
+        result = self._run(self._ledger("<max_rounds>"))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("<max_rounds>", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_an_absent_budget_exits_2(self):
+        result = self._run(self._ledger(None))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("max_rounds", result.stderr)
+
+    def test_a_zero_budget_exits_2(self):
+        result = self._run(self._ledger(0))
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("at least 1", result.stderr)
+
+    def test_a_string_integer_budget_still_caps(self):
+        result = self._run(self._ledger("3"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('"verdict": "capped"', result.stdout)
+
+    def test_analyze_does_not_cap_on_an_unusable_budget(self):
+        """The library half stays tolerant; `main()` owns the loud rejection."""
+        report = analyze(
+            {"max_rounds": "<max_rounds>",
+             "rounds": [round_entry(i + 1, [finding("F1")], run="r")
+                        for i in range(3)]}, 4, 4)
+        self.assertIsNone(report["max_rounds"])
+        self.assertEqual(report["verdict"], "in_progress")
+
+
+class TestBudgetExhaustionReportsCapped(unittest.TestCase):
+    """The `--confirm` human gate hangs off `capped` and was unreachable.
+
+    With the escalation bars equal to the templated `max_rounds: 3`, the two
+    ordinary budget-exhaustion shapes both tripped a bar on the same round the
+    budget expired, and `reasons` short-circuits to `escalate` ahead of
+    `capped`. phase3-reevaluation.md routes `capped` to the human gate and
+    routes `escalate` away from it, so the gate was nearly unreachable. The
+    bars now sit one above the templated budget.
+    """
+
+    def _run(self, rounds, max_rounds=3):
+        from check_convergence import (DEFAULT_RECURRENCE_LIMIT,
+                                       DEFAULT_STALL_LIMIT)
+        return analyze(
+            {"artifact": "demo", "max_rounds": max_rounds,
+             "rounds": [round_entry(i + 1, f, run="run-1")
+                        for i, f in enumerate(rounds)]},
+            DEFAULT_RECURRENCE_LIMIT, DEFAULT_STALL_LIMIT)
+
+    def test_one_finding_open_every_round_of_the_budget_is_capped(self):
+        report = self._run([[finding("F1")]] * 3)
+        self.assertEqual(report["verdict"], "capped")
+        self.assertEqual(report["reasons"], [])
+
+    def test_a_rotating_find_fix_cycle_holding_the_count_flat_is_capped(self):
+        rounds = [
+            [finding("F1")],
+            [finding("F1", status="fixed"), finding("F2")],
+            [finding("F2", status="fixed"), finding("F3")],
+        ]
+        report = self._run(rounds)
+        self.assertEqual(report["verdict"], "capped")
+
+    def test_the_round_after_a_granted_extension_escalates(self):
+        """A fourth round with the same finding open is the non-converging shape."""
+        report = self._run([[finding("F1")]] * 4, max_rounds=5)
+        self.assertEqual(report["verdict"], "escalate")
+        self.assertIn("F1", report["recurring"])
+
+    def test_the_streak_is_reported_below_the_bar(self):
+        """`capped` must still name how long the finding has been open."""
+        report = self._run([[finding("F1")]] * 3)
+        self.assertEqual(report["open_streaks"], {"F1": 3})
+
+    def test_minor_findings_are_left_out_of_the_streak_report(self):
+        report = self._run([[finding("F1", severity="minor")]] * 3)
+        self.assertEqual(report["open_streaks"], {})

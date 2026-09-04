@@ -44,7 +44,7 @@ import json
 import sys
 from pathlib import Path
 
-from hone_common import derive_gate_mode, is_halt_tail
+from hone_common import derive_gate_mode, fail_is_accounted
 
 VALID_RESULTS = ("pass", "fail")
 
@@ -267,8 +267,8 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
         if "rubric" in gate:
             errors.extend(_rubric_errors(index, gate["rubric"]))
 
-    # Fail semantics: terminal, or repaired by a later pass for the same
-    # step. "Terminal" means the pipeline halted at that fail: SKILL.md
+    # Fail semantics: terminal, repaired by a later pass for the same step,
+    # or superseded by a later attempt at it. "Terminal" means the pipeline halted at that fail: SKILL.md
     # mandates a final workflow_exit event before ANY exit, so a legitimate
     # halt (error halt, regression auto-revert) is followed by the rest of
     # the halt sequence, never by unrelated forward progress. Requiring the
@@ -277,22 +277,21 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
     # `workflow_exit` is the whole of that tail: it is the only event SKILL.md
     # mandates after the failure that stopped the run, so the failing step
     # goes to the helper along with the tail. Both files call
-    # hone_common.is_halt_tail, so "the same shape" is now one function rather
-    # than two hand-copied conditions that had already drifted apart.
+    # hone_common.fail_is_accounted, so "the same shape" is now one function
+    # rather than two hand-copied conditions that had already drifted apart.
+    # It carries a third case the hand-copies missed: a step the workflow
+    # emits once per attempt (`convergence`, `handoff_<name>`) whose earlier
+    # failure a later attempt settled. The exit-2 ledger repair emits
+    # `convergence:fail` and then a second `convergence` that may fail too, so
+    # a correct repair has no later `pass` and is not its own halt tail.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
-        terminal = is_halt_tail(gates[index + 1 :], gate.get("step"))
-        repaired = any(
-            isinstance(later, dict)
-            and later.get("step") == gate.get("step")
-            and later.get("result") == "pass"
-            for later in gates[index + 1 :]
-        )
-        if not (terminal or repaired):
+        if not fail_is_accounted(gates[index + 1 :], gate.get("step")):
             warnings.append(
                 f"gates[{index}] step '{gate.get('step')}' failed but the run "
-                "continued and no later 'pass' for that step was recorded"
+                "continued: no halt tail behind it, no later 'pass' for that "
+                "step, and no later attempt at it"
             )
 
     # Non-string steps already drew a schema error above; keep them out of

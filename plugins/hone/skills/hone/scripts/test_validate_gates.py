@@ -618,5 +618,127 @@ class TestHaltTailMatchesTheScorer(unittest.TestCase):
         self.assertEqual(report["warnings"], [])
 
 
+class TestRepeatedGateAttempts(unittest.TestCase):
+    """A gate emitted once per attempt is settled by its next attempt.
+
+    Phase 3's exit-2 branch emits `convergence` with `result: "fail"` and
+    `reason: ledger_missing`, rewrites the ledger, re-runs the check, and
+    emits a second `convergence`. That second event fails whenever the re-run
+    returns `escalate` or `capped`, so a CORRECT repair has no later `pass`
+    and, because the halt-tail slice is exclusive of the failing step, is not
+    its own halt either. It warned, and `score_gate_compliance` scored it
+    exactly as an ignored halt.
+    """
+
+    def test_the_exit_2_ledger_repair_does_not_warn(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence", result="fail"),
+            gate("convergence", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertEqual(report["warnings"], [])
+
+    def test_a_repair_that_then_passes_does_not_warn(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence", result="fail"),
+            gate("convergence"),
+            gate("workflow_exit"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertEqual(report["warnings"], [])
+
+    def test_a_recorded_confirm_extension_does_not_warn(self):
+        """capped -> halt -> --confirm grants rounds -> resume -> caps again.
+
+        `workflow_exit` sits BEFORE the `resume`: phase3-reevaluation.md puts
+        the human gate outside and after the FORCED halt, and requires the
+        exit event on the halt itself. Asking is what happens once the loop
+        has stopped, so the halt is on the record before the restart is. The
+        halt's exit PASSES: `capped` is a clean stop carrying a bad verdict,
+        and the gate table reserves `workflow_exit: fail` for an error halt.
+        """
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence", result="fail"),
+            gate("workflow_exit"),
+            gate("resume"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertEqual(report["warnings"], [])
+
+    def test_a_restart_with_no_recorded_halt_warns(self):
+        """A `resume` with no exit event in front of it is not a halt."""
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence", result="fail"),
+            gate("resume"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertEqual(len(report["warnings"]), 1)
+        self.assertIn("gates[3]", report["warnings"][0])
+
+    def test_an_unrecorded_restart_after_a_halt_still_warns(self):
+        """Without the resume event this is a run that ignored the halt."""
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence", result="fail"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertEqual(len(report["warnings"]), 1)
+        self.assertIn("gates[3]", report["warnings"][0])
+
+    def test_a_retried_handoff_that_never_settles_still_warns(self):
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("handoff_interfaces", result="fail"),
+            gate("handoff_interfaces", result="fail"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence"),
+            gate("workflow_exit"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertEqual(len(report["warnings"]), 1)
+        self.assertIn("gates[2]", report["warnings"][0])
+
+    def test_a_second_phase3_exit_after_an_auto_revert_still_warns(self):
+        """phase3_exit is not repeatable: its fail orders an immediate halt."""
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("phase3_exit", result="fail"),
+            gate("convergence"),
+            gate("workflow_exit"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(any("gates[2]" in w for w in report["warnings"]))
+
+
 if __name__ == "__main__":
     unittest.main()

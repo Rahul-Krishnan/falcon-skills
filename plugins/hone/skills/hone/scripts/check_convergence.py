@@ -96,8 +96,41 @@ import sys
 
 BLOCKING = ("critical", "major")
 
+# The closed vocabularies the ledger shape in the module docstring declares.
+# `main()` rejects anything outside them; `analyze()` reads them through the
+# normalizers below so a case variant is a match rather than a silent miss.
+SEVERITIES = ("critical", "major", "minor")
+STATUSES = ("open", "fixed", "rejected")
+
 # Consecutive rounds a finding may stay open before it counts as recurring.
-DEFAULT_RECURRENCE_LIMIT = 3
+#
+# Four, which is ONE ABOVE the `max_rounds: 3` that SKILL.md and
+# phase2-improvement.md template. That relationship is the point, not the
+# number. At three the bar coincided exactly with the budget, so the two
+# ordinary ways a run runs out of road -- one finding open every round, and a
+# rotating find/fix cycle holding the blocking count flat -- both tripped the
+# escalation bars on the same round the budget expired. `reasons` short-
+# circuits to `escalate` ahead of `capped`, so both reported `escalate`, and
+# `capped` was left needing an oscillating blocking count. That mattered
+# because phase3-reevaluation.md routes `capped` to the `--confirm` human gate
+# and routes `escalate` deliberately away from it: the gate meant to catch
+# "budget ran out with work outstanding" was unreachable in both cases where
+# it applied.
+#
+# Sitting one above the budget separates the two verdicts by meaning rather
+# than by coincidence, and costs nothing: a default run halts on round 3
+# either way, the label changes from `escalate` to `capped`. Escalation then
+# means what it says -- the loop is not converging even with budget to spend.
+# It fires on round 4 of a `--rounds 6` run, and on the round after a
+# `--confirm` grant of more rounds, which is exactly when "more rounds is the
+# wrong remedy" has been demonstrated rather than assumed, and which the same
+# reference says gets no second ask.
+#
+# Nothing is lost below the bar: `open_streaks` reports every consecutive-open
+# count unconditionally, the way `reopen_counts` already does below its own
+# bar, so a run can see "open for 3 rounds" as information without that being
+# a halt.
+DEFAULT_RECURRENCE_LIMIT = 4
 
 # Times a finding may be recorded fixed and then found open again before it
 # counts as recurring. The consecutive-open streak cannot see this shape at
@@ -135,8 +168,14 @@ DEFAULT_REOPEN_LIMIT = 2
 DEFAULT_REOPEN_WINDOW_ROUNDS = 10
 
 # Consecutive rounds the blocking count may hold still before it counts as
-# stalled. Two rounds of no movement is noise; three is a pattern.
-DEFAULT_STALL_LIMIT = 3
+# stalled. Two rounds of no movement is noise; three is a pattern -- but the
+# bar sits one above the templated `max_rounds` for the same reason
+# DEFAULT_RECURRENCE_LIMIT does, and for the same verdict. A flat count that
+# lasts exactly as long as the budget is a run that ran out of rounds
+# (`capped`, which reaches the human gate), not a run that proved it was going
+# nowhere. `blocking_counts` is reported unconditionally, so the flat window is
+# visible whether or not it reached the bar.
+DEFAULT_STALL_LIMIT = 4
 
 WORD = re.compile(r"[a-z0-9]+")
 
@@ -147,15 +186,36 @@ def _signature(summary: str) -> str:
     return " ".join(words)
 
 
+def _status(finding: dict) -> str:
+    """A finding's status, folded to the vocabulary `STATUSES` declares.
+
+    Every read of `status` goes through here. The four call sites used to
+    compare `f.get("status") == "open"` (or `== "fixed"`) directly while
+    `_blocking` normalized severity with `.lower()`, so the two halves of the
+    same predicate disagreed about a ledger written with `"status": "Open"`:
+    the finding was blocking but not open, `open_blocking` came back empty,
+    and the run reported `converged` with blocking work outstanding. `main()`
+    rejects an unrecognized status outright, so this only has to fold the
+    recognized shapes; it stays tolerant because `analyze()` is a library
+    call that never exits.
+    """
+    return (finding.get("status") or "").strip().lower()
+
+
+def _severity(finding: dict) -> str:
+    """A finding's severity, folded the same way as `_status`."""
+    return (finding.get("severity") or "").strip().lower()
+
+
 def _open_findings(round_entry: dict) -> list[dict]:
     return [
         f for f in _as_list(round_entry.get("findings"))
-        if isinstance(f, dict) and f.get("status") == "open"
+        if isinstance(f, dict) and _status(f) == "open"
     ]
 
 
 def _blocking(findings: list[dict]) -> list[dict]:
-    return [f for f in findings if (f.get("severity") or "").lower() in BLOCKING]
+    return [f for f in findings if _severity(f) in BLOCKING]
 
 
 def _as_list(value: object) -> list:
@@ -272,6 +332,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             "max_rounds": _as_int(ledger.get("max_rounds")), "reasons": [],
             "open_blocking": [], "open_minor_count": 0,
             "recurring": [], "reopened": [], "reopen_counts": {},
+            "open_streaks": {},
             "relocations": [], "blocking_counts": [],
         }
 
@@ -325,8 +386,8 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
         statuses: dict[str, str] = {}
         for f in _as_list(round_entry.get("findings")):
             if isinstance(f, dict) and f.get("id"):
-                statuses[f["id"]] = f.get("status")
-                severity_by_id[f["id"]] = (f.get("severity") or "").lower()
+                statuses[f["id"]] = _status(f)
+                severity_by_id[f["id"]] = _severity(f)
         open_ids = {fid for fid, status in statuses.items() if status == "open"}
         for finding_id in list(streaks):
             if finding_id not in open_ids:
@@ -375,6 +436,19 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # exists to distrust. Filtering it by `last_open_ids` would delete the
     # check; bounding it by the window above is what keeps it from being
     # permanent.
+    # Every still-open blocking finding's consecutive-open count, whether or
+    # not it reached `recurrence_limit`. The bar sits one above the templated
+    # round budget (see DEFAULT_RECURRENCE_LIMIT), so a default run can end
+    # `capped` with a finding that has been open every round and no `reasons`
+    # entry naming it. This is where that shows up, and it is the same
+    # treatment `reopen_counts` already gets below its own bar: report the
+    # signal, let the verdict be the verdict.
+    open_streaks = {
+        finding_id: count
+        for finding_id, count in sorted(streaks.items())
+        if count > 0 and finding_id in last_open_ids and _is_blocking_id(finding_id)
+    }
+
     stuck = [
         finding_id for finding_id in stuck
         if finding_id in last_open_ids and _is_blocking_id(finding_id)
@@ -452,17 +526,17 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
         closed_this_round = {
             _signature(f.get("summary", "")): f.get("file", "")
             for f in findings
-            if f.get("status") == "fixed" and _signature(f.get("summary", ""))
+            if _status(f) == "fixed" and _signature(f.get("summary", ""))
         }
         origins = {**closed_signatures, **closed_this_round}
         for finding in findings:
             signature = _signature(finding.get("summary", ""))
-            if not signature or finding.get("status") != "open":
+            if not signature or _status(finding) != "open":
                 continue
             # Relocation is an escalation reason, so it is severity-filtered
             # like the others: a minor finding that moved file is not a
             # non-converging loop.
-            if (finding.get("severity") or "").lower() not in BLOCKING:
+            if _severity(finding) not in BLOCKING:
                 continue
             if signature not in origins or signature not in last_open_signatures:
                 continue
@@ -491,7 +565,20 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # the current run's rounds, not against every round the artifact has ever
     # logged. Counting the whole ledger returned `capped` on a second run's
     # first round: an immediate `fail` gate and a halt before any work.
-    rounds_exhausted = bool(max_rounds) and len(current_run) >= max_rounds
+    # `bool(max_rounds)` conflated three different things -- a budget of zero,
+    # an absent `max_rounds`, and one this module could not parse -- and read
+    # all three as "no cap", which silently disables the `capped` verdict for
+    # the whole run. `main()` refuses to run at all in those cases (see
+    # `budget_error`), because "your ledger is malformed" and "you have rounds
+    # left" are different answers and only one of them is true. `analyze()` is
+    # a library call that cannot exit, so it reports `max_rounds: null` and
+    # leaves the caller to notice; it is deliberately NOT the place that
+    # decides a missing budget is permissive.
+    rounds_exhausted = (
+        max_rounds is not None
+        and max_rounds >= 1
+        and len(current_run) >= max_rounds
+    )
 
     if reasons:
         verdict = "escalate"
@@ -525,9 +612,83 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
         # reached the escalation bar. Below the bar this is the only place the
         # reopen signal is visible at all.
         "reopen_counts": {k: v for k, v in sorted(reopens.items()) if v},
+        # Consecutive rounds each still-open blocking finding has been open,
+        # reported below the escalation bar as well as at it.
+        "open_streaks": open_streaks,
         "relocations": relocations,
         "blocking_counts": blocking_counts,
     }
+
+
+def budget_error(ledger: dict) -> str | None:
+    """Why this ledger's `max_rounds` cannot be used as a budget, or None.
+
+    An unusable budget must not be silently permissive. `capped` is a FORCED
+    halt and the only verdict that routes to the `--confirm` human gate, so a
+    `max_rounds` this module cannot read disables the one check that stops a
+    run reporting `in_progress` forever.
+
+    The silent shape is new. SKILL.md and phase2-improvement.md used to
+    template a concrete `"max_rounds": 3`, and the docs warn at length about
+    that going stale. They now template the placeholder `<max_rounds>`, and an
+    executor that copies it literally writes `"max_rounds": "<max_rounds>"` --
+    valid JSON, an unparseable int, no diagnostic anywhere. That is the
+    failure this rejects, alongside an absent budget and a non-positive one.
+    """
+    if "max_rounds" not in ledger:
+        return (
+            "ledger has no 'max_rounds'; it is this run's --rounds budget and "
+            "'capped' cannot be decided without it"
+        )
+    raw = ledger["max_rounds"]
+    parsed = _as_int(raw)
+    if parsed is None:
+        return (
+            f"ledger 'max_rounds' is not a number: {raw!r}. Resolve the "
+            "<max_rounds> placeholder to this run's --rounds budget before "
+            "writing the ledger"
+        )
+    if parsed < 1:
+        return f"ledger 'max_rounds' must be at least 1, got {parsed}"
+    return None
+
+
+def finding_errors(ledger: dict) -> list[str]:
+    """Findings whose `status` or `severity` is outside the closed vocabulary.
+
+    Both fields decide whether a finding blocks convergence, and both used to
+    fail open: an omitted or misspelled `severity` read as non-blocking, and a
+    `status` of `"Open"` read as not-open. Either one alone turns a ledger
+    with blocking work outstanding into `verdict: converged`, exit 0, and an
+    empty `open_blocking` -- a run reporting success while the findings that
+    should have stopped it sit in the file. Every other malformed shape here
+    exits 2 loudly; these two did not, which made them the dangerous ones.
+
+    Case and surrounding whitespace are folded rather than rejected, so
+    `"Open"` is accepted as `open` (see `_status`). Only a value that is not a
+    member of the vocabulary at all is an error.
+    """
+    errors: list[str] = []
+    for position, round_entry in enumerate(_as_list(ledger.get("rounds"))):
+        if not isinstance(round_entry, dict):
+            continue
+        label = round_entry.get("round", position)
+        for finding in _as_list(round_entry.get("findings")):
+            if not isinstance(finding, dict):
+                continue
+            fid = finding.get("id") or "<no id>"
+            if _status(finding) not in STATUSES:
+                errors.append(
+                    f"round {label} finding {fid}: status "
+                    f"{finding.get('status')!r} is not one of {list(STATUSES)}"
+                )
+            if _severity(finding) not in SEVERITIES:
+                errors.append(
+                    f"round {label} finding {fid}: severity "
+                    f"{finding.get('severity')!r} is not one of "
+                    f"{list(SEVERITIES)}"
+                )
+    return errors
 
 
 def main() -> None:
@@ -560,6 +721,21 @@ def main() -> None:
         sys.exit(2)
     except json.JSONDecodeError as exc:
         print(f"ERROR: ledger is not valid JSON: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except UnicodeDecodeError as exc:
+        # A ValueError, not an OSError, so it needs its own arm. A binary file
+        # handed to `--ledger` is the same class of usage error as a directory.
+        print(f"ERROR: ledger is not decodable text: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except OSError as exc:
+        # IsADirectoryError (passing `~/skill-eval/{name}/` instead of
+        # `.../findings-ledger.json`) and PermissionError used to escape as a
+        # traceback, and Python exits 1 on an uncaught exception -- the code
+        # this module's docstring and both reference docs define as "not
+        # converged yet, read the verdict from --json", with no JSON to read.
+        # Caught after FileNotFoundError, which is an OSError subclass with a
+        # more specific message. Same guard as validate_gates.main.
+        print(f"ERROR: cannot read ledger: {exc}", file=sys.stderr)
         sys.exit(2)
 
     # A bare array of rounds -- the shape SKILL.md warns against writing --
@@ -602,6 +778,19 @@ def main() -> None:
         )
         sys.exit(2)
 
+    budget_problem = budget_error(ledger)
+    if budget_problem:
+        print(f"ERROR: {budget_problem}", file=sys.stderr)
+        sys.exit(2)
+
+    bad_findings = finding_errors(ledger)
+    if bad_findings:
+        print("ERROR: ledger findings use values outside the documented "
+              "vocabulary:", file=sys.stderr)
+        for problem in bad_findings:
+            print(f"  {problem}", file=sys.stderr)
+        sys.exit(2)
+
     report = analyze(ledger, args.recurrence_limit, args.stall_limit,
                      args.reopen_limit, args.reopen_window)
     report["artifact"] = ledger.get("artifact")
@@ -617,7 +806,10 @@ def main() -> None:
         for reason in report["reasons"]:
             print(f"  ESCALATE: {reason}")
         for finding in report["open_blocking"]:
-            print(f"  OPEN [{finding['severity']}] {finding['file']}: {finding['summary']}")
+            streak = report["open_streaks"].get(finding["id"])
+            age = f" (open {streak} round(s))" if streak else ""
+            print(f"  OPEN [{finding['severity']}] {finding['file']}: "
+                  f"{finding['summary']}{age}")
         if report["verdict"] == "capped":
             print("  NOTE: capped, NOT converged. Do not report this as success.")
 

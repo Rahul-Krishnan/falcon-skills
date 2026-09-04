@@ -148,6 +148,155 @@ PHASE3_HALT_SEQUENCE: tuple[str, ...] = (
     "phase3_exit", "convergence", "workflow_exit",
 )
 
+# Steps the workflow emits ONCE PER ATTEMPT, where a later attempt's event is
+# what settles an earlier attempt's failure. This is the general fact the halt
+# tail alone cannot express: `is_halt_tail` asks "did the run stop here", and
+# for a step that is retried the honest answer is "no, it tried again", which
+# is neither a halt nor forward progress past one.
+#
+# Membership is documented retry semantics, not mere recurrence. Both members
+# earn it the same way -- the docs describe a failure, a repair of the failing
+# input, and a re-run of the SAME check:
+#
+#   handoff_<name>  SKILL.md's gate table: "each handoff validation attempt",
+#                   result "fail then pass on repair". The retry loop is the
+#                   Handoff Validation Protocol.
+#   convergence     references/phase3-reevaluation.md step 7's exit-2 branch:
+#                   emit `convergence:fail` with `reason: ledger_missing`,
+#                   write the ledger, re-run the check ONCE, emit the second
+#                   `convergence`. That second event may itself be a `fail`
+#                   (the re-run returning escalate or capped), which is the
+#                   case a later-`pass`-only test cannot see.
+#
+# `phase3_exit` is deliberately NOT a member even though Phase 3 re-emits it
+# every round. A `phase3_exit:fail` is the regression auto-revert, and the
+# reference pairs it with an immediate halt; a later `phase3_exit` is
+# therefore a run that ignored the halt, which is precisely what the exclusive
+# slice in `halt_tail_vocabulary` exists to catch. Same for
+# `phase1_to_phase2`, `phase2_to_phase3`, `fixonly_entry` and `resume`: they
+# recur, but no doc gives any of them a fail-then-retry shape, so admitting
+# them would widen the gap below for no legitimate sequence.
+REPEATABLE_STEPS: frozenset[str] = frozenset({"convergence"})
+REPEATABLE_STEP_PREFIXES: tuple[str, ...] = ("handoff_",)
+
+# The gate event that marks an authorized restart of a halted loop. It is the
+# only thing admitted between a repeatable step's fail and its next attempt
+# (see `is_superseded_fail`).
+RESUMPTION_STEP = "resume"
+
+
+def is_repeatable_step(step: object) -> bool:
+    """True for a step the workflow emits once per attempt (see above)."""
+    if not isinstance(step, str):
+        return False
+    return step in REPEATABLE_STEPS or step.startswith(REPEATABLE_STEP_PREFIXES)
+
+
+def is_superseded_fail(later_gates: object, failed_step: object) -> bool:
+    """True when a repeatable step's fail was settled by a later attempt.
+
+    "Settled" is narrower than "a later event for the same step exists", and
+    the gap between the two events is what makes the difference. A bare
+    existence test reopens the scoring bypass #14 closed, by a longer route:
+
+        convergence:fail          <- escalate, a mandated immediate halt
+        phase2_to_phase3:pass     <- the run ignored it and did another round
+        phase3_exit:pass
+        convergence:fail
+        workflow_exit:fail
+
+    while the documented `capped` -> `--confirm` -> more rounds -> caps again
+    sequence, which a bare existence test cannot tell apart from it, is:
+
+        convergence:fail          <- capped
+        workflow_exit:fail        <- the loop stopped; the human is asked here
+        resume:pass               <- more rounds granted, restart on record
+        phase2_to_phase3:pass
+        phase3_exit:pass
+        convergence:fail
+        workflow_exit:fail
+
+    Under bare existence the first fail is excused by the last `convergence`
+    and the whole run scores 1.0, even though it demonstrably carried on past
+    a halt it was ordered to obey. So the gap is constrained to the two shapes
+    the docs actually describe:
+
+    * EMPTY -- an in-place retry. Nothing else happens between the failure and
+      the re-run: the exit-2 ledger repair writes a file and re-runs the
+      check, and a handoff repair edits the handoff and re-runs the validator.
+      Neither emits a gate event in between, so an empty gap is the signature
+      of the documented retry.
+    * A HALT THEN A `resume` -- an authorized restart. `capped` halts the
+      loop, and in `--confirm` mode the human may then grant more rounds,
+      after which Phase 2 re-runs and a second `convergence` follows. That gap
+      is not empty, and it is otherwise byte-identical to the attack above:
+      the ONLY thing distinguishing "the human restarted the loop" from "the
+      run ignored the halt" is whether the halt and the restart were recorded.
+      So both have to be. The gap splits at the `resume`: everything before it
+      must be a valid halt tail for the failing step (`workflow_exit`, which
+      phase3-reevaluation.md requires before the `--confirm` gate is reached
+      at all -- asking the human is what happens once the loop has STOPPED),
+      and everything after it is the restarted round's own events, which are
+      legitimate forward progress because the restart was authorized.
+
+      A bare `resume` with no halt in front of it is therefore not enough, and
+      deliberately so: it would describe a run that skipped its own exit event
+      and carried straight on, which is the thing the halt tail exists to
+      catch.
+
+    Asymmetry with `repaired` (a later `pass` for the same step) is deliberate
+    and is why that predicate keeps its unconstrained form. A later `pass` is
+    affirmative evidence the thing was fixed, whichever route reached it. A
+    later `fail` is evidence of nothing on its own, so it only settles the
+    earlier fail when the gap shows the retry was in-place or authorized -- and
+    it still has to account for ITSELF, which is what stops a chain of fails
+    from laundering each other: the last one owns a real halt or a real pass.
+    """
+    if not is_repeatable_step(failed_step):
+        return False
+    if not isinstance(later_gates, (list, tuple)):
+        return False
+    for offset, later in enumerate(later_gates):
+        if not isinstance(later, dict) or later.get("step") != failed_step:
+            continue
+        gap = later_gates[:offset]
+        if not gap:
+            return True
+        for index, event in enumerate(gap):
+            if isinstance(event, dict) and event.get("step") == RESUMPTION_STEP:
+                return is_halt_tail(gap[:index], failed_step)
+        return False
+    return False
+
+
+def is_repaired_fail(later_gates: object, failed_step: object) -> bool:
+    """True when a later `pass` for the same step records the repair."""
+    if not isinstance(later_gates, (list, tuple)):
+        return False
+    return any(
+        isinstance(later, dict)
+        and later.get("step") == failed_step
+        and later.get("result") == "pass"
+        for later in later_gates
+    )
+
+
+def fail_is_accounted(later_gates: object, failed_step: object) -> bool:
+    """The one predicate for "this failing gate is not a compliance defect".
+
+    Three ways a `fail` is accounted for, and both callers need all three:
+    the run halted there (`is_halt_tail`), a later `pass` recorded the repair
+    (`is_repaired_fail`), or a later attempt at a repeatable step settled it
+    (`is_superseded_fail`). validate_gates.py and score_execution.py each used
+    to hand-copy the first two and had already drifted once; the third is what
+    this shares so they cannot drift again on the way back in.
+    """
+    return (
+        is_repaired_fail(later_gates, failed_step)
+        or is_superseded_fail(later_gates, failed_step)
+        or is_halt_tail(later_gates, failed_step)
+    )
+
 
 def halt_tail_vocabulary(failed_step: object) -> frozenset[str]:
     """Steps admissible in the tail behind a fail on `failed_step`.

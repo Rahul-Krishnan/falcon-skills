@@ -27,8 +27,8 @@ from hone_common import (
     DIMENSION_FLOOR,
     SANDBOX_HEADER,
     extract_results,
+    fail_is_accounted,
     get as typed_get,
-    is_halt_tail,
 )
 
 EPSILON = 1e-6
@@ -960,8 +960,10 @@ def score_gate_compliance(
     A gate that correctly reports failure is compliant: penalizing it would
     reward executors for hiding failures. A 'fail' event counts as compliant
     when it is terminal (the pipeline halted there, e.g. a Phase 3 regression
-    auto-revert or an error halt) or when a later 'pass' for the same step
-    records the repair (e.g. a handoff validation retry loop). A 'fail' that is
+    auto-revert or an error halt), when a later 'pass' for the same step
+    records the repair (e.g. a handoff validation retry loop), or when a later
+    attempt at a per-attempt step settles it (e.g. the Phase 3 exit-2 ledger
+    repair, whose second 'convergence' may itself fail). A 'fail' that is
     followed by unrelated forward progress is still non-compliant.
 
     Fallback (legacy): keyword counting when no structured gate events are found.
@@ -993,12 +995,6 @@ def score_gate_compliance(
                 compliant += 1
                 continue
             # result == "fail": compliant only when failure is the documented outcome.
-            repaired = any(
-                isinstance(later, dict)
-                and later.get("step") == gate.get("step")
-                and later.get("result") == "pass"
-                for later in gates[idx + 1 :]
-            )
             # A halt sequence is two events long: the step that detected the
             # failure, then workflow_exit recording the stop. Only the last of
             # those is terminal, so requiring terminality marked the detecting event
@@ -1013,14 +1009,22 @@ def score_gate_compliance(
             # that failed a gate, carried on through the whole workflow, and
             # simply stopped emitting passing gates score that fail as a halt,
             # which rewards emitting fewer events than an honest run emits.
-            # hone_common.is_halt_tail owns that shape; validate_gates.py asks
-            # it the same question, so the two cannot drift again. It also
+            # hone_common.fail_is_accounted owns that shape; validate_gates.py
+            # asks it the same question, so the two cannot drift again. It also
             # covers the fail-is-last-event case, which was a separate
             # `terminal` test here. The failing step goes with the tail: a fail
             # on `workflow_exit` itself is the halt with nothing after it,
             # while a fail on any other step still owes the exit event.
-            halted = is_halt_tail(gates[idx + 1 :], gate.get("step"))
-            if repaired or halted:
+            #
+            # The third case it owns is the one this scorer punished hardest.
+            # `convergence` and `handoff_<name>` are emitted once per ATTEMPT,
+            # and a later attempt is what settles an earlier attempt's failure.
+            # The documented exit-2 ledger repair emits `convergence:fail`,
+            # rewrites the ledger, re-runs, and emits a second `convergence`
+            # that fails whenever the re-run returns escalate or capped -- so a
+            # correct repair produced no later `pass` and was not its own halt
+            # tail, and scored exactly as an ignored halt did.
+            if fail_is_accounted(gates[idx + 1 :], gate.get("step")):
                 compliant += 1
                 expected_fail += 1
 
