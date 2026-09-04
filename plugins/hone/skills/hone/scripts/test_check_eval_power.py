@@ -1389,5 +1389,75 @@ class TestAdvisoryHoldsInBothDirections(unittest.TestCase):
         self.assertFalse(report["sizing"]["blocking"])
 
 
+class TestTheAdvisoryLineIsSizingOnly(unittest.TestCase):
+    """r5-B2. The text report's advisory line was gated on `not blocking and
+    verdict != "powered"`. In compare mode `blocking` is `verdict !=
+    "improved"`, so the one compare verdict that reached the line was
+    `improved`: a 6W/0L/0T comparison (p=0.0156, exit 0) printed "it justifies
+    neither a promotion nor a revert", the exact opposite of Step 9a's rule
+    for `improved` ("Act on it"). The JSON was always right; the operator
+    reading the terminal was told to ignore the result the run exists to
+    produce."""
+
+    CASES = [{"id": f"t{i}", "test_profile": "execution"} for i in range(6)]
+    ADVISORY = "justifies neither a promotion nor a revert"
+
+    def _compare(self, tmp, before_score, after_score):
+        criteria = _write_criteria(tmp, self.CASES)
+        before = _write_round(
+            tmp, "r1",
+            [{"test_id": f"t{i}", "composite": before_score} for i in range(6)],
+            "skill",
+        )
+        after = _write_round(
+            tmp, "r2",
+            [{"test_id": f"t{i}", "composite": after_score} for i in range(6)],
+            "skill",
+        )
+        return _run_cli(criteria, "--before", before, "--after", after)
+
+    def test_an_improved_comparison_prints_no_advisory(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._compare(tmp, 0.5, 0.9)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("VERDICT: improved", proc.stdout)
+        self.assertNotIn("advisory: not blocking", proc.stdout)
+        self.assertNotIn(self.ADVISORY, proc.stdout)
+
+    def test_a_regressed_comparison_prints_no_advisory_either(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._compare(tmp, 0.9, 0.5)
+        self.assertEqual(proc.returncode, 1)
+        self.assertNotIn("advisory: not blocking", proc.stdout)
+
+    def test_sizing_mode_still_carries_the_advisory(self):
+        # The line is not deleted, only scoped: an under-floor sizing run is
+        # exactly the case it was written for.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = _write_criteria(
+                tmp, [{"id": "t1", "test_profile": "execution"},
+                      {"id": "t2", "test_profile": "knowledge_extraction"}]
+            )
+            proc = _run_cli(criteria)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("VERDICT: underpowered", proc.stdout)
+        self.assertIn("advisory: not blocking", proc.stdout)
+
+    def test_a_powered_sizing_run_prints_no_advisory(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = _run_cli(_write_criteria(tmp, self.CASES))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("VERDICT: powered", proc.stdout)
+        self.assertNotIn("advisory: not blocking", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

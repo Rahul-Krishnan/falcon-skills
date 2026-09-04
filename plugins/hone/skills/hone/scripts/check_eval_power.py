@@ -904,7 +904,17 @@ def main() -> None:
         print()
     else:
         print(f"VERDICT: {report['verdict']}")
-        if not report["blocking"] and report["verdict"] != "powered":
+        # Sizing mode only. The advisory describes a verdict the run carries
+        # forward without acting on it, which is what a non-blocking sizing
+        # verdict (`underpowered`, no errors) is. In compare mode `blocking`
+        # means something else entirely -- it is `verdict != "improved"` --
+        # so the one compare verdict reaching this branch was `improved`, and
+        # a 6W/0L/0T comparison at p=0.0156 printed "it justifies neither a
+        # promotion nor a revert", the exact opposite of Step 9a's rule for
+        # `improved` ("Act on it"). The JSON was always right; only this line
+        # was wrong.
+        if (report["mode"] == "sizing" and not report["blocking"]
+                and report["verdict"] != "powered"):
             print("  advisory: not blocking, the run continues carrying this "
                   "verdict; it justifies neither a promotion nor a revert")
         sizing = report["sizing"] if report["mode"] == "compare" else report

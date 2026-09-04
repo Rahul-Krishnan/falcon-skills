@@ -177,11 +177,25 @@ OUTPUT_DIR_MIGRATION = (
     "results.json and deterministic_scores.json, and leave the file path "
     "itself in results_path"
 )
+# check_eval_power.py's positional argument is the EVAL CRITERIA FILE; the
+# round directories reach it through --before/--after, as paths to each
+# round's deterministic_scores.json. "Run it over this round's output_dir"
+# read as a remedy that takes the directory positionally, and a directory
+# there is an explicit exit-2 usage error -- a printed remedy that fails when
+# followed literally is worse than none. SKILL.md's resume section and
+# references/phase1-evaluation.md carry the same command; keep the three in
+# step.
 POWER_VERDICT_MIGRATION = (
     "state files written before the power and overfit gates landed omit this "
-    "field. To migrate, run check_eval_power.py over this round's output_dir "
-    "and record its top-level verdict; a round with no earlier round to "
-    "compare against records the sizing verdict instead (powered or "
+    "field. To migrate, run check_eval_power.py on the EVAL CRITERIA FILE "
+    "(its only positional argument; a directory there is a usage error) with "
+    "the rounds passed as files: check_eval_power.py <eval_criteria.json> "
+    "--artifact-type <type> --before <prior round output_dir>/"
+    "deterministic_scores.json --after <this round's output_dir>/"
+    "deterministic_scores.json, and record its top-level verdict; a round "
+    "with no earlier round to compare against runs the sizing half alone "
+    "(check_eval_power.py <eval_criteria.json> --artifact-type <type>, no "
+    "--before/--after) and records that verdict instead (powered or "
     "underpowered)"
 )
 
@@ -692,6 +706,12 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     },
 }
 
+# `round_{N}_scores` keys, one per Phase 3 round; all validate against the
+# `round_scores` schema. Declared above STEP_CONTRACTS because the schema name
+# is what `phase3_reevaluate` produces, and the contract table below names it.
+ROUND_SCORES_KEY = re.compile(r"^round_[1-9]\d*_scores$")
+ROUND_SCORES_SCHEMA = "round_scores"
+
 # Which handoffs each step requires (inputs) and produces (outputs).
 # Used by --step mode to validate that a completed step has valid outputs.
 STEP_CONTRACTS: dict[str, dict[str, list[str]]] = {
@@ -727,9 +747,18 @@ STEP_CONTRACTS: dict[str, dict[str, list[str]]] = {
         "requires": ["eval_results"],
         "produces": ["improvement_findings", "improvement_plan", "applied_edits"],
     },
+    # A Phase 3 round's output is its score record, written by step 6 under
+    # `round_{N}_scores`. Declaring nothing here was the same class of hole
+    # `convergence` was in validate_gates.REQUIRED_STEPS: a mandatory record
+    # this script does not check is prose. A round that skipped step 6 passed
+    # `--all` clean, and the next round's step 3a then fell back to
+    # `eval_results.output_dir` -- Phase 1's baseline -- crediting round N's
+    # gain to round N+1. The concrete key carries a round number the schema
+    # table cannot name in advance, so the SCHEMA name stands in here and
+    # `_validate_round_scores` resolves it to whichever rounds are on disk.
     "phase3_reevaluate": {
         "requires": ["applied_edits", "eval_results"],
-        "produces": [],
+        "produces": [ROUND_SCORES_SCHEMA],
     },
 }
 
@@ -994,12 +1023,6 @@ def validate_fields(
     return checked
 
 
-# `round_{N}_scores` keys, one per Phase 3 round; all validate against the
-# `round_scores` schema.
-ROUND_SCORES_KEY = re.compile(r"^round_[1-9]\d*_scores$")
-ROUND_SCORES_SCHEMA = "round_scores"
-
-
 def _schema_name(handoff_name: str) -> str | None:
     """The HANDOFF_SCHEMAS entry `handoff_name` validates against, or None.
 
@@ -1035,6 +1058,45 @@ def _round_scores_keys(state: dict) -> list[str]:
     """Every `round_{N}_scores` key present in `state`, in round order."""
     keys = [k for k in state if isinstance(k, str) and ROUND_SCORES_KEY.match(k)]
     return sorted(keys, key=lambda k: int(k.split("_")[1]))
+
+
+def _validate_round_scores(state: dict) -> list[ValidationResult]:
+    """Validate Phase 3's per-round records, demanding at least one.
+
+    The single place `round_{N}_scores` is checked, for both --step and --all,
+    because the two used to disagree: --all validated whichever round keys
+    happened to be present and --step demanded none at all, so a Phase 3 round
+    that never wrote its record was invisible to both. The record is what the
+    NEXT round reads (`output_dir` at step 3a, `per_test` at step 5); without
+    it that round silently re-baselines on Phase 1's numbers and reports this
+    round's gain as its own.
+
+    Missing is reported against the generic key name, since which round number
+    is missing is exactly what the state file does not say.
+    """
+    keys = _round_scores_keys(state)
+    if not keys:
+        return [
+            ValidationResult(
+                handoff="round_<N>_scores",
+                valid=False,
+                errors=[
+                    ValidationError(
+                        "round_<N>_scores",
+                        "required handoff missing: a completed Phase 3 round "
+                        "records its scores under round_<N>_scores "
+                        "(round_1_scores for the first round). Write the "
+                        "record with output_dir, composite_score, per_test "
+                        "and power_verdict; the next round reads output_dir "
+                        "for its baseline and falls back to "
+                        "eval_results.output_dir without it, crediting this "
+                        "round's gain to the next one",
+                        severity="error",
+                    )
+                ],
+            )
+        ]
+    return [validate_handoff(state, key) for key in keys]
 
 
 def validate_handoff(
@@ -1182,6 +1244,10 @@ def validate_step(
     # Validate produced outputs: a done step must have produced them, in
     # every run shape (it ran).
     for handoff_name in contract["produces"]:
+        if handoff_name == ROUND_SCORES_SCHEMA:
+            # Pattern-keyed: one record per round, resolved from the state.
+            results.extend(_validate_round_scores(state))
+            continue
         results.append(validate_handoff(state, handoff_name))
 
     if not results:
@@ -1205,14 +1271,19 @@ def validate_all(state: dict) -> list[ValidationResult]:
     steps = null_safe_get(state, "steps", {}, expected=dict)
     results: list[ValidationResult] = []
     for handoff_name in HANDOFF_SCHEMAS:
-        if handoff_name == "round_scores":
+        if handoff_name == ROUND_SCORES_SCHEMA:
             continue  # pattern-keyed; the concrete keys are collected below
         if handoff_name in state or _input_expected(steps, handoff_name):
             results.append(validate_handoff(state, handoff_name))
     # Phase 3 writes one record per round under a key the schema table cannot
-    # name in advance; validate whichever rounds are present.
-    for key in _round_scores_keys(state):
-        results.append(validate_handoff(state, key))
+    # name in advance. Same run-shape gate as every other produced handoff
+    # (`phase3_reevaluate` is its producer in STEP_CONTRACTS, so
+    # `_input_expected` resolves it): validate whichever rounds are present,
+    # and report the absence when the shape ran Phase 3 to "done" and wrote
+    # none. Validating only what was present is what let a round skip its
+    # record and still pass `--all`.
+    if _round_scores_keys(state) or _input_expected(steps, ROUND_SCORES_SCHEMA):
+        results.extend(_validate_round_scores(state))
     return results
 
 

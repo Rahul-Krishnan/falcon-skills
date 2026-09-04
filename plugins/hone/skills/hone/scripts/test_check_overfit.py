@@ -498,12 +498,12 @@ class TestExemptAnchorsLeaveTheDenominator(unittest.TestCase):
         report = self._report(["validate_handoff", "#", "##", "---"])
         self.assertEqual(report["items_classified"], 1)
         self.assertEqual(report["counts"]["outcome"], 0)
-        self.assertEqual(report["items_exempt_generic_markdown"], 3)
+        self.assertEqual(report["items_exempt_contentless"], 3)
 
     def test_only_exempt_anchors_is_not_measurable(self):
         report = self._report(["##", "---"])
         self.assertEqual(report["verdict"], "not_measurable")
-        self.assertEqual(report["items_exempt_generic_markdown"], 2)
+        self.assertEqual(report["items_exempt_contentless"], 2)
 
 
 class TestMalformedCriteriaFieldsAreNotScored(unittest.TestCase):
@@ -646,7 +646,7 @@ class TestEveryExemptCharacterReachesTheExemption(unittest.TestCase):
             for anchor in (char, char * 2, char * 3):
                 report = self._report(["validate_handoff", anchor])
                 self.assertEqual(
-                    report["items_exempt_generic_markdown"], 1, repr(anchor)
+                    report["items_exempt_contentless"], 1, repr(anchor)
                 )
                 self.assertEqual(report["items_classified"], 1, repr(anchor))
 
@@ -667,14 +667,202 @@ class TestEveryExemptCharacterReachesTheExemption(unittest.TestCase):
             ["validate_handoff", "gate_compliance"] + ["___"] * 17
         )
         self.assertEqual(padded["items_classified"], 2)
-        self.assertEqual(padded["items_exempt_generic_markdown"], 17)
+        self.assertEqual(padded["items_exempt_contentless"], 17)
         self.assertEqual(padded["overfit_ratio"], 1.0)
 
-    def test_a_character_outside_the_set_still_scores(self):
-        # The exemption is the set, not "anything wordless". Decoration is
-        # artifact-specific, so it stays in the scored set and is tested for
-        # a lift like any other anchor.
-        report = self._report(["validate_handoff", "▓▒░"])
-        self.assertEqual(report["items_exempt_generic_markdown"], 0)
-        self.assertEqual(report["items_classified"], 2)
+    def test_decoration_outside_the_set_scores_only_when_it_is_a_lift(self):
+        # The set decides RECITATION, not denominator membership. Decoration
+        # reproduced verbatim from the artifact is a lift and stays in the
+        # scored set (numerator and denominator alike); decoration that is not
+        # in the artifact measures nothing and leaves the set, rather than
+        # taking a denominator seat as `outcome` -- which is how "█" and
+        # "▓ ▒ ░" diluted the ratio before.
+        absent = self._report(["validate_handoff", "▓▒░"])
+        self.assertEqual(absent["items_exempt_contentless"], 1)
+        self.assertEqual(absent["items_classified"], 1)
 
+        criteria = {"skill_name": "x", "test_cases": [
+            {"id": "t1", "required_present": ["validate_handoff", "▓▒░"]},
+        ]}
+        lifted = check_overfit(criteria, self.ARTIFACT + "\n▓▒░\n", "x", 0.34)
+        self.assertEqual(lifted["items_exempt_contentless"], 0)
+        self.assertEqual(lifted["items_classified"], 2)
+        self.assertEqual(lifted["counts"]["vocabulary"], 2)
+        self.assertEqual(lifted["counts"]["outcome"], 0)
+
+
+
+class TestContentlessItemsNeverSitInTheDenominator(unittest.TestCase):
+    """r5-B1. Fourth appearance of the denominator-dilution exploit, and the
+    first test written against the INVARIANT instead of a list of shapes.
+
+    History: the rule was closed "by construction" three times and reopened
+    three times -- identifier-shaped anchors, then short verbatim prose, then
+    underscore runs -- because each fix matched a decoration SHAPE and the
+    next shape walked around it. The fourth door was internal whitespace:
+    `"| --- |"`, `"- - -"` and `"** **"` matched neither the exemption
+    (`BARE_MARKUP`, whitespace-free) nor the lift test (`MARKUP_ANCHOR`,
+    whitespace-free), normalised to zero words so MIN_ANCHOR_WORDS never
+    applied, and landed in the denominator as `outcome`; three of each turned
+    a ratio-1.0 criteria set into `within_threshold`, exit 0. Single-character
+    decoration (`"█"`) went through the same gap under MARKUP_ANCHOR's
+    two-character floor.
+
+    The invariant asserted here, and the only thing check_overfit.py promises:
+    an item that yields no normalised words never occupies a denominator seat
+    as `outcome`. It is either recitation (counted in both halves of the
+    ratio) or it leaves the scored set. The corpus below is deliberately
+    open-ended -- ASCII markdown, box drawing, CJK punctuation, bare
+    whitespace -- because the point is that no fifth shape can exist, not that
+    these particular ten are handled."""
+
+    ARTIFACT = (
+        "# Demo\n\nRun validate_handoff then gate_compliance.\n\n"
+        "## Section\n\n---\n\n| a | b |\n| --- | --- |\n\n- - -\n\n** **\n"
+    )
+
+    # Every entry normalises to zero words. Nothing else is asserted about
+    # them: not their characters, not their length, not their whitespace.
+    CONTENTLESS = (
+        "| --- |", "- - -", "** **", "|  ---  |", "|---|", "---", "#", "##",
+        "___", "█", "▓ ▒ ░", "▓▒░", "→", "···", "* * *", "<!-- -->", "=== ",
+        " ", "\t", "。", "•", "()", "[ ]", "{...}", "!!", "??",
+    )
+
+    def _report(self, present=(), checks=()):
+        criteria = {"skill_name": "x", "test_cases": [
+            {"id": "t1", "required_present": list(present),
+             "checks": list(checks)},
+        ]}
+        return check_overfit(criteria, self.ARTIFACT, "x", 0.34)
+
+    def test_no_contentless_anchor_is_ever_classified_outcome(self):
+        for anchor in self.CONTENTLESS:
+            report = self._report(present=["validate_handoff", anchor])
+            outcomes = [i for i in report["flagged"] if i["class"] == "outcome"]
+            self.assertEqual(outcomes, [], repr(anchor))
+            # One genuine item is classified; the contentless one either
+            # joined it as a lift or left the set. Never as `outcome`.
+            self.assertEqual(report["counts"]["outcome"], 0, repr(anchor))
+            self.assertIn(report["items_classified"], (1, 2), repr(anchor))
+
+    def test_no_contentless_item_can_lower_the_ratio(self):
+        bare = self._report(present=["validate_handoff", "gate_compliance"])
+        self.assertEqual(bare["verdict"], "overfitted")
+        self.assertEqual(bare["overfit_ratio"], 1.0)
+        for anchor in self.CONTENTLESS:
+            padded = self._report(
+                present=["validate_handoff", "gate_compliance"] + [anchor] * 17
+            )
+            self.assertGreaterEqual(
+                padded["overfit_ratio"], bare["overfit_ratio"], repr(anchor)
+            )
+            self.assertEqual(padded["verdict"], "overfitted", repr(anchor))
+
+    def test_the_reported_whitespace_forms_no_longer_dilute(self):
+        # The exact reproduction: one genuine vocabulary anchor scores
+        # `overfitted`; three `"| --- |"` and three `"- - -"` used to drop it
+        # to 0.1429 and exit 0.
+        padded = self._report(present=[
+            "gate_compliance", "| --- |", "| --- |", "| --- |",
+            "- - -", "- - -", "- - -",
+        ])
+        self.assertEqual(padded["verdict"], "overfitted")
+        self.assertEqual(padded["items_classified"], 1)
+        self.assertEqual(padded["items_exempt_contentless"], 6)
+
+    def test_the_invariant_covers_descriptions_and_rubric_bands_too(self):
+        # Scoping the earlier fixes to `required_present` was itself part of
+        # the leak: a contentless check description or rubric band measures
+        # exactly as much as a contentless anchor, which is nothing.
+        for text in self.CONTENTLESS:
+            report = self._report(checks=[
+                {"description": "the report names the failing case"},
+                {"description": text},
+                {"rubric": {"5": text, "0": text}},
+            ])
+            self.assertEqual(report["counts"]["outcome"], 1, repr(text))
+            self.assertEqual(report["items_classified"], 1, repr(text))
+            self.assertEqual(report["items_exempt_contentless"], 2, repr(text))
+
+    def test_a_set_of_only_contentless_items_measures_nothing(self):
+        report = self._report(present=list(self.CONTENTLESS))
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertIsNone(report["overfit_ratio"])
+
+    def test_every_declared_syntax_character_is_contentless(self):
+        # The import-time check in check_overfit.py, asserted end to end: a
+        # member of MARKDOWN_SYNTAX_CHARS that normalised to a word would be
+        # a scorable item, and the exemption would be lying about it.
+        from check_overfit import _carries_content
+
+        for char in sorted(MARKDOWN_SYNTAX_CHARS):
+            self.assertFalse(_carries_content(char), repr(char))
+
+    def test_one_word_is_enough_to_be_scored(self):
+        # The other side of the invariant: `_carries_content` is a floor at
+        # one word, not a licence to drop short items. A one-word anchor is
+        # below MIN_ANCHOR_WORDS so it is not a LIFT, but it still occupies a
+        # denominator seat, because it does measure something.
+        report = self._report(present=["gate_compliance", "ok"])
+        self.assertEqual(report["items_classified"], 2)
+        self.assertEqual(report["counts"]["outcome"], 1)
+        self.assertEqual(report["items_exempt_contentless"], 0)
+
+
+class TestANonStringSkillNameIsAUsageError(unittest.TestCase):
+    """r5-B4. `criteria.get("skill_name") or ""` accepted any truthy value and
+    a non-string one reached `re.escape` in `_names_the_artifact`: an uncaught
+    TypeError, traceback on stderr, exit 1. Step 6a reads exit 1 as
+    `overfitted` and halts the run blaming the criteria set, when the fault is
+    a malformed field. Every other malformed-input path in this script exits 2
+    and names what is wrong."""
+
+    def _run(self, criteria_json):
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "criteria.json")
+            with open(path, "w") as handle:
+                json.dump(criteria_json, handle)
+            artifact = os.path.join(tmp, "SKILL.md")
+            with open(artifact, "w") as handle:
+                handle.write("# Demo\n\nRun the pipeline and report.\n")
+            return subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "check_overfit.py"),
+                    path,
+                    "--artifact", artifact,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+    CASES = {"test_cases": [
+        {"id": "t1", "checks": [{"description": "the run reports a verdict"}]}
+    ]}
+
+    def test_an_integer_skill_name_exits_2_without_a_traceback(self):
+        proc = self._run(dict(self.CASES, skill_name=123))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("skill_name", proc.stderr)
+        self.assertIn("must be a string", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_a_list_skill_name_exits_2(self):
+        proc = self._run(dict(self.CASES, skill_name=["hone"]))
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("must be a string", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_a_missing_or_null_skill_name_is_still_allowed(self):
+        for criteria in (self.CASES, dict(self.CASES, skill_name=None)):
+            proc = self._run(criteria)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertNotIn("Traceback", proc.stderr)
