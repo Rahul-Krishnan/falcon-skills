@@ -283,7 +283,7 @@ Re-read the artifact from disk and compare its content to the `artifact_content`
 
 This prevents the exact failure mode where two CC sessions edit the same artifact and last-write-wins silently destroys the other session's work.
 
-Edit the artifact at `{edit_path}`. After all edits, re-read each edited file from disk and confirm the changes are present, then record the outcome as `applied_edits.confirmed_on_disk` in the handoff below. `validate_handoff.py` requires that field, so this read-back is a gate, not a nudge.
+Edit the artifact at `{edit_path}`. After all edits, re-read each edited file from disk and confirm the changes are present, then record the outcome as `applied_edits.confirmed_on_disk` in the handoff below. `validate_handoff.py` requires that field to be `true`, so this read-back is a gate, not a nudge: a handoff recording `false` fails validation. If the re-read does not confirm every planned edit, STOP and report which edits are missing. Do not hand off to Phase 3 -- it compares before/after scores and auto-reverts from `artifact_before_snapshot`, both of which assume the edits are on disk.
 
 **Validator Generation (multi-phase skills and commands only):**
 
@@ -321,7 +321,7 @@ If this hone pass added or modified handoff interface blocks in the artifact, an
 ```
 applied_edits: {
   edit_count: number,                    // number of edits applied
-  confirmed_on_disk: boolean,            // re-read confirms changes present
+  confirmed_on_disk: boolean,            // re-read confirms changes present; must be true
   artifact_before_snapshot: string,      // pre-edit content path (for revert)
   syntax_check_passed: boolean           // bash -n or markdown structure ok
 }

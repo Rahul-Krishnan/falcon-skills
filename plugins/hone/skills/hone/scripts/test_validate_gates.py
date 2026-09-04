@@ -260,7 +260,6 @@ class TestModeDerivation(unittest.TestCase):
             "gates": [
                 gate("fixonly_entry"),
                 gate("phase2_to_phase3"),
-                gate("convergence"),
                 gate("phase3_exit"),
                 gate("workflow_exit"),
             ],
@@ -367,19 +366,33 @@ class TestCliStateFileGuards(unittest.TestCase):
 
 
 class TestHaltSequenceTail(unittest.TestCase):
-    """A fail followed by convergence + workflow_exit is a halt, not progress."""
+    """A fail followed only by workflow_exit is a halt, not progress."""
 
-    def test_convergence_in_the_tail_does_not_warn(self):
+    def test_exit_after_the_fail_does_not_warn(self):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
             gate("phase3_exit", result="fail"),
-            gate("convergence", result="fail"),
             gate("workflow_exit", result="fail"),
         ]
         report = validate_gates(gates, "normal")
         self.assertTrue(report["valid"])
         self.assertEqual(report["warnings"], [])
+
+    def test_an_unemitted_step_in_the_tail_still_warns(self):
+        """Regression: `convergence` is not an event hone emits.
+
+        It was in HALT_SEQUENCE_STEPS anyway, so appending one silenced this
+        warning for any failed gate.
+        """
+        gates = [
+            gate("phase1_to_phase2"),
+            gate("phase2_to_phase3", result="fail"),
+            gate("convergence", result="fail"),
+            gate("workflow_exit", result="pass"),
+        ]
+        report = validate_gates(gates, "normal")
+        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
 
 
 if __name__ == "__main__":
@@ -508,33 +521,31 @@ class TestHaltTailMatchesTheScorer(unittest.TestCase):
     `workflow_exit`.
     """
 
-    def test_convergence_tail_without_workflow_exit_warns(self):
+    def test_tail_without_workflow_exit_warns(self):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
             gate("phase3_exit", result="fail"),
-            gate("convergence", result="fail"),
         ]
         report = validate_gates(gates, "normal")
         self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
 
-    def test_passing_convergence_after_an_unrelated_fail_warns(self):
+    def test_forward_progress_after_an_unrelated_fail_warns(self):
         gates = [
             gate("phase1_to_phase2"),
             gate("handoff_phase2_apply", result="fail"),
-            gate("convergence", result="pass"),
+            gate("phase2_to_phase3", result="pass"),
             gate("workflow_exit", result="pass"),
         ]
         report = validate_gates(gates, "normal")
         self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
 
     def test_the_documented_regression_halt_does_not_warn(self):
-        """phase3_exit fails at step 6; the mandatory convergence check follows."""
+        """phase3_exit fails on auto-revert; the exit gate follows."""
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
             gate("phase3_exit", result="fail"),
-            gate("convergence", result="pass"),
             gate("workflow_exit", result="pass"),
         ]
         report = validate_gates(gates, "normal")

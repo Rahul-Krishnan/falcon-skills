@@ -1312,11 +1312,10 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
         self.assertLess(result["score"], 1.0)
 
     def test_documented_halt_sequence_is_compliant(self):
-        # The detecting fail, the convergence check it capped, then the exit.
+        # The detecting fail, then the exit recording the stop.
         result = _score_written_gates(
             [
                 self._gate("phase3_exit", "fail"),
-                self._gate("convergence", "fail"),
                 self._gate("workflow_exit", "fail"),
             ]
         )
@@ -2471,6 +2470,86 @@ class TestCoordinatedListDenial(unittest.TestCase):
         self.assertTrue(_has_unnegated_occurrence("structural audit", text))
 
 
+class TestUncommaedClauseBoundaries(unittest.TestCase):
+    """A dash or a causal conjunction ends the denial's clause too.
+
+    Regression: the 160-character lookback only trimmed at sentence
+    punctuation and at `, ; then and but before after while`, so a clause
+    joined by a dash, "so" or "because" inherited a denial from up to 160
+    characters back and forward progress went unscored on `required_absent`.
+    """
+
+    SPLICES = (
+        "No files were found in the target directory - the structural audit "
+        "ran anyway and produced findings.",
+        "No files were found in the target directory \u2014 the structural audit "
+        "ran anyway and produced findings.",
+        "No files were found in the target directory \u2013 the structural audit "
+        "ran anyway.",
+        "No prior results existed, so the structural audit ran anyway and "
+        "produced findings.",
+        "Nothing was skipped, because the structural audit ran to completion "
+        "on the artifact.",
+    )
+
+    def test_forward_progress_after_the_boundary_is_flagged(self):
+        from score_execution import _has_unnegated_occurrence
+
+        for text in self.SPLICES:
+            with self.subTest(text=text):
+                self.assertTrue(
+                    _has_unnegated_occurrence("structural audit", text)
+                )
+
+    def test_the_splice_costs_the_quality_check(self):
+        from score_execution import score_quality_checks
+
+        result = score_quality_checks(
+            self.SPLICES[0], [], [], ["structural audit"]
+        )
+        self.assertEqual(result["score"], 0.0)
+
+    def test_a_hyphenated_word_is_not_a_boundary(self):
+        """Only a spaced dash separates clauses; "well-formed" does not."""
+        from score_execution import _has_unnegated_occurrence
+
+        text = "Did not produce a well-formed structural audit."
+        self.assertFalse(_has_unnegated_occurrence("structural audit", text))
+
+    def test_a_dash_introducing_a_list_still_reads_as_one_denial(self):
+        """The widening the 160-character window exists for, after a dash.
+
+        A dash can introduce an appositive list as easily as it can splice a
+        clause, so it gets the comma's conditional treatment (glue plus a
+        coordinator), not the semicolon's unconditional break.
+        """
+        from score_execution import _has_unnegated_occurrence
+
+        text = (
+            "Halted without reaching the remaining steps - the structural "
+            "audit, criteria generation, or the eval runner."
+        )
+        for phrase in ("structural audit", "criteria generation", "eval runner"):
+            with self.subTest(phrase=phrase):
+                self.assertFalse(_has_unnegated_occurrence(phrase, text))
+
+    def test_the_coordinated_list_denial_still_spans_the_window(self):
+        """The motivating case for NEGATION_WINDOW = 160, re-asserted here.
+
+        At 40 the cue fell outside the window for every item after the first.
+        The clause-boundary fix above must not be paid for by narrowing it.
+        """
+        from score_execution import NEGATION_WINDOW, _has_unnegated_occurrence
+
+        self.assertGreaterEqual(NEGATION_WINDOW, 160)
+        text = (
+            "Halted: workflow state file is corrupt. Emitted the workflow_exit "
+            "fail event and stopped without proceeding to structural audit, "
+            "criteria generation, or the eval runner."
+        )
+        self.assertFalse(_has_unnegated_occurrence("eval runner", text))
+
+
 class TestHaltSequenceGateCompliance(unittest.TestCase):
     """A fail followed only by the halt is the documented outcome, not a lapse."""
 
@@ -2493,18 +2572,20 @@ class TestHaltSequenceGateCompliance(unittest.TestCase):
     def test_extra_truthful_fail_does_not_lower_the_score(self):
         from score_execution import score_gate_compliance
 
-        two = [
+        terse = [
             {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
             {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
         ]
-        three = [
+        # The same run, with the repaired handoff failure also reported.
+        candid = [
+            {"step": "handoff_phase2_apply", "judge": "self-check", "result": "fail"},
+            {"step": "handoff_phase2_apply", "judge": "self-check", "result": "pass"},
             {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
-            {"step": "convergence", "judge": "automated", "result": "fail"},
             {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
         ]
         self.assertEqual(
-            score_gate_compliance([], self._resp(three))["score"],
-            score_gate_compliance([], self._resp(two))["score"],
+            score_gate_compliance([], self._resp(candid))["score"],
+            score_gate_compliance([], self._resp(terse))["score"],
         )
 
     def test_fail_followed_by_forward_progress_is_still_non_compliant(self):
@@ -2847,34 +2928,43 @@ class TestGateComplianceHaltTail(unittest.TestCase):
     def _gate(self, step, result="fail"):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
 
-    def test_capped_convergence_then_exit_is_compliant(self):
-        result = _score_written_gates([
-            self._gate("phase3_exit"),
-            self._gate("convergence"),
-            self._gate("workflow_exit"),
-        ])
-        self.assertEqual(result["score"], 1.0)
+    def test_an_unemitted_step_cannot_launder_a_failed_gate(self):
+        """Regression: appending `convergence` scored any fail as a halt.
 
-    def test_passing_convergence_is_not_a_halt_for_an_unrelated_fail(self):
-        """convergence(pass) after an unrelated fail is progress, not the cap."""
+        `convergence` is in no row of SKILL.md's Gate Events table and in no
+        Phase 3 step, yet it sat in HALT_SEQUENCE_STEPS, so an executor that
+        invented the event scored a failed gate it never repaired as a
+        compliant halt.
+        """
+        for invented in ("convergence", "made_up_step"):
+            for result_value in ("pass", "fail"):
+                with self.subTest(step=invented, result=result_value):
+                    result = _score_written_gates([
+                        self._gate("phase2_to_phase3"),
+                        self._gate(invented, result_value),
+                        self._gate("workflow_exit", "pass"),
+                    ])
+                    self.assertLess(result["score"], 1.0)
+
+    def test_forward_progress_is_not_a_halt_for_an_unrelated_fail(self):
+        """A later gate for another step is progress, not the cap."""
         result = _score_written_gates([
             self._gate("handoff_phase2_apply"),
-            self._gate("convergence", "pass"),
+            self._gate("phase2_to_phase3", "pass"),
             self._gate("workflow_exit", "pass"),
         ])
         self.assertLess(result["score"], 1.0)
 
     def test_the_documented_regression_halt_is_compliant(self):
-        """[phase3_exit:fail, convergence:pass, workflow_exit:pass].
+        """[phase3_exit:fail, workflow_exit:pass].
 
-        The auto-revert halt in references/phase3-reevaluation.md: step 6
-        records the regression, step 7 runs the mandatory convergence check,
-        which passes on the pre-revert ledger. Scoring that fail as
-        non-compliant penalizes the executor for reporting it.
+        The auto-revert halt in references/phase3-reevaluation.md: Phase 3
+        records the regression on `phase3_exit`, then the mechanical exit gate
+        emits `workflow_exit`. Scoring that fail as non-compliant penalizes
+        the executor for reporting it.
         """
         result = _score_written_gates([
             self._gate("phase3_exit"),
-            self._gate("convergence", "pass"),
             self._gate("workflow_exit", "pass"),
         ])
         self.assertEqual(result["score"], 1.0)

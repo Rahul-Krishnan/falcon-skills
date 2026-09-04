@@ -262,9 +262,9 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
     # the halt sequence, never by unrelated forward progress. Requiring the
     # literal last index flagged every documented halt shape and invited the
     # executor to append a fabricated repair pass to silence the warning.
-    # `convergence` joins workflow_exit in that tail: it is the check the
-    # failure capped, and Phase 3 emits it after `phase3_exit`, so the failing
-    # step goes to the helper along with the tail. Both files call
+    # `workflow_exit` is the whole of that tail: it is the only event SKILL.md
+    # mandates after the failure that stopped the run, so the failing step
+    # goes to the helper along with the tail. Both files call
     # hone_common.is_halt_tail, so "the same shape" is now one function rather
     # than two hand-copied conditions that had already drifted apart.
     for index, gate in enumerate(gates):
