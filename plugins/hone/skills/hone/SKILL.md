@@ -348,6 +348,8 @@ Use `"fail"` for a gate that did not clear (entering Phase 2 with nothing to imp
 
 **Failure-path events are mandatory, not optional.** A documented recovery path that emits no event caps `gate_compliance` at 0.7, exactly as a skipped transition does. A `fail` event is scored as compliant when it is terminal (the pipeline halted there) or when a later `pass` for the same step records the repair. Emitting the correct `fail` never costs you score: reporting a failure honestly is the behavior being measured.
 
+**A perfect `gate_compliance` needs at least four compliant events.** The scorer divides the compliant count by the number of events emitted or by four, whichever is larger, and counts the shortfall as neutral (`GATE_EVIDENCE_FLOOR` in `scripts/score_execution.py`, which carries the measured distribution the four is read off). Four is the mandatory sequence above, so a run that emits every event it owes is unaffected; a run that emits one event and stops cannot score 1.0 off it. This cuts both ways by construction — a single malformed or unrepaired event no longer scores 0.0 either — and it is why emitting more truthful events is never worse than emitting fewer.
+
 ## Phase 1: Evaluate
 
 **STOP. You MUST read [references/phase1-evaluation.md](references/phase1-evaluation.md) before executing any step below.** The bullets below are a navigation map only — the actual instructions, handoff schemas, gate checklists, and execution commands are in the reference file. Do not execute from this summary.
