@@ -33,7 +33,9 @@ class TestConvergence(unittest.TestCase):
         self.assertEqual(analyze({"rounds": []}, 3, 3)["verdict"], "in_progress")
 
     def test_clean_final_round_converges(self):
-        report = analyze(ledger([[finding("f1")], []]), 3, 3)
+        """A close has to be RECORDED; see TestOmittedFindingsStayLive."""
+        report = analyze(
+            ledger([[finding("f1")], [finding("f1", status="fixed")]]), 3, 3)
         self.assertEqual(report["verdict"], "converged")
 
     def test_minor_findings_do_not_block_convergence(self):
@@ -46,8 +48,65 @@ class TestConvergence(unittest.TestCase):
         self.assertEqual(report["verdict"], "in_progress")
 
     def test_capped_is_not_converged(self):
-        report = analyze(ledger([[finding("f1")], [finding("f2")]], max_rounds=2), 5, 5)
+        report = analyze(
+            ledger([[finding("f1")],
+                    [finding("f1", status="fixed"), finding("f2")]],
+                   max_rounds=2), 5, 5)
         self.assertEqual(report["verdict"], "capped")
+        self.assertEqual(len(report["open_blocking"]), 1)
+
+
+class TestOmittedFindingsStayLive(unittest.TestCase):
+    """The verdict reads the same rule the escalation signals already read.
+
+    Only an explicit `fixed` or `rejected` closes a finding. A round that
+    simply omits one is an unreported round, and reading it as a fix is the
+    slip SKILL.md Phase 2 Step 8's "restate every still-live finding" rule
+    exists to prevent.
+    """
+
+    def test_a_forgotten_critical_does_not_converge(self):
+        report = analyze(
+            ledger([[finding("f1", severity="critical"),
+                     finding("f2", severity="minor")],
+                    [finding("f2", severity="minor", status="fixed")]]), 3, 3)
+        self.assertEqual(report["verdict"], "in_progress")
+        self.assertEqual([f["id"] for f in report["open_blocking"]], ["f1"])
+
+    def test_a_recorded_close_still_converges(self):
+        report = analyze(
+            ledger([[finding("f1", severity="critical")],
+                    [finding("f1", severity="critical", status="fixed")]]),
+            3, 3)
+        self.assertEqual(report["verdict"], "converged")
+        self.assertEqual(report["open_blocking"], [])
+
+    def test_a_rejection_closes_a_finding_too(self):
+        report = analyze(
+            ledger([[finding("f1")], [finding("f1", status="rejected")]]), 3, 3)
+        self.assertEqual(report["verdict"], "converged")
+
+    def test_a_reopened_finding_is_live_again(self):
+        report = analyze(
+            ledger([[finding("f1")], [finding("f1", status="fixed")],
+                    [finding("f1")]]), 9, 9)
+        self.assertEqual([f["id"] for f in report["open_blocking"]], ["f1"])
+
+    def test_the_carry_forward_does_not_cross_runs(self):
+        """Permanence is the failure this module has already had to undo twice."""
+        report = analyze(
+            {"artifact": "demo", "max_rounds": 3, "rounds": [
+                round_entry(1, [finding("f1")], run="run-1"),
+                round_entry(1, [], run="run-2"),
+            ]}, 9, 9)
+        self.assertEqual(report["verdict"], "converged")
+
+    def test_an_id_less_open_finding_in_the_last_round_still_counts(self):
+        report = analyze(
+            {"artifact": "demo", "max_rounds": 3, "rounds": [
+                round_entry(1, [{"severity": "major", "status": "open",
+                                 "file": "SKILL.md", "summary": "issue"}]),
+            ]}, 9, 9)
         self.assertEqual(len(report["open_blocking"]), 1)
 
 
@@ -955,3 +1014,142 @@ class TestBudgetExhaustionReportsCapped(unittest.TestCase):
     def test_minor_findings_are_left_out_of_the_streak_report(self):
         report = self._run([[finding("F1", severity="minor")]] * 3)
         self.assertEqual(report["open_streaks"], {})
+
+
+class TestRelocationNeedsANewDestination(unittest.TestCase):
+    """Two findings that share wording are not one finding that moved.
+
+    `escalate` has no counting bar and is routed away from the `--confirm`
+    human gate, so a false relocation kills the run outright. Identical
+    summaries across files are routine for hone findings.
+    """
+
+    def _ledger(self, rounds):
+        return {"artifact": "demo", "max_rounds": 5, "rounds": [
+            round_entry(i + 1, f, run="run-1") for i, f in enumerate(rounds)
+        ]}
+
+    def test_two_concurrent_findings_sharing_wording_do_not_escalate(self):
+        report = analyze(self._ledger([
+            [finding("F1", file="SKILL.md", summary="no stated exit condition"),
+             finding("F2", file="reference.md",
+                     summary="no stated exit condition")],
+            [finding("F1", file="SKILL.md", status="fixed",
+                     summary="no stated exit condition"),
+             finding("F2", file="reference.md",
+                     summary="no stated exit condition")],
+        ]), 9, 9)
+        self.assertEqual(report["relocations"], [])
+        self.assertNotEqual(report["verdict"], "escalate")
+
+    def test_a_genuine_relocation_still_escalates(self):
+        report = analyze(self._ledger([
+            [finding("F1", file="SKILL.md", summary="no stated exit condition")],
+            [finding("F1", file="SKILL.md", status="fixed",
+                     summary="no stated exit condition"),
+             finding("F3", file="reference.md",
+                     summary="no stated exit condition")],
+        ]), 9, 9)
+        self.assertEqual(report["verdict"], "escalate")
+        self.assertEqual(len(report["relocations"]), 1)
+
+    def test_the_same_id_restated_in_another_file_is_not_a_relocation(self):
+        """A correction to the record, not a finding chased around."""
+        report = analyze(self._ledger([
+            [finding("F1", file="SKILL.md", summary="no stated exit condition")],
+            [finding("F1", file="SKILL.md", status="fixed",
+                     summary="no stated exit condition"),
+             finding("F1", file="reference.md",
+                     summary="no stated exit condition")],
+        ]), 9, 9)
+        self.assertEqual(report["relocations"], [])
+
+
+class TestRoundNumbersNotLedgerEntries(unittest.TestCase):
+    """A round re-appended after a compaction is one round, not two.
+
+    Phase 2's compaction-recovery protocol says append and never overwrite,
+    so the duplicate is expected and must not spend the round budget twice.
+    """
+
+    def test_a_re_appended_round_does_not_exhaust_the_budget(self):
+        report = analyze({"artifact": "demo", "max_rounds": 3, "rounds": [
+            round_entry(1, [finding("f1")], run="run-1"),
+            round_entry(2, [finding("f1")], run="run-1"),
+            round_entry(2, [finding("f1")], run="run-1"),
+        ]}, 9, 9)
+        self.assertEqual(report["rounds_run"], 2)
+        self.assertEqual(report["verdict"], "in_progress")
+
+    def test_the_stall_window_does_not_see_the_duplicate_twice(self):
+        report = analyze({"artifact": "demo", "max_rounds": 9, "rounds": [
+            round_entry(1, [finding("f1")], run="run-1"),
+            round_entry(2, [finding("f1")], run="run-1"),
+            round_entry(2, [finding("f1")], run="run-1"),
+        ]}, 9, 2)
+        self.assertEqual(report["blocking_counts"], [1, 1])
+
+    def test_the_latest_append_of_a_round_wins(self):
+        report = analyze({"artifact": "demo", "max_rounds": 9, "rounds": [
+            round_entry(1, [finding("f1")], run="run-1"),
+            round_entry(2, [], run="run-1"),
+            round_entry(2, [finding("f1", status="fixed")], run="run-1"),
+        ]}, 9, 9)
+        self.assertEqual(report["verdict"], "converged")
+
+    def test_entries_with_no_usable_round_number_are_not_collapsed(self):
+        report = analyze({"artifact": "demo", "max_rounds": 9, "rounds": [
+            {"run": "run-1", "findings": [finding("f1")]},
+            {"run": "run-1", "findings": [finding("f2")]},
+        ]}, 9, 9)
+        self.assertEqual(report["rounds_run"], 2)
+
+
+class TestTuningLimitsAreValidated(unittest.TestCase):
+    """A limit this module cannot use is a usage error, not a traceback.
+
+    Exit 1 is the documented "not converged yet, read --json" code, so an
+    uncaught IndexError exiting 1 with no JSON breaks the contract.
+    """
+
+    def _run(self, *flags):
+        import json as _json
+        import subprocess
+        import tempfile
+
+        payload = {"artifact": "demo", "max_rounds": 3, "rounds": [
+            {"round": 1, "run": "run-1", "findings": [finding("f1")]},
+        ]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "findings-ledger.json"
+            path.write_text(_json.dumps(payload))
+            return subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).parent / "check_convergence.py"),
+                 str(path), "--json", *flags],
+                capture_output=True, text=True,
+            )
+
+    def test_a_negative_stall_limit_exits_2_not_1(self):
+        result = self._run("--stall-limit=-1")
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertIn("--stall-limit must be at least 1", result.stderr)
+
+    def test_a_zero_limit_is_rejected(self):
+        for flag in ("--stall-limit=0", "--recurrence-limit=0",
+                     "--reopen-limit=0"):
+            with self.subTest(flag=flag):
+                result = self._run(flag)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("must be at least 1", result.stderr)
+
+    def test_a_negative_reopen_window_is_rejected(self):
+        result = self._run("--reopen-window=-1")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--reopen-window must be at least 0", result.stderr)
+
+    def test_the_defaults_still_run(self):
+        result = self._run()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('"verdict"', result.stdout)

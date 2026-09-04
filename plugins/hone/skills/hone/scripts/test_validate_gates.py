@@ -428,7 +428,8 @@ class TestHaltSequenceTail(unittest.TestCase):
             gate("workflow_exit", result="pass"),
         ]
         report = validate_gates(gates, "normal")
-        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
+        self.assertTrue(any("failed but the run continued" in w
+                    for w in report["warnings"]))
 
     def test_the_auto_revert_halt_in_emission_order_does_not_warn(self):
         """Regression: the documented auto-revert halt warned.
@@ -594,7 +595,8 @@ class TestHaltTailMatchesTheScorer(unittest.TestCase):
             gate("phase3_exit", result="fail"),
         ]
         report = validate_gates(gates, "normal")
-        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
+        self.assertTrue(any("failed but the run continued" in w
+                    for w in report["warnings"]))
 
     def test_forward_progress_after_an_unrelated_fail_warns(self):
         gates = [
@@ -604,7 +606,8 @@ class TestHaltTailMatchesTheScorer(unittest.TestCase):
             gate("workflow_exit", result="pass"),
         ]
         report = validate_gates(gates, "normal")
-        self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
+        self.assertTrue(any("failed but the run continued" in w
+                    for w in report["warnings"]))
 
     def test_the_documented_regression_halt_does_not_warn(self):
         """phase3_exit fails on auto-revert; the exit gate follows."""

@@ -279,19 +279,22 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
     # goes to the helper along with the tail. Both files call
     # hone_common.fail_is_accounted, so "the same shape" is now one function
     # rather than two hand-copied conditions that had already drifted apart.
-    # It carries a third case the hand-copies missed: a step the workflow
-    # emits once per attempt (`convergence`, `handoff_<name>`) whose earlier
-    # failure a later attempt settled. The exit-2 ledger repair emits
-    # `convergence:fail` and then a second `convergence` that may fail too, so
-    # a correct repair has no later `pass` and is not its own halt tail.
+    # It carries two cases the hand-copies missed. An authorized restart: the
+    # run halted, recorded `workflow_exit`, and a `resume` records the human
+    # granting more rounds. And a documented in-place retry: the exit-2 ledger
+    # repair emits `convergence:fail` and then a second `convergence` that may
+    # fail too, so a correct repair has no later `pass` and is not its own
+    # halt tail. What it deliberately does NOT accept is a later `pass` for a
+    # gate whose `fail` was a halt order, which is how a run that ignored an
+    # `escalate` and did another round used to score clean.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
         if not fail_is_accounted(gates[index + 1 :], gate.get("step")):
             warnings.append(
                 f"gates[{index}] step '{gate.get('step')}' failed but the run "
-                "continued: no halt tail behind it, no later 'pass' for that "
-                "step, and no later attempt at it"
+                "continued: no halt tail behind it, no recorded 'resume' after "
+                "a halt, and no in-place retry of that step"
             )
 
     # Non-string steps already drew a schema error above; keep them out of

@@ -29,9 +29,11 @@ a resumed run restarts its rounds without re-deriving its history.
 Because the ledger is cumulative, every signal here has to say which scope it
 reads, and the answer is not the same for all of them:
 
-  run-scoped   `stuck` (the consecutive-open streak), the stall window, the
-               relocation trail, `rounds_run`, `blocking_counts`, and the
-               `max_rounds` budget. All of these are statements about ONE
+  run-scoped   the still-live open set (which decides the verdict and
+               `open_blocking`), `stuck` (the consecutive-open streak), the
+               stall window, the relocation trail, `rounds_run`,
+               `blocking_counts`, and the `max_rounds` budget. All of these
+               are statements about ONE
                invocation failing to converge, and all of them would otherwise
                fire on a new run's FIRST round purely on inherited history --
                a halt before the run does any work, repeating on every future
@@ -49,6 +51,16 @@ reads, and the answer is not the same for all of them:
                recorded for an id anywhere) and the `total_rounds_logged` /
                `runs_logged` counters, which are reported as history and feed
                no verdict.
+
+Everything counted in rounds counts ROUNDS, not ledger entries. Phase 2's
+compaction-recovery protocol has the executor append rather than overwrite, so
+a round redone after a compaction is logged twice; `_dedupe_rounds` keeps the
+latest append of each round number so the duplicate does not spend the budget
+or flatten the stall window.
+
+A finding is closed only by an explicit `fixed` or `rejected` record. A round
+that omits it is an unreported round, which is why the verdict reads the run's
+live set (`_live_findings`) rather than the last round's `findings` array.
 
 This script additionally separates two outcomes hone reports as one. A run that
 exhausts its rounds with blocking findings still open is `capped`, not
@@ -214,6 +226,51 @@ def _open_findings(round_entry: dict) -> list[dict]:
     ]
 
 
+def _live_findings(round_entries: list[dict]) -> list[dict]:
+    """Findings still open at the end of `round_entries`.
+
+    The verdict used to read the LAST round's open set alone, which made the
+    absence of a finding from that round a close -- the exact reading every
+    escalation signal in this module explicitly refuses ("Only an explicit
+    `fixed` record counts as a close. A finding simply absent from a round is
+    an unreported round, not a fix"). The verdict is the one place that
+    reading is unsafe: a round that forgets to restate a still-open
+    `critical`, which is what SKILL.md Phase 2 Step 8's "restate every
+    still-live finding" rule exists to prevent and the likeliest executor
+    slip, returned `verdict: converged`, `open_blocking: []`, exit 0. A run
+    reported as success with a critical finding still live.
+
+    So a finding is live when its LATEST record in the run says `open`. Only
+    an explicit `fixed` or `rejected` closes it, which is the same rule the
+    signals use, stated once and now shared with the verdict.
+
+    Scoped to ONE RUN, like the streak, the stall window and the relocation
+    trail, and for the same reason: the ledger is permanent, so carrying an
+    unreported finding across runs would make it permanent too, and a run
+    could never converge again short of deleting the file. That is the
+    failure mode this module has already had to undo twice. Within a run the
+    restatement is mandated and its omission is a slip; across runs the
+    executor's restatement in round 1 is what carries the finding over, and
+    the ledger's own history is not a substitute for it.
+
+    A finding with no id carries no identity to track across rounds, so only
+    those in the final round are read -- an earlier one cannot be matched to
+    a later close, and counting every one of them would double-count the
+    restatements.
+    """
+    latest: dict[str, dict] = {}
+    for round_entry in round_entries:
+        for finding in _as_list(round_entry.get("findings")):
+            if isinstance(finding, dict) and finding.get("id"):
+                latest[finding["id"]] = finding
+    live = [f for f in latest.values() if _status(f) == "open"]
+    if round_entries:
+        live += [
+            f for f in _open_findings(round_entries[-1]) if not f.get("id")
+        ]
+    return live
+
+
 def _blocking(findings: list[dict]) -> list[dict]:
     return [f for f in findings if _severity(f) in BLOCKING]
 
@@ -311,13 +368,49 @@ def _run_segments(rounds: list[dict]) -> list[list[dict]]:
     return segments
 
 
+def _dedupe_rounds(segment: list[dict]) -> list[dict]:
+    """One entry per round number, keeping the latest append.
+
+    Phase 2's compaction-recovery protocol tells the executor to APPEND and
+    never overwrite, so a round interrupted mid-way and redone appears twice.
+    Everything scoped to the current run is a statement about ROUNDS, and
+    counting ENTRIES made a re-appended round look like an extra round: a
+    `[1, 2, 2]` ledger with `max_rounds: 3` returned `capped` -- a forced halt
+    reported as "budget exhausted" -- on round 2 of 3, and `blocking_counts`
+    fed the stall window the same round's count twice, which is a flat
+    stretch the run never had.
+
+    The segment arrives sorted by round number, so duplicates are adjacent and
+    the LAST of them is the most recent append, which is the one that
+    supersedes. An entry whose round number is unusable (`_round_number`
+    returns 0 for an absent or unparseable one) is left alone rather than
+    folded in with every other such entry: they carry no identity to
+    deduplicate on, and collapsing them would delete rounds.
+    """
+    position_of: dict[int, int] = {}
+    kept: list[dict] = []
+    for entry in segment:
+        number = _round_number(entry)
+        if number <= 0:
+            kept.append(entry)
+        elif number in position_of:
+            kept[position_of[number]] = entry
+        else:
+            position_of[number] = len(kept)
+            kept.append(entry)
+    return kept
+
+
 def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             reopen_limit: int = DEFAULT_REOPEN_LIMIT,
             reopen_window: int = DEFAULT_REOPEN_WINDOW_ROUNDS) -> dict:
     logged = [r for r in _as_list(ledger.get("rounds")) if isinstance(r, dict)]
     # Order WITHIN a run, never across runs: the global sort is what
     # interleaved them. See `_run_segments`.
-    segments = [sorted(seg, key=_round_number) for seg in _run_segments(logged)]
+    segments = [
+        _dedupe_rounds(sorted(seg, key=_round_number))
+        for seg in _run_segments(logged)
+    ]
     rounds = [entry for segment in segments for entry in segment]
     current_run = segments[-1] if segments else []
     reasons: list[str] = []
@@ -336,16 +429,22 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             "relocations": [], "blocking_counts": [],
         }
 
-    # The final round's open set decides which escalation reasons are still
-    # live. Every reason below is derived from the ledger's whole history, and
-    # history does not un-happen, so a reason recorded once used to hold
-    # forever: a finding open in rounds 1-3 and fixed in rounds 4-5 kept
-    # returning `escalate` with an empty `open_blocking`, and `escalate` means
-    # "halt and report a failing convergence gate". A run that fixed what was
-    # stuck converged; it did not fail to converge. The stall check already
-    # self-heals through its trailing window; this brings the streak and the
-    # relocation checks into line with it.
-    last_open = _open_findings(rounds[-1])
+    # The run's still-live open set decides both which escalation reasons hold
+    # and what the verdict is. Every reason below is derived from the ledger's
+    # whole history, and history does not un-happen, so a reason recorded once
+    # used to hold forever: a finding open in rounds 1-3 and fixed in rounds
+    # 4-5 kept returning `escalate` with an empty `open_blocking`, and
+    # `escalate` means "halt and report a failing convergence gate". A run
+    # that fixed what was stuck converged; it did not fail to converge. The
+    # stall check already self-heals through its trailing window; this brings
+    # the streak and the relocation checks into line with it.
+    #
+    # "Live" is `_live_findings`, not the final round's open array. A close
+    # has to be recorded (`fixed` or `rejected`); an omission is an unreported
+    # round. The signals and the verdict now read the same rule, which they
+    # did not: the signals said so in a comment while the verdict, one screen
+    # down, treated an omission as a fix.
+    last_open = _live_findings(current_run)
     last_open_ids = {f.get("id") for f in last_open if f.get("id")}
     last_open_signatures = {
         _signature(f.get("summary", "")) for f in last_open
@@ -510,7 +609,27 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # three: the reason line counts entries, so without this it read as
     # "3 finding(s) closed in one file reopened in another".
     seen_relocations: set[tuple[str, str, str]] = set()
-    closed_signatures: dict[str, str] = {}
+    # signature -> (origin file, origin finding id, round position of the close)
+    closed_signatures: dict[str, tuple[str, str, int]] = {}
+    # First position in this run at which each id was recorded open. This is
+    # the disambiguator the signature alone cannot supply. Keying relocation
+    # on `_signature(summary)` by itself read two DISTINCT findings that
+    # happen to share wording -- "no stated exit condition" in SKILL.md and
+    # the same sentence in reference.md, which is routine for hone findings --
+    # as one finding that moved, the moment the first of them was fixed.
+    # `escalate` has no counting bar (one hit halts) and phase3-reevaluation.md
+    # routes it deliberately away from the `--confirm` human gate, so that
+    # false positive killed the run outright.
+    #
+    # A relocation is a finding closed HERE and an equivalent one opening
+    # THERE, so the destination has to be new: a finding already open at its
+    # destination before the close did not move, it was simply already there.
+    first_open_position: dict[str, int] = {}
+    for position, round_entry in enumerate(current_run):
+        for finding in _as_list(round_entry.get("findings")):
+            if (isinstance(finding, dict) and finding.get("id")
+                    and _status(finding) == "open"):
+                first_open_position.setdefault(finding["id"], position)
     # Two passes per round, because one pass populated `closed_signatures` in
     # the same iteration that tested against it: whether a relocation was seen
     # depended on the order of findings WITHIN the round's array. A `fixed`
@@ -519,12 +638,13 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # restate live findings so it usually self-corrected, but not on the last
     # one. Collecting the round's closes first makes detection independent of
     # array order and catches the same-round relocation either way round.
-    for round_entry in current_run:
+    for position, round_entry in enumerate(current_run):
         findings = [
             f for f in _as_list(round_entry.get("findings")) if isinstance(f, dict)
         ]
         closed_this_round = {
-            _signature(f.get("summary", "")): f.get("file", "")
+            _signature(f.get("summary", "")):
+                (f.get("file", ""), f.get("id") or "", position)
             for f in findings
             if _status(f) == "fixed" and _signature(f.get("summary", ""))
         }
@@ -541,10 +661,21 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             if signature not in origins or signature not in last_open_signatures:
                 continue
             file_path = finding.get("file", "")
-            origin = origins[signature]
-            if origin != file_path and (
-                signature, origin, file_path
-            ) not in seen_relocations:
+            origin, origin_id, closed_at = origins[signature]
+            if origin == file_path:
+                continue
+            destination_id = finding.get("id") or ""
+            # Same id restated with a different file is a correction to
+            # the record, not a finding chased across the artifact. A finding
+            # with no id offers no evidence either way, and `escalate` is a
+            # forced halt, so silence beats a guess.
+            if not destination_id or destination_id == origin_id:
+                continue
+            # Open at its destination BEFORE the close: two concurrent
+            # findings that share wording, not one that moved.
+            if first_open_position.get(destination_id, position) < closed_at:
+                continue
+            if (signature, origin, file_path) not in seen_relocations:
                 seen_relocations.add((signature, origin, file_path))
                 relocations.append({
                     "signature_sample": (finding.get("summary") or "")[:100],
@@ -653,6 +784,41 @@ def budget_error(ledger: dict) -> str | None:
     return None
 
 
+def limit_errors(recurrence_limit: int, reopen_limit: int,
+                 reopen_window: int, stall_limit: int) -> list[str]:
+    """Why these tuning limits cannot be used, or an empty list.
+
+    Same contract as `budget_error`: a limit this module cannot use is a
+    usage error (exit 2), not something to run with quietly.
+
+    Both failure shapes were reachable from the command line. `--stall-limit
+    -1` made `blocking_counts[-(-1):]` empty, so `window[-1]` raised an
+    IndexError that `main()` does not catch -- the process died with a
+    traceback and exit 1, the code this module's docstring defines as "not
+    converged yet, read the verdict from --json", with no JSON to read. Exit 2
+    is supposed to be the only genuine failure, which is what the OSError and
+    UnicodeDecodeError arms above already guard.
+
+    And zero is worse than useless rather than merely odd: `blocking_counts
+    [-0:]` is the WHOLE list and `len(...) >= 0` is always true, so
+    `--stall-limit 0` escalates on the first round with any blocking finding
+    open. `--recurrence-limit 0` and `--reopen-limit 0` flag every finding on
+    its first round the same way. A negative `--reopen-window` is absorbed by
+    a `max(..., 0)` downstream, but "every reopen has aged out" is not what
+    the caller asked for, so it is rejected here rather than reinterpreted.
+    """
+    errors: list[str] = []
+    for name, value, minimum in (
+        ("--recurrence-limit", recurrence_limit, 1),
+        ("--reopen-limit", reopen_limit, 1),
+        ("--stall-limit", stall_limit, 1),
+        ("--reopen-window", reopen_window, 0),
+    ):
+        if value < minimum:
+            errors.append(f"{name} must be at least {minimum}, got {value}")
+    return errors
+
+
 def finding_errors(ledger: dict) -> list[str]:
     """Findings whose `status` or `severity` is outside the closed vocabulary.
 
@@ -711,6 +877,15 @@ def main() -> None:
                              f"escalating (default: {DEFAULT_STALL_LIMIT})")
     parser.add_argument("--json", action="store_true", help="Output JSON to stdout")
     args = parser.parse_args()
+
+    # Before the file is opened: these are usage errors in the invocation
+    # itself, knowable without a ledger.
+    limit_problems = limit_errors(args.recurrence_limit, args.reopen_limit,
+                                  args.reopen_window, args.stall_limit)
+    if limit_problems:
+        for problem in limit_problems:
+            print(f"ERROR: {problem}", file=sys.stderr)
+        sys.exit(2)
 
     try:
         with open(args.ledger_file) as handle:

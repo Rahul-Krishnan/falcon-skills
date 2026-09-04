@@ -958,13 +958,18 @@ def score_gate_compliance(
 
     This dimension scores gate *emission and schema validity*, not gate outcome.
     A gate that correctly reports failure is compliant: penalizing it would
-    reward executors for hiding failures. A 'fail' event counts as compliant
-    when it is terminal (the pipeline halted there, e.g. a Phase 3 regression
-    auto-revert or an error halt), when a later 'pass' for the same step
-    records the repair (e.g. a handoff validation retry loop), or when a later
-    attempt at a per-attempt step settles it (e.g. the Phase 3 exit-2 ledger
-    repair, whose second 'convergence' may itself fail). A 'fail' that is
-    followed by unrelated forward progress is still non-compliant.
+    reward executors for hiding failures. What a 'fail' event needs in order
+    to count as compliant depends on what that 'fail' MEANT, and
+    hone_common.fail_is_accounted owns the distinction. A validation verdict
+    (handoff_<name>, which rejects an input and orders nothing) is settled by
+    a later 'pass' for the same step. A halt order (everything else: a
+    'convergence' escalate or capped, a Phase 3 regression auto-revert, an
+    error halt) is settled only by the halt itself, by an in-place retry with
+    no event in between (the exit-2 ledger repair, whose second 'convergence'
+    may itself fail), or by a recorded halt followed by a 'resume'. A 'fail'
+    followed by unrelated forward progress is non-compliant, and so is a later
+    'pass' that was reached by doing that forward progress: running another
+    round is what a halt order forbade.
 
     Fallback (legacy): keyword counting when no structured gate events are found.
     Legacy score is capped at 0.7 to incentivize migration to structured events.
@@ -1016,14 +1021,17 @@ def score_gate_compliance(
             # on `workflow_exit` itself is the halt with nothing after it,
             # while a fail on any other step still owes the exit event.
             #
-            # The third case it owns is the one this scorer punished hardest.
-            # `convergence` and `handoff_<name>` are emitted once per ATTEMPT,
-            # and a later attempt is what settles an earlier attempt's failure.
-            # The documented exit-2 ledger repair emits `convergence:fail`,
-            # rewrites the ledger, re-runs, and emits a second `convergence`
-            # that fails whenever the re-run returns escalate or capped -- so a
-            # correct repair produced no later `pass` and was not its own halt
-            # tail, and scored exactly as an ignored halt did.
+            # The case it owns that this scorer punished hardest is the
+            # in-place retry. `convergence` and `handoff_<name>` are emitted
+            # once per ATTEMPT, and the documented exit-2 ledger repair emits
+            # `convergence:fail`, rewrites the ledger, re-runs, and emits a
+            # second `convergence` that fails whenever the re-run returns
+            # escalate or capped -- so a correct repair produced no later
+            # `pass` and was not its own halt tail, and scored exactly as an
+            # ignored halt did. The mirror-image case it now refuses is a
+            # later `pass` for a gate whose `fail` was itself a halt order: a
+            # run that ignored an `escalate` and did another round scored 1.0
+            # on the strength of the next round's passing `convergence`.
             if fail_is_accounted(gates[idx + 1 :], gate.get("step")):
                 compliant += 1
                 expected_fail += 1

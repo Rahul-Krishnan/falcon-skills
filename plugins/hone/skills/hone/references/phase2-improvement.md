@@ -405,7 +405,7 @@ After writing the handoff, set `steps.phase2_trigger_test` to `"done"` in the wo
 ```
 
 - `severity` is `critical`, `major`, or `minor`. `critical` and `major` are the blocking ones the convergence check counts; a `minor` left open never blocks convergence.
-- `status` is `open`, `fixed`, or `rejected`. Only an explicit `fixed` counts as a close: a finding simply absent from a round reads as an unreported round, not a repair.
+- `status` is `open`, `fixed`, or `rejected`. Only an explicit `fixed` or `rejected` counts as a close: a finding simply absent from a round reads as an unreported round, not a repair, and it stays in `open_blocking` until a close is recorded. This is why Step 8 restates every still-live finding: omitting one does not converge the run, it just makes the round's entry wrong.
 - `max_rounds` is **this run's** `--rounds N` budget, the same value as `iteration.target` in the state file. Do not hardcode it. `check_convergence.py` reads it to decide `capped`, and `capped` is a forced halt, so a stale `3` stops a `--rounds 6` run at round 3. Resolve the placeholder to a number: `"max_rounds": "<max_rounds>"` is valid JSON holding an unparseable int, and `check_convergence.py` exits 2 on it rather than running with `capped` quietly switched off.
 - `run` is the resolved `${RUN_ID}` string, identical on every round of this invocation. It is what tells the check where one invocation's rounds end and the next begins. Without it the boundary is inferred from repeated round numbers, which cannot see a run that never restarts its numbering, and the run-scoped signals (streak, stall window, relocation trail, round budget) then read the previous run's history as this run's.
 - Each round **appends a new entry** and restates every finding still live, carried-over ones included. That repetition is what lets the check see a finding stay open across rounds; it is also why those signals are scoped to the current run rather than the whole file.
@@ -416,7 +416,7 @@ After writing the handoff, set `steps.phase2_trigger_test` to `"done"` in the wo
 
 1. Phase 3 emits `{"step": "convergence", "judge": "self-check", "result": "fail", "reason": "ledger_missing", ...}` so the omission is recorded rather than skipped.
 2. Come back here, write the ledger from this round's findings in the shape above, and re-run the check once.
-3. The re-run's verdict drives Phase 3 step 7 normally, and the `convergence` event it emits closes the failed one: `validate_gates.py` treats a `fail` followed by a later `pass` for the same step as a repair loop, the same shape handoff validation already uses.
+3. The re-run's verdict drives Phase 3 step 7 normally, and the `convergence` event it emits closes the failed one. Emit it with **no gate event in between**: this is an in-place retry, and an empty gap is what tells `validate_gates.py` the repair was a re-run rather than another round. The re-run's event may itself be a `fail` (the verdict coming back `escalate` or `capped`), which settles the first one just as a `pass` would; what does not settle it is a `convergence` emitted after another round of work. See SKILL.md's Gate Events section.
 4. A second exit 2 is an error halt, not a third attempt. Report the ledger path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop. Never continue past a convergence check that could not run.
 
 **Gate: P2 Step 8 -> Phase 3 (checklist)**
