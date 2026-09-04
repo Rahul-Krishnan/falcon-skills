@@ -92,14 +92,22 @@ VALID_JUDGES = _load_valid_judges()
 # `convergence` sits in the two modes that reach Phase 3. SKILL.md's gate
 # table marks it mandatory, and a gate the table calls mandatory that this
 # script does not check is prose: nothing stops a run from omitting it.
+#
+# These are MEMBERSHIP sets, not sequences -- the check below is "was this
+# step emitted at all". They are nonetheless listed in the documented emission
+# order (`phase3_exit` at Phase 3 step 6, then `convergence` at step 7),
+# because a reader who takes the tuple order for the emission order gets the
+# halt shape backwards. That misreading is exactly how `hone_common`'s halt
+# tail came to reject the documented auto-revert halt. The one authoritative
+# statement of the order is `hone_common.PHASE3_HALT_SEQUENCE`.
 REQUIRED_STEPS = {
     "normal": (
-        "phase1_to_phase2", "phase2_to_phase3", "convergence",
-        "phase3_exit", "workflow_exit",
+        "phase1_to_phase2", "phase2_to_phase3", "phase3_exit",
+        "convergence", "workflow_exit",
     ),
     "fix-only": (
-        "fixonly_entry", "phase2_to_phase3", "convergence",
-        "phase3_exit", "workflow_exit",
+        "fixonly_entry", "phase2_to_phase3", "phase3_exit",
+        "convergence", "workflow_exit",
     ),
     "error-halt": ("workflow_exit",),
     # Phase 1 found nothing to improve, so Phase 2 and Phase 3 never ran.

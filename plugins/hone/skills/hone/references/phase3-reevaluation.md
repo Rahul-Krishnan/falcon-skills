@@ -157,6 +157,8 @@ Steps:
    - On `capped` the round budget ran out with blocking findings still open. Report it as **capped, not converged**, list the open blocking findings, and halt. Never present a capped run as success.
    - On `converged` or `in_progress`, continue to the mechanical exit gate below.
 
+   **`escalate` and `capped` outrank the mechanical exit gate's BLOCKED conditions.** They are a HALT verdict, not an input the gate weighs, and the gate's own precedence rule is written below to say so. Without that, the two decisions contradict each other in the ordinary case: on `escalate` with rounds remaining and score momentum, the gate's first BLOCKED condition (`iteration.current < iteration.target` AND score improved >= 0.02 AND composite < 0.9) is true, meaning "keep going" — the exact opposite of the halt this step just ordered. Momentum is precisely what a non-converging loop looks like from the score's point of view, which is why this check exists at all, so the halt wins and the loop stops.
+
 8. **Mechanical exit gate** (see Final Output below). The state file decides whether to continue or exit, not the LLM.
 9. If gate says CONTINUE: increment round, loop back to Phase 2.
 
@@ -169,9 +171,19 @@ The prior approach was an LLM-evaluated checklist: the improving agent would ask
 
 The state file decides when to exit. The LLM cannot override these checks. Re-read `/tmp/workflow-${RUN_ID}.json` and evaluate each condition:
 
-**PRECEDENCE: BLOCKED conditions are checked FIRST. If ANY BLOCKED condition is true, do NOT exit, regardless of ALLOWED conditions.** This prevents the failure mode where "all individual test scores >= 0.8" triggers exit while momentum exists and rounds remain. (The 0.8 per-test bar mirrors `ACTIONABLE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative.)
+**PRECEDENCE: HALT is checked first, then BLOCKED, then ALLOWED.**
 
-**Exit BLOCKED (keep going) when ANY are true** (checked FIRST):
+1. **Exit FORCED (halt now)** when the step 7 convergence verdict is `escalate` or `capped`. Nothing below is consulted.
+2. **BLOCKED** is checked next. If ANY BLOCKED condition is true, do NOT exit, regardless of ALLOWED conditions. This prevents the failure mode where "all individual test scores >= 0.8" triggers exit while momentum exists and rounds remain. (The 0.8 per-test bar mirrors `ACTIONABLE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative.)
+3. **ALLOWED** is checked only if no BLOCKED condition matched.
+
+**Exit FORCED (halt, do not loop back) when ANY are true** (checked FIRST):
+- [ ] Step 7's convergence verdict is `escalate` — the loop is spending rounds without converging. Report the finding ids. **Report the run as escalated, not as complete.**
+- [ ] Step 7's convergence verdict is `capped` — the round budget ran out with blocking findings still open. **Report the run as capped, never as success.**
+
+A halt verdict is not weighed against momentum; it overrides it. A non-converging loop looks exactly like momentum from the score's point of view — a rising composite while the same findings churn — so letting the momentum condition win would disable the convergence check in precisely the case it exists to catch. The `convergence` gate event carries `result: "fail"` in both cases, and `workflow_exit` still follows it (see SKILL.md's Gate Events table for the order).
+
+**Exit BLOCKED (keep going) when ANY are true** (checked only if no FORCED condition matched):
 - [ ] Any step is `"pending"` or `"in_progress"` in the state file
 - [ ] `open_questions` is non-empty
 - [ ] `iteration.current < iteration.target` AND score improved this round by >= 0.02 AND composite < 0.9 AND (`{target_score}` is unset OR composite < `{target_score}`) (momentum, not plateau — but grade A artifacts or target-met artifacts are allowed to exit early)

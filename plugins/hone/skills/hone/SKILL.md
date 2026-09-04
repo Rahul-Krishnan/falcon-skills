@@ -334,14 +334,19 @@ Emit these flat, with keys in this order, and `result` set to `"pass"` or `"fail
 | `fixonly_entry` | `--fix-only` run, in place of `phase1_to_phase2` | `pass` | yes, on `--fix-only` |
 | `handoff_<name>` | each handoff validation attempt | `fail` then `pass` on repair | yes, when validation runs |
 | `phase2_to_phase3` | entering Phase 3 after edits | `pass` | yes |
-| `convergence` | after the Phase 3 convergence check | `pass`, or **`fail` on escalate or capped** | yes |
-| `phase3_exit` | leaving Phase 3 | `pass`, or **`fail` on regression auto-revert** | yes |
+| `phase3_exit` | leaving Phase 3 (reference step 6) | `pass`, or **`fail` on regression auto-revert** | yes |
+| `convergence` | after the Phase 3 convergence check (reference step 7) | `pass`, or **`fail` on escalate or capped** | yes |
 | `workflow_exit` | before any exit | `pass`, or **`fail` on error halt** | yes |
+
+**The rows are in emission order, and Phase 3 emits `phase3_exit` BEFORE `convergence`** (references/phase3-reevaluation.md steps 6 and 7). The order is load-bearing, not cosmetic: `hone_common.is_halt_tail` decides whether the tail behind a failed gate is a halt or forward progress, and it reads that order. So the documented regression auto-revert halt is `[phase3_exit:fail, convergence, workflow_exit]`.
+
+The template below is the clean five-event run. `validate_gates.py` hard-errors on a missing `convergence` in `normal` and `fix-only` runs, so a state file that omits it is invalid, not merely under-scored.
 
 ```json
 {"step": "phase1_to_phase2", "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
 {"step": "phase2_to_phase3", "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
 {"step": "phase3_exit",      "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
+{"step": "convergence",      "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
 {"step": "workflow_exit",    "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
 ```
 
@@ -405,7 +410,7 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 6. **Step 6: Apply Edits** -- Stale-write guard, apply edits, generate companion validators if needed.
 6a. **Step 6a: Constraint Ablation** -- For each constraint flagged as possible dead weight (preference 21), remove it, re-run the existing criteria, and restore it only if a test regresses. Record each ablation and its outcome in the ledger. Skip constraints guarding irreversible actions.
 7. **Step 7: Description Trigger Testing** -- Test whether the description triggers correctly on realistic prompts.
-8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`. The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence.
+8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`. The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence. **Give the round entry a `"run"` field carrying `${RUN_ID}`, the same value for every round of this invocation.** The file is per artifact and permanent while `round` restarts at 1 and `max_rounds` is a per-run budget, so `run` is what tells `check_convergence.py` where one invocation's rounds end and the next begins. Without it the boundary is inferred from repeated round numbers, which cannot see a run that never restarts its numbering. Findings go inside the round entry; a ledger with no `rounds` array, or with findings at the top level, is rejected with exit 2.
 
    Findings are nested under the round that produced them, and `check_convergence.py` reads that wrapper. A bare array of findings, or findings appended at the top level, parses as zero rounds: the verdict is `in_progress` with `rounds_run: 0` on every round, forever, and the script reports no error. Write exactly this shape:
 

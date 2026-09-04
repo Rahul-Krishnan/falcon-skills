@@ -15,8 +15,8 @@ def gate(step, result="pass", judge="self-check"):
 NORMAL_RUN = [
     gate("phase1_to_phase2"),
     gate("phase2_to_phase3"),
-    gate("convergence"),
     gate("phase3_exit"),
+    gate("convergence"),
     gate("workflow_exit"),
 ]
 
@@ -146,8 +146,8 @@ class TestCompleteness(unittest.TestCase):
         gates = [
             gate("fixonly_entry"),
             gate("phase2_to_phase3"),
-            gate("convergence"),
             gate("phase3_exit"),
+            gate("convergence"),
             gate("workflow_exit"),
         ]
         self.assertTrue(validate_gates(gates, "fix-only")["valid"])
@@ -167,8 +167,8 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
-            gate("convergence"),
             gate("phase3_exit"),
+            gate("convergence"),
             gate("workflow_exit", result="fail"),
         ]
         report = validate_gates(gates, "normal")
@@ -181,8 +181,8 @@ class TestFailSemantics(unittest.TestCase):
             gate("handoff_eval_results", result="pass"),
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
-            gate("convergence"),
             gate("phase3_exit"),
+            gate("convergence"),
             gate("workflow_exit"),
         ]
         report = validate_gates(gates, "normal")
@@ -193,8 +193,8 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2", result="fail"),
             gate("phase2_to_phase3"),
-            gate("convergence"),
             gate("phase3_exit"),
+            gate("convergence"),
             gate("workflow_exit"),
         ]
         report = validate_gates(gates, "normal")
@@ -219,8 +219,8 @@ class TestFailSemantics(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
-            gate("convergence"),
             gate("phase3_exit", result="fail"),
+            gate("convergence"),
             gate("workflow_exit"),
         ]
         report = validate_gates(gates, "normal")
@@ -266,8 +266,8 @@ class TestModeDerivation(unittest.TestCase):
             "gates": [
                 gate("fixonly_entry"),
                 gate("phase2_to_phase3"),
-                gate("convergence"),
                 gate("phase3_exit"),
+                gate("convergence"),
                 gate("workflow_exit"),
             ],
         }
@@ -405,8 +405,8 @@ class TestHaltSequenceTail(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
-            gate("convergence"),
             gate("phase3_exit", result="fail"),
+            gate("convergence"),
             gate("workflow_exit", result="fail"),
         ]
         report = validate_gates(gates, "normal")
@@ -430,6 +430,31 @@ class TestHaltSequenceTail(unittest.TestCase):
         report = validate_gates(gates, "normal")
         self.assertTrue(any("no later 'pass'" in w for w in report["warnings"]))
 
+    def test_the_auto_revert_halt_in_emission_order_does_not_warn(self):
+        """Regression: the documented auto-revert halt warned.
+
+        Phase 3 emits `phase3_exit` (step 6) before `convergence` (step 7), so
+        a regression auto-revert halt has `convergence` in the tail behind the
+        failed `phase3_exit`. Every other fixture in this file used to list
+        the two the other way round, which is why nothing caught it: under the
+        real order `is_halt_tail` rejected the tail, `validate_gates` warned on
+        a correct halt, and `score_gate_compliance` scored it non-compliant.
+        `convergence` is mandatory, so the run cannot drop it to get its halt
+        shape back.
+        """
+        for convergence_result in ("pass", "fail"):
+            with self.subTest(convergence=convergence_result):
+                gates = [
+                    gate("phase1_to_phase2"),
+                    gate("phase2_to_phase3"),
+                    gate("phase3_exit", result="fail"),
+                    gate("convergence", result=convergence_result),
+                    gate("workflow_exit", result="pass"),
+                ]
+                report = validate_gates(gates, "normal")
+                self.assertTrue(report["valid"])
+                self.assertEqual(report["warnings"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -447,8 +472,8 @@ class TestResumedRuns(unittest.TestCase):
         return [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
-            gate("convergence"),
             gate("phase3_exit"),
+            gate("convergence"),
             gate("workflow_exit"),
         ]
 
@@ -466,8 +491,8 @@ class TestResumedRuns(unittest.TestCase):
 
     def test_resumed_is_orthogonal_to_mode(self):
         gates = [gate("resume"), gate("fixonly_entry"), gate("phase2_to_phase3"),
-                 gate("convergence"),
-                 gate("phase3_exit"), gate("workflow_exit")]
+                 gate("phase3_exit"),
+                 gate("convergence"), gate("workflow_exit")]
         self.assertTrue(validate_gates(gates, "fix-only", resumed=True)["valid"])
 
 

@@ -427,3 +427,201 @@ class TestReopenCountsVisibleBelowTheBar(unittest.TestCase):
         from check_convergence import analyze
 
         self.assertEqual(analyze({"rounds": []}, 3, 3)["reopen_counts"], {})
+
+
+class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
+    """The ledger is per artifact and permanent; `round` restarts per run.
+
+    Reading the cumulative array as one monotonic run produced a false
+    `converged` (sorting interleaved the runs) and a false `capped`
+    (`len(rounds)` measured against a per-run `max_rounds`).
+    """
+
+    @staticmethod
+    def _round(number, findings, run=None):
+        entry = {"round": number, "findings": findings}
+        if run is not None:
+            entry["run"] = run
+        return entry
+
+    def test_a_second_runs_open_finding_is_not_sorted_away(self):
+        """Run 1's rounds 1-3 then run 2's rounds 1-2 sorted to [1,1,2,2,3]."""
+        report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
+            self._round(1, [finding("A")]),
+            self._round(2, [finding("A")]),
+            self._round(3, [finding("A", status="fixed")]),
+            self._round(1, [finding("B")]),
+            self._round(2, [finding("B")]),
+        ]}, 3, 3)
+        self.assertNotEqual(report["verdict"], "converged")
+        self.assertEqual([f["id"] for f in report["open_blocking"]], ["B"])
+        self.assertEqual(report["runs_logged"], 2)
+
+    def test_max_rounds_is_measured_against_the_current_run(self):
+        """A 4-round ledger must not cap run 2 on its first round."""
+        report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
+            self._round(1, [finding("A", status="fixed")]),
+            self._round(2, [finding("A", status="fixed")]),
+            self._round(3, [finding("A", status="fixed")]),
+            self._round(1, [finding("C")]),
+        ]}, 9, 9)
+        self.assertEqual(report["verdict"], "in_progress")
+        self.assertEqual(report["rounds_run"], 1)
+        self.assertEqual(report["total_rounds_logged"], 4)
+
+    def test_an_explicit_run_id_is_authoritative(self):
+        """The `run` id beats the repeated-number inference."""
+        report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
+            self._round(1, [finding("A", status="fixed")], run="r1"),
+            self._round(2, [finding("A", status="fixed")], run="r1"),
+            self._round(3, [finding("A", status="fixed")], run="r1"),
+            self._round(4, [finding("C")], run="r2"),
+        ]}, 9, 9)
+        self.assertEqual(report["runs_logged"], 2)
+        self.assertEqual(report["rounds_run"], 1)
+        self.assertEqual(report["verdict"], "in_progress")
+
+    def test_an_out_of_order_append_is_one_run_not_two(self):
+        """[round 2, round 1] needs sorting, not splitting.
+
+        A "the number went down" boundary rule would read this as two runs and
+        lose a round; a repeated number does not fire here.
+        """
+        report = analyze({"max_rounds": 5, "rounds": [
+            {"round": "2", "findings": [finding("f1")]},
+            {"round": "1", "findings": []},
+        ]}, 3, 3)
+        self.assertEqual(report["runs_logged"], 1)
+        self.assertEqual(report["rounds_run"], 2)
+        self.assertEqual(report["verdict"], "in_progress")
+
+    def test_a_single_run_still_reports_one_run(self):
+        report = analyze(ledger([[finding("f1")], []]), 3, 3)
+        self.assertEqual(report["runs_logged"], 1)
+        self.assertEqual(report["rounds_run"], 2)
+        self.assertEqual(report["total_rounds_logged"], 2)
+
+
+class TestReopenCounterExpires(unittest.TestCase):
+    """The reopen bar is cross-run by design; permanence was not.
+
+    One historical alternation escalated every future invocation for that
+    artifact, with `open_blocking` empty and no recovery short of deleting the
+    ledger.
+    """
+
+    @staticmethod
+    def _rounds(statuses):
+        return [{"round": i + 1, "findings": [
+            {"id": "F1", "status": s, "severity": "critical",
+             "summary": "recurring thing", "file": "a.py"}]}
+            for i, s in enumerate(statuses)]
+
+    def test_a_recent_alternation_still_escalates(self):
+        statuses = ["open", "fixed", "open", "fixed", "open", "fixed",
+                    "fixed", "fixed"]
+        report = analyze({"max_rounds": 9, "rounds": self._rounds(statuses)}, 3, 9)
+        self.assertEqual(report["verdict"], "escalate")
+        self.assertEqual(report["reopened"], ["F1"])
+
+    def test_an_aged_out_alternation_no_longer_escalates(self):
+        statuses = (["open", "fixed", "open", "fixed", "open"]
+                    + ["fixed"] * 8)
+        report = analyze({"max_rounds": 20, "rounds": self._rounds(statuses)}, 3, 20)
+        self.assertEqual(report["verdict"], "converged")
+        self.assertEqual(report["reopened"], [])
+
+    def test_the_window_is_configurable(self):
+        statuses = ["open", "fixed", "open", "fixed", "open", "fixed"]
+        rounds = {"max_rounds": 9, "rounds": self._rounds(statuses)}
+        self.assertEqual(analyze(rounds, 3, 9)["reopened"], ["F1"])
+        self.assertEqual(analyze(rounds, 3, 9, reopen_window=2)["reopened"], [])
+
+
+class TestEscalationReasonsAreSeverityFiltered(unittest.TestCase):
+    """`reasons` short-circuits to `escalate` ahead of the converged branch.
+
+    Unfiltered, a single known nit left open halted a run that had fixed
+    everything blocking -- against the module docstring and
+    test_minor_findings_do_not_block_convergence.
+    """
+
+    def test_a_minor_finding_open_three_rounds_does_not_escalate(self):
+        rounds = [[finding("m1", severity="minor")]] * 3
+        report = analyze(ledger(rounds, max_rounds=9), 3, 9)
+        self.assertEqual(report["verdict"], "converged")
+        self.assertEqual(report["reasons"], [])
+        self.assertEqual(report["open_blocking"], [])
+
+    def test_a_minor_relocation_does_not_escalate(self):
+        rounds = [
+            [finding("m1", severity="minor", status="fixed", file="a.md",
+                     summary="same shape")],
+            [finding("m2", severity="minor", file="b.md", summary="same shape")],
+        ]
+        report = analyze(ledger(rounds, max_rounds=9), 9, 9)
+        self.assertEqual(report["relocations"], [])
+        self.assertEqual(report["verdict"], "converged")
+
+    def test_a_minor_alternation_does_not_escalate(self):
+        statuses = ["open", "fixed", "open", "fixed", "open"]
+        rounds = [[finding("m1", severity="minor", status=s)] for s in statuses]
+        report = analyze(ledger(rounds, max_rounds=9), 3, 9)
+        self.assertEqual(report["reopened"], [])
+        self.assertEqual(report["verdict"], "converged")
+
+    def test_a_blocking_finding_still_escalates(self):
+        report = analyze(ledger([[finding("b1")]] * 3, max_rounds=9), 3, 9)
+        self.assertEqual(report["verdict"], "escalate")
+
+
+class TestRelocationIsOrderIndependent(unittest.TestCase):
+    """Detection must not depend on finding order inside a round's array."""
+
+    def test_a_fixed_entry_listed_after_the_reopened_one_is_still_seen(self):
+        for order in ("fixed_first", "open_first"):
+            fixed = finding("a", status="fixed", file="A.md",
+                            summary="same shape")
+            reopened = finding("b", file="B.md", summary="same shape")
+            second = ([fixed, reopened] if order == "fixed_first"
+                      else [reopened, fixed])
+            with self.subTest(order=order):
+                report = analyze({"max_rounds": 9, "rounds": [
+                    {"round": 1, "findings": [
+                        finding("a", file="A.md", summary="same shape")]},
+                    {"round": 2, "findings": second},
+                ]}, 9, 9)
+                self.assertEqual(len(report["relocations"]), 1)
+                self.assertEqual(report["relocations"][0]["from"], "A.md")
+                self.assertEqual(report["relocations"][0]["to"], "B.md")
+
+
+class TestMissingRoundsIsLoud(unittest.TestCase):
+    """Findings at the top level silently disabled the check forever."""
+
+    def _run(self, payload):
+        import json as _json
+        import subprocess
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.json"
+            path.write_text(_json.dumps(payload))
+            return subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).parent / "check_convergence.py"),
+                 str(path), "--json"],
+                capture_output=True, text=True,
+            )
+
+    def test_a_ledger_with_no_rounds_key_exits_2(self):
+        result = self._run({"artifact": "x", "findings": [{"id": "F1"}]})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no 'rounds' array", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_an_empty_rounds_array_is_still_in_progress(self):
+        result = self._run({"artifact": "x", "max_rounds": 3, "rounds": []})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("in_progress", result.stdout)

@@ -34,9 +34,20 @@ Ledger shape:
   {"artifact": str,
    "max_rounds": int,
    "rounds": [{"round": int,
+               "run": str,            # optional but strongly preferred
                "findings": [{"id": str, "severity": "critical"|"major"|"minor",
                              "file": str, "summary": str,
                              "status": "open"|"fixed"|"rejected"}]}]}
+
+The ledger is per ARTIFACT, not per run: it lives at
+`~/skill-eval/{name}/findings-ledger.json` and every invocation appends to it,
+while `round` restarts at 1 and `max_rounds` is a per-run budget. So `rounds`
+is a cumulative log holding several runs, and the two facts that follow are
+what `run` is for. Give every round the same `run` id for the whole
+invocation (any stable string: the RUN_ID the workflow state file already
+carries is the obvious one). Without it this module falls back to inferring
+run boundaries from repeated round numbers, which is weaker; see
+`_run_segments`.
 
 Exit codes: 0 converged, 1 anything else (escalate, capped, or in_progress),
 2 usage error.
@@ -81,6 +92,23 @@ DEFAULT_RECURRENCE_LIMIT = 3
 # reported unconditionally: a run can see "reopened once" as information
 # without that becoming a halt.
 DEFAULT_REOPEN_LIMIT = 2
+
+# Trailing rounds of ledger history within which a fixed-then-open transition
+# still counts toward the reopen bar.
+#
+# The bar above is deliberately cross-run and the ledger is deliberately
+# permanent, which together made the counter permanent: one historical
+# alternation escalated every future invocation for that artifact forever,
+# with `open_blocking` empty and no recovery short of deleting the file. Old
+# churn is history, and history is what the rest of this module already
+# refuses to escalate on (see the `last_open_ids` note in `analyze`).
+#
+# Counted in ROUNDS, not runs: run boundaries are inferred (see
+# `_run_segments`), and a bound resting on an inference is weaker than what it
+# bounds. Ten exceeds the five rounds a full open->fixed->open->fixed->open
+# alternation needs, so the documented cross-run escalation still fires -- at
+# roughly three templated runs -- and still ages out.
+DEFAULT_REOPEN_WINDOW_ROUNDS = 10
 
 # Consecutive rounds the blocking count may hold still before it counts as
 # stalled. Two rounds of no movement is noise; three is a pattern.
@@ -144,10 +172,70 @@ def _as_int(value: object, default: int | None = None) -> int | None:
     return default
 
 
+def _round_number(round_entry: dict) -> int:
+    return _as_int(round_entry.get("round"), 0) or 0
+
+
+def _run_segments(rounds: list[dict]) -> list[list[dict]]:
+    """The ledger's rounds grouped into runs, in append order.
+
+    The ledger is per artifact and permanent, `round` restarts at 1 every
+    invocation, and `max_rounds` is a per-run budget. Two bugs followed from
+    reading the cumulative array as one run:
+
+      * sorting the whole array by `round` interleaved runs. Run 1's rounds
+        1-3 followed by run 2's rounds 1-2 sorted to [1, 1, 2, 2, 3], so the
+        "latest round" was run 1's last one. A run with an open blocking
+        finding reported `converged` and exited clean.
+      * `len(rounds) >= max_rounds` measured every round ever logged against a
+        per-run budget, so a 4-round ledger with `max_rounds: 3` returned
+        `capped` on the second run's FIRST round, halting before any work.
+
+    An explicit `run` id is the authoritative boundary: consecutive rounds
+    sharing an id are one run. When no round carries one, the only evidence
+    left is a REPEATED round number, which is what a restart looks like from
+    here.
+
+    That heuristic is deliberately narrower than "the round number went
+    down". A lone out-of-order append -- `[{"round": 2}, {"round": 1}]` -- is
+    one run whose entries need sorting, not two runs, and it is precisely the
+    shape the within-segment sort and `_as_int` exist to absorb. A decreasing
+    number would split it and lose a round; a repeated number would not.
+
+    The heuristic's real limit is an executor that never restarts its
+    numbering, counting 1..N across every invocation: it leaves no boundary
+    evidence at all and reads as a single run, which is the old behaviour.
+    Nothing can recover a boundary that was never recorded, which is why the
+    module docstring asks for `run` rather than treating it as optional
+    polish.
+    """
+    segments: list[list[dict]] = []
+    seen_numbers: set[int] = set()
+    previous_run: object = None
+    for entry in rounds:
+        run_id = entry.get("run")
+        if run_id is not None:
+            boundary = bool(segments) and run_id != previous_run
+            previous_run = run_id
+        else:
+            boundary = _round_number(entry) in seen_numbers
+        if boundary or not segments:
+            segments.append([])
+            seen_numbers = set()
+        segments[-1].append(entry)
+        seen_numbers.add(_round_number(entry))
+    return segments
+
+
 def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
-            reopen_limit: int = DEFAULT_REOPEN_LIMIT) -> dict:
-    rounds = [r for r in _as_list(ledger.get("rounds")) if isinstance(r, dict)]
-    rounds.sort(key=lambda r: _as_int(r.get("round"), 0))
+            reopen_limit: int = DEFAULT_REOPEN_LIMIT,
+            reopen_window: int = DEFAULT_REOPEN_WINDOW_ROUNDS) -> dict:
+    logged = [r for r in _as_list(ledger.get("rounds")) if isinstance(r, dict)]
+    # Order WITHIN a run, never across runs: the global sort is what
+    # interleaved them. See `_run_segments`.
+    segments = [sorted(seg, key=_round_number) for seg in _run_segments(logged)]
+    rounds = [entry for segment in segments for entry in segment]
+    current_run = segments[-1] if segments else []
     reasons: list[str] = []
 
     if not rounds:
@@ -156,6 +244,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
         # `in_progress` -- does not hit KeyError on a freshly created ledger.
         return {
             "verdict": "in_progress", "rounds_run": 0,
+            "total_rounds_logged": 0, "runs_logged": 0,
             "max_rounds": _as_int(ledger.get("max_rounds")), "reasons": [],
             "open_blocking": [], "open_minor_count": 0,
             "recurring": [], "reopened": [], "reopen_counts": {},
@@ -187,16 +276,20 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # absent from a round is an unreported round, not a fix, and reading it as
     # one would escalate every ledger that lists open findings only.
     streaks: dict[str, int] = {}
-    reopens: dict[str, int] = {}
+    # Each finding's fixed-then-open transitions, recorded by their position in
+    # the ordered history so the window below can age them out.
+    reopen_positions: dict[str, list[int]] = {}
     fixed_since_open: set[str] = set()
     stuck: list[str] = []
-    reopened: list[str] = []
-    for round_entry in rounds:
-        statuses = {
-            f.get("id"): f.get("status")
-            for f in _as_list(round_entry.get("findings"))
-            if isinstance(f, dict) and f.get("id")
-        }
+    # The severity last recorded for an id anywhere in the history. Severity
+    # can be restated per round, and the latest record is the current one.
+    severity_by_id: dict[str, str] = {}
+    for position, round_entry in enumerate(rounds):
+        statuses: dict[str, str] = {}
+        for f in _as_list(round_entry.get("findings")):
+            if isinstance(f, dict) and f.get("id"):
+                statuses[f["id"]] = f.get("status")
+                severity_by_id[f["id"]] = (f.get("severity") or "").lower()
         open_ids = {fid for fid, status in statuses.items() if status == "open"}
         for finding_id in list(streaks):
             if finding_id not in open_ids:
@@ -205,21 +298,53 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             streaks[finding_id] = streaks.get(finding_id, 0) + 1
             if finding_id in fixed_since_open:
                 fixed_since_open.discard(finding_id)
-                reopens[finding_id] = reopens.get(finding_id, 0) + 1
+                reopen_positions.setdefault(finding_id, []).append(position)
             if streaks[finding_id] >= recurrence_limit and finding_id not in stuck:
                 stuck.append(finding_id)
-            if reopens.get(finding_id, 0) >= reopen_limit and finding_id not in reopened:
-                reopened.append(finding_id)
         for finding_id, status in statuses.items():
             if status == "fixed":
                 fixed_since_open.add(finding_id)
+
+    def _is_blocking_id(finding_id: str) -> bool:
+        return severity_by_id.get(finding_id, "") in BLOCKING
+
+    # Only transitions inside the trailing window count. See
+    # DEFAULT_REOPEN_WINDOW_ROUNDS: without this the counter never expired and
+    # one historical alternation escalated the artifact forever.
+    window_start = len(rounds) - max(int(reopen_window or 0), 0)
+    reopens = {
+        finding_id: len([p for p in positions if p >= window_start])
+        for finding_id, positions in reopen_positions.items()
+    }
+    reopens = {k: v for k, v in sorted(reopens.items()) if v}
+    reopened = sorted(
+        finding_id for finding_id, count in reopens.items()
+        if count >= reopen_limit
+    )
+
+    # Every escalation reason is filtered to BLOCKING severities. `reasons`
+    # short-circuits to `escalate` ahead of the "nothing blocking open ->
+    # converged" branch, so an unfiltered reason let a single MINOR finding
+    # open three rounds return `escalate` with `open_blocking: []` -- against
+    # both the module docstring ("a ledger whose blocking findings are all
+    # resolved has converged") and test_minor_findings_do_not_block_convergence.
+    # A known nit left open is not a loop that failed to converge.
+    #
     # A streak escalates only while the finding is still open: see the note on
-    # `last_open_ids` above. `reopened` is deliberately not filtered the same
+    # `last_open_ids` above. `reopened` is deliberately not filtered that same
     # way. A streak that ends in a fix is healed, but the alternating shape is
     # a ledger that has already recorded `fixed` twice and been wrong twice, so
     # a third `fixed` in the latest round is exactly the record this check
-    # exists to distrust. Filtering it would delete the check.
-    stuck = [finding_id for finding_id in stuck if finding_id in last_open_ids]
+    # exists to distrust. Filtering it by `last_open_ids` would delete the
+    # check; bounding it by the window above is what keeps it from being
+    # permanent.
+    stuck = [
+        finding_id for finding_id in stuck
+        if finding_id in last_open_ids and _is_blocking_id(finding_id)
+    ]
+    reopened = [
+        finding_id for finding_id in reopened if _is_blocking_id(finding_id)
+    ]
     recurring = sorted(set(stuck) | set(reopened))
     if stuck:
         reasons.append(
@@ -258,32 +383,47 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # "3 finding(s) closed in one file reopened in another".
     seen_relocations: set[tuple[str, str, str]] = set()
     closed_signatures: dict[str, str] = {}
+    # Two passes per round, because one pass populated `closed_signatures` in
+    # the same iteration that tested against it: whether a relocation was seen
+    # depended on the order of findings WITHIN the round's array. A `fixed`
+    # entry for file A listed after the reopened entry for file B was missed
+    # that round, and missed permanently when that was the final round. Rounds
+    # restate live findings so it usually self-corrected, but not on the last
+    # one. Collecting the round's closes first makes detection independent of
+    # array order and catches the same-round relocation either way round.
     for round_entry in rounds:
-        for finding in _as_list(round_entry.get("findings")):
-            if not isinstance(finding, dict):
-                continue
+        findings = [
+            f for f in _as_list(round_entry.get("findings")) if isinstance(f, dict)
+        ]
+        closed_this_round = {
+            _signature(f.get("summary", "")): f.get("file", "")
+            for f in findings
+            if f.get("status") == "fixed" and _signature(f.get("summary", ""))
+        }
+        origins = {**closed_signatures, **closed_this_round}
+        for finding in findings:
             signature = _signature(finding.get("summary", ""))
-            if not signature:
+            if not signature or finding.get("status") != "open":
                 continue
-            status = finding.get("status")
+            # Relocation is an escalation reason, so it is severity-filtered
+            # like the others: a minor finding that moved file is not a
+            # non-converging loop.
+            if (finding.get("severity") or "").lower() not in BLOCKING:
+                continue
+            if signature not in origins or signature not in last_open_signatures:
+                continue
             file_path = finding.get("file", "")
-            if (
-                status == "open"
-                and signature in closed_signatures
-                and signature in last_open_signatures
-            ):
-                origin = closed_signatures[signature]
-                if origin != file_path and (
-                    signature, origin, file_path
-                ) not in seen_relocations:
-                    seen_relocations.add((signature, origin, file_path))
-                    relocations.append({
-                        "signature_sample": (finding.get("summary") or "")[:100],
-                        "from": origin, "to": file_path,
-                        "round": round_entry.get("round"),
-                    })
-            if status == "fixed":
-                closed_signatures[signature] = file_path
+            origin = origins[signature]
+            if origin != file_path and (
+                signature, origin, file_path
+            ) not in seen_relocations:
+                seen_relocations.add((signature, origin, file_path))
+                relocations.append({
+                    "signature_sample": (finding.get("summary") or "")[:100],
+                    "from": origin, "to": file_path,
+                    "round": round_entry.get("round"),
+                })
+        closed_signatures.update(closed_this_round)
     if relocations:
         reasons.append(
             f"{len(relocations)} finding(s) closed in one file reopened in another"
@@ -293,7 +433,11 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     open_minor = len(last_open) - len(open_blocking)
 
     max_rounds = _as_int(ledger.get("max_rounds"))
-    rounds_exhausted = bool(max_rounds) and len(rounds) >= max_rounds
+    # `max_rounds` is the budget for ONE invocation, so it is measured against
+    # the current run's rounds, not against every round the artifact has ever
+    # logged. Counting the whole ledger returned `capped` on a second run's
+    # first round: an immediate `fail` gate and a halt before any work.
+    rounds_exhausted = bool(max_rounds) and len(current_run) >= max_rounds
 
     if reasons:
         verdict = "escalate"
@@ -306,7 +450,13 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
 
     return {
         "verdict": verdict,
-        "rounds_run": len(rounds),
+        # Rounds in the CURRENT run, which is what `max_rounds` budgets and
+        # what a caller reporting "round N of M" means. The cumulative figures
+        # are reported alongside rather than folded in, because the ledger's
+        # whole history is still the thing the escalation checks read.
+        "rounds_run": len(current_run),
+        "total_rounds_logged": len(rounds),
+        "runs_logged": len(segments),
         "max_rounds": max_rounds,
         "reasons": reasons,
         "open_blocking": [
@@ -337,6 +487,10 @@ def main() -> None:
     parser.add_argument("--reopen-limit", type=int, default=DEFAULT_REOPEN_LIMIT,
                         help=f"Fixed-then-reopened cycles before escalating "
                              f"(default: {DEFAULT_REOPEN_LIMIT})")
+    parser.add_argument("--reopen-window", type=int,
+                        default=DEFAULT_REOPEN_WINDOW_ROUNDS,
+                        help=f"Trailing rounds within which a reopen still "
+                             f"counts (default: {DEFAULT_REOPEN_WINDOW_ROUNDS})")
     parser.add_argument("--stall-limit", type=int, default=DEFAULT_STALL_LIMIT,
                         help=f"Rounds without a falling blocking count before "
                              f"escalating (default: {DEFAULT_STALL_LIMIT})")
@@ -370,7 +524,23 @@ def main() -> None:
     # is the right default for a library call and the wrong one for the CLI:
     # "no rounds yet" and "your ledger is malformed" are different answers and
     # both would print `in_progress`. Fail loudly here instead.
-    if "rounds" in ledger and not isinstance(ledger["rounds"], list):
+    # An absent `rounds` is the same class of mistake as a scalar one, and it
+    # was the silent one: `{"artifact": "x", "findings": [...]}` -- findings at
+    # the top level, exactly the shape SKILL.md warns against -- read as zero
+    # rounds and printed `in_progress` with `rounds_run: 0`, indistinguishable
+    # from a healthy first round. The convergence check was then disabled for
+    # that artifact forever, with nothing to notice. Prose in SKILL.md is not a
+    # substitute for the script detecting it.
+    if "rounds" not in ledger:
+        print(
+            "ERROR: ledger has no 'rounds' array; Phase 2 writes one on the "
+            "first round. Findings belong inside a round entry, not at the "
+            "top level.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if not isinstance(ledger["rounds"], list):
         print(
             f"ERROR: ledger 'rounds' must be a JSON array, got "
             f"{type(ledger['rounds']).__name__}",
@@ -379,7 +549,7 @@ def main() -> None:
         sys.exit(2)
 
     report = analyze(ledger, args.recurrence_limit, args.stall_limit,
-                     args.reopen_limit)
+                     args.reopen_limit, args.reopen_window)
     report["artifact"] = ledger.get("artifact")
 
     if args.json:
