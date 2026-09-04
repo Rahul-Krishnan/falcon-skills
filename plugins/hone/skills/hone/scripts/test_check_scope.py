@@ -900,6 +900,124 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
         self.assertTrue(report["not_measurable_reasons"])
 
 
+class TestPreImagesSurviveASubtreeChangingShape(unittest.TestCase):
+    """The pre-image stores are partitioned by how git saw a file, not by content.
+
+    A `git init` in a subdirectory mid-round moves ordinary untracked paths
+    into an opaque nested subtree, and removing a submodule moves them back.
+    A classifier reading only its own store finds no pre-image for a
+    byte-identical file, calls it `added`, and the caller is told to revert a
+    file nobody touched.
+    """
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        self.skill = self.repo / "skills" / "s"
+        self.skill.mkdir(parents=True)
+        (self.skill / "SKILL.md").write_text("skill v1\n")
+        if not init_repo(self.repo):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _snapshot(self):
+        return run_cli("--artifact", str(self.skill / "SKILL.md"), "--type", "skill",
+                       "--manifest", str(self.manifest), "--snapshot", "--json")
+
+    def test_a_plain_dir_becoming_a_repo_does_not_invent_violations(self):
+        vendor = self.repo / "vendor"
+        vendor.mkdir()
+        (vendor / "lib.txt").write_text("untracked v1\n")
+        self.assertEqual(self._snapshot().returncode, 0)
+        self.assertIn("vendor/lib.txt",
+                      json.loads(self.manifest.read_text())["untracked"])
+
+        if not init_repo(vendor):  # pragma: no cover
+            self.skipTest("git unavailable")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], [], run.stdout)
+        self.assertEqual(run.returncode, 0, run.stdout)
+
+    def test_a_repo_ceasing_to_be_one_does_not_invent_violations(self):
+        vendor = self.repo / "vendor"
+        vendor.mkdir()
+        (vendor / "lib.txt").write_text("nested v1\n")
+        if not init_repo(vendor):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.assertEqual(self._snapshot().returncode, 0)
+        self.assertIn("vendor", json.loads(self.manifest.read_text())["nested"])
+
+        shutil.rmtree(vendor / ".git")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], [], run.stdout)
+        self.assertEqual(run.returncode, 0, run.stdout)
+
+    def test_a_file_is_not_reported_twice_when_a_subtree_is_opaque(self):
+        vendor = self.repo / "vendor"
+        vendor.mkdir()
+        (vendor / "lib.txt").write_text("untracked v1\n")
+        if not init_repo(vendor):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.assertEqual(self._snapshot().returncode, 0)
+        (vendor / "lib.txt").write_text("clobbered\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], ["vendor/lib.txt"], run.stdout)
+        self.assertEqual(report["counts"]["modified"], 1)
+
+
+class TestUnreadableFiles(unittest.TestCase):
+    """An unreadable file is the plainest "could not see", and used to be neither.
+
+    Hashing it to the same `None` that means "absent" classified it as `added`
+    and put it in the revert list, and an unreadable file at both ends compared
+    equal to itself and vanished from the report entirely.
+    """
+
+    def setUp(self):
+        if os.geteuid() == 0:  # pragma: no cover - root ignores mode bits
+            self.skipTest("running as root; chmod 000 is not enforced")
+        self.tmp = Path(tempfile.mkdtemp())
+        self.hooks = self.tmp / "hooks"
+        self.hooks.mkdir()
+        (self.hooks / "h.sh").write_text("#!/bin/sh\n")
+        (self.hooks / "other.sh").write_text("sibling v1\n")
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+
+    def tearDown(self):
+        (self.hooks / "other.sh").chmod(0o644)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def test_an_unreadable_file_is_not_measurable_not_a_violation(self):
+        run = run_cli("--artifact", str(self.hooks / "h.sh"), "--type", "hook",
+                      "--manifest", str(self.manifest), "--snapshot", "--json")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        (self.hooks / "other.sh").chmod(0o000)
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], [], run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable", run.stdout)
+        self.assertEqual(run.returncode, 3, run.stdout)
+
+    def test_a_file_unreadable_at_both_ends_does_not_read_as_clean(self):
+        (self.hooks / "other.sh").chmod(0o000)
+        run = run_cli("--artifact", str(self.hooks / "h.sh"), "--type", "hook",
+                      "--manifest", str(self.manifest), "--snapshot", "--json")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(json.loads(run.stdout)["verdict"], "not_measurable",
+                         run.stdout)
+        self.assertEqual(run.returncode, 3, run.stdout)
+
+
 class TestToolCacheDirectoriesAreIgnored(unittest.TestCase):
     """r1-S4: a lint run during a round must not halt it."""
 
