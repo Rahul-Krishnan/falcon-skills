@@ -415,6 +415,22 @@ def _inconclusive_ids(payload: dict) -> set[str]:
     return {str(test_id) for test_id in ids}
 
 
+def _scorer_fingerprint(payload: object) -> tuple[bool, str | None]:
+    """`(known, fingerprint)` for one side of the comparison.
+
+    `known` is False when the payload carries no `scorer_fingerprint` key at
+    all, which is a caller that built the round by hand rather than through
+    `_load_round`; those keep the pre-fingerprint behaviour, the same way an
+    unset `before_source` does. A payload that came off disk always has the
+    key, and a `None` value there means the file was written by a scorer old
+    enough not to record one.
+    """
+    if not isinstance(payload, dict) or "scorer_fingerprint" not in payload:
+        return False, None
+    value = payload["scorer_fingerprint"]
+    return True, value if isinstance(value, str) and value else None
+
+
 def check_compare(before: dict, after: dict, alpha: float,
                   before_source: str = "", after_source: str = "") -> dict:
     """Sign-test the after-round against the before-round, per test case.
@@ -426,6 +442,15 @@ def check_compare(before: dict, after: dict, alpha: float,
     pruned falls back to the judge and the sign test manufactures wins out of
     the scorer swap alone. That is a `not_measurable` comparison, not a
     verdict.
+
+    The same reasoning one level down: two rounds can both be deterministic
+    and still not be the same measurement, because the deterministic scorer
+    is code that changes. `metadata.scorer_fingerprint` (score_execution.py)
+    identifies the scoring logic that produced each side, and a mismatch --
+    or an absence, which means an unidentified scorer rather than an
+    unchanged one -- is `not_measurable` for the same reason a judge/
+    deterministic swap is. The remedy is to re-score the older round, not to
+    add test cases.
     """
     before_scores = _scores_by_id(before)
     after_scores = _scores_by_id(after)
@@ -483,6 +508,26 @@ def check_compare(before: dict, after: dict, alpha: float,
     # Two judge files agree on a scorer, not on the measurement Phase 2 acts
     # on; this used to reach `improved` exit 0 without naming the scorer.
     judge_only = before_source == after_source == "results"
+    # Which scoring code produced each side. A round is comparable to another
+    # only if the same scoring logic produced both; otherwise every movement
+    # here is a mix of the artifact and the measurement, and Phase 3 reads it
+    # as the artifact alone. See score_execution.py's `scorer_fingerprint`.
+    before_known, before_fingerprint = _scorer_fingerprint(before)
+    after_known, after_fingerprint = _scorer_fingerprint(after)
+    fingerprints_checked = before_known or after_known
+    # Absence is not agreement. 144 stored baselines predate the field, and
+    # reading "no fingerprint on either side" as "same scorer" is exactly the
+    # assumption that let a merged scorer change auto-revert working edits.
+    # An unknown scorer is re-scored, not assumed.
+    scorer_unknown = fingerprints_checked and not (
+        before_fingerprint and after_fingerprint
+    )
+    scorer_changed = bool(
+        fingerprints_checked
+        and before_fingerprint
+        and after_fingerprint
+        and before_fingerprint != after_fingerprint
+    )
     if scorers_disagree:
         verdict = "not_measurable"
         errors.append(
@@ -502,6 +547,37 @@ def check_compare(before: dict, after: dict, alpha: float,
             "comparison qualifies nothing it acts on. Run score_execution.py "
             "on both rounds and point --before/--after at the "
             "deterministic_scores.json files it writes"
+        )
+    elif scorer_changed:
+        verdict = "not_measurable"
+        errors.append(
+            f"--before was scored by scorer {before_fingerprint} and --after "
+            f"by {after_fingerprint}; the scoring code changed between the "
+            "two rounds, so a win or a loss here can be the scorer rather "
+            "than the round. Re-score the before round's results.json with "
+            "the current scorer (score_execution.py, same --type, "
+            "--artifact-path pointing at the artifact that round ran "
+            "against) and compare again"
+        )
+    elif scorer_unknown:
+        verdict = "not_measurable"
+        missing = [
+            side
+            for side, fingerprint in (
+                ("--before", before_fingerprint),
+                ("--after", after_fingerprint),
+            )
+            if not fingerprint
+        ]
+        errors.append(
+            f"{' and '.join(missing)} records no metadata.scorer_fingerprint, "
+            "so the scorer that produced those numbers is unknown and cannot "
+            "be shown to match the other round's. Absent is not unchanged: a "
+            "scorer change landing outside a hone run leaves the older side "
+            "looking untouched. Re-score that round's results.json with the "
+            "current scorer (score_execution.py, same --type, --artifact-path "
+            "pointing at the artifact that round ran against) and compare "
+            "again"
         )
     elif collapsed:
         # A partial evidence loss looks like a clean sweep over the survivors;
@@ -579,6 +655,8 @@ def check_compare(before: dict, after: dict, alpha: float,
         "inconclusive_before": sorted(before_inconclusive),
         "before_score_source": before_source,
         "after_score_source": after_source,
+        "before_scorer_fingerprint": before_fingerprint,
+        "after_scorer_fingerprint": after_fingerprint,
         "wins": wins,
         "losses": losses,
         "ties": ties,
@@ -730,6 +808,11 @@ def _load_round(path: str) -> tuple[dict, str]:
             ],
             "inconclusive": sorted(load_inconclusive_ids(path)),
             "artifact_type": metadata.get("artifact_type"),
+            # Always set, None included: `check_compare` reads the key's
+            # *presence* as "this side came off disk", so a round scored
+            # before score_execution.py recorded a fingerprint is an
+            # unknown scorer rather than an opted-out caller.
+            "scorer_fingerprint": metadata.get("scorer_fingerprint"),
         }, "deterministic"
     return _load(path), "results"
 

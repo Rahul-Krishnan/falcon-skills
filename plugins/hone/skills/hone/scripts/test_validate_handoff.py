@@ -1559,7 +1559,13 @@ class TestThePowerVerdictRemedyIsRunnable(unittest.TestCase):
                     json.dump({
                         "per_test": [{"test_id": f"t{i}", "composite": score}
                                      for i in range(6)],
-                        "metadata": {"artifact_type": "skill"},
+                        # Both rounds scored by the same scorer; without
+                        # the fingerprint check_eval_power reports an
+                        # unknown scorer rather than a verdict.
+                        "metadata": {
+                            "artifact_type": "skill",
+                            "scorer_fingerprint": "ast1:0000000000000000",
+                        },
                     }, handle)
                 rounds.append(path)
 
@@ -1583,6 +1589,47 @@ class TestThePowerVerdictRemedyIsRunnable(unittest.TestCase):
                 capture_output=True, text=True,
             )
             self.assertEqual(directory.returncode, 2)
+
+
+class TestTheRoundRecordCanNameItsScorer(unittest.TestCase):
+    """`scorer_fingerprint` is optional on both score records.
+
+    Step 5 re-reads the previous round from the state file, not from memory,
+    and after a compaction that record is all it has. Optional because every
+    state file written before score_execution.py recorded a fingerprint has
+    no value to copy, and a required field would hard-stop a resumed run.
+    """
+
+    def _round(self, **extra):
+        record = {
+            "output_dir": "/tmp/hone-run/r1",
+            "composite_score": 0.71,
+            "per_test": [{"test_id": "t1", "score": 0.71, "status": "pass"}],
+            "power_verdict": "improved",
+        }
+        record.update(extra)
+        return {"round_1_scores": record}
+
+    def _validate(self, state):
+        from validate_handoff import validate_handoff
+
+        return validate_handoff(state, "round_1_scores")
+
+    def test_a_record_naming_its_scorer_validates(self):
+        result = self._validate(
+            self._round(scorer_fingerprint="ast1:aaaaaaaaaaaaaaaa")
+        )
+        self.assertTrue(result.valid, result.errors)
+
+    def test_a_record_without_one_still_validates(self):
+        result = self._validate(self._round())
+        self.assertTrue(result.valid, result.errors)
+
+    def test_an_empty_fingerprint_is_rejected(self):
+        # "" would read as a recorded scorer named nothing; absent is the
+        # encoding for "unknown scorer".
+        result = self._validate(self._round(scorer_fingerprint=""))
+        self.assertFalse(result.valid)
 
 
 if __name__ == "__main__":

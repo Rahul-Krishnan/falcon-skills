@@ -3243,3 +3243,238 @@ class TestCommaSpliceDoesNotInheritDenial(unittest.TestCase):
 
         self.assertFalse(_has_unnegated_occurrence(
             "phase 1", "I did not run the eval, I skipped phase 1 entirely."))
+
+
+class TestScorerFingerprint(unittest.TestCase):
+    """`metadata.scorer_fingerprint` identifies the scoring code itself.
+
+    Phase 3 re-scores the previous round whenever the scorer changed. That
+    trigger used to be provenance ("did this run edit score_execution.py"),
+    so a scorer change landing through a merged PR was invisible to every
+    later run: 144 stored baselines were scored before GATE_EVIDENCE_FLOOR
+    existed, which moved the gate_compliance mean by 0.146, past the 0.1 that
+    auto-reverts a round. The fingerprint makes the trigger evidence-based.
+    """
+
+    SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+
+    def _copy(self, tmp, **edits):
+        """The two scorer modules copied into `tmp`, with edits applied."""
+        import shutil
+
+        from score_execution import SCORER_SOURCE_MODULES
+
+        for name in SCORER_SOURCE_MODULES:
+            shutil.copy(os.path.join(self.SCRIPTS, name), os.path.join(tmp, name))
+        for name, (old, new) in edits.items():
+            path = os.path.join(tmp, name)
+            with open(path, encoding="utf-8") as handle:
+                source = handle.read()
+            self.assertIn(old, source, f"anchor missing from {name}")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(source.replace(old, new, 1))
+        return tmp
+
+    def test_the_scorer_names_itself(self):
+        from score_execution import SCORER_FINGERPRINT_SCHEME, scorer_fingerprint
+
+        fingerprint = scorer_fingerprint()
+        self.assertIsInstance(fingerprint, str)
+        self.assertTrue(fingerprint.startswith(SCORER_FINGERPRINT_SCHEME + ":"))
+        # Stable within a process: the second call is the cached one.
+        self.assertEqual(fingerprint, scorer_fingerprint())
+
+    def test_an_unedited_copy_fingerprints_identically(self):
+        from score_execution import scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(scorer_fingerprint(self._copy(tmp)), scorer_fingerprint())
+
+    def test_a_comment_edit_does_not_invalidate_a_baseline(self):
+        # The cost of the obvious alternative, a content hash of the file:
+        # every reworded comment would retire every stored baseline. This
+        # file is majority comment by line.
+        from score_execution import scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            edited = self._copy(tmp, **{"score_execution.py": (
+                "# Gate/validation keywords",
+                "# Gate/validation keywords (reworded, no logic change)",
+            )})
+            self.assertEqual(scorer_fingerprint(edited), scorer_fingerprint())
+
+    def test_a_docstring_edit_does_not_invalidate_a_baseline(self):
+        from score_execution import scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            edited = self._copy(tmp, **{"score_execution.py": (
+                '"""Deterministic scoring of eval runner execution data.',
+                '"""Deterministic scoring of eval runner execution data (reworded).',
+            )})
+            self.assertEqual(scorer_fingerprint(edited), scorer_fingerprint())
+
+    def test_a_changed_scoring_constant_is_a_different_scorer(self):
+        # The PR #16 shape exactly: one constant moves, the gate_compliance
+        # mean moves 0.859 -> 0.713, and no other metadata field notices.
+        from score_execution import scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            edited = self._copy(tmp, **{"score_execution.py": (
+                "GATE_EVIDENCE_FLOOR = 4",
+                "GATE_EVIDENCE_FLOOR = 5",
+            )})
+            self.assertNotEqual(scorer_fingerprint(edited), scorer_fingerprint())
+
+    def test_a_changed_dimension_scorer_is_a_different_scorer(self):
+        from score_execution import scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            edited = self._copy(tmp, **{"score_execution.py": (
+                "ECHOED_GATE_CAP = 0.7",
+                "ECHOED_GATE_CAP = 0.6",
+            )})
+            self.assertNotEqual(scorer_fingerprint(edited), scorer_fingerprint())
+
+    def test_a_hone_common_change_is_a_different_scorer(self):
+        # DIMENSION_FLOOR lives in hone_common and floors every composite, so
+        # a fingerprint over score_execution.py alone would call this the
+        # same scorer.
+        from score_execution import scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            edited = self._copy(tmp, **{"hone_common.py": (
+                "DIMENSION_FLOOR = ",
+                "DIMENSION_FLOOR = 0.999  # ",
+            )})
+            self.assertNotEqual(scorer_fingerprint(edited), scorer_fingerprint())
+
+    def test_unreadable_source_yields_no_fingerprint(self):
+        from score_execution import scorer_fingerprint
+
+        self.assertIsNone(scorer_fingerprint(os.path.join(self.SCRIPTS, "nonexistent")))
+
+    def test_unparseable_source_yields_no_fingerprint(self):
+        # Absent, not partial: a half-computed digest would let two different
+        # scorers share a fingerprint, and consumers read absence as "unknown
+        # scorer, re-score" rather than "unchanged".
+        from score_execution import scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            edited = self._copy(tmp, **{"score_execution.py": (
+                "EPSILON = 1e-6",
+                "EPSILON = (((",
+            )})
+            self.assertIsNone(scorer_fingerprint(edited))
+
+    def test_scored_output_records_the_scorer(self):
+        from score_execution import score_from_results, scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump({"results": [{
+                    "test_id": "TC-001",
+                    "test_profile": "execution",
+                    "agent_response": "Done.",
+                    "execution_timeline": [
+                        {"step_type": "tool_use", "tool_name": "Read",
+                         "tool_input": {"file_path": "/tmp/artifact.md"}},
+                    ],
+                }]}, handle)
+            report = score_from_results(path, "skill")
+        self.assertEqual(
+            report["metadata"]["scorer_fingerprint"], scorer_fingerprint()
+        )
+
+    def test_an_unscorable_file_still_records_the_scorer(self):
+        # The INCONCLUSIVE path writes a deterministic_scores.json too, and a
+        # later round reads its metadata the same way.
+        from score_execution import score_from_results, scorer_fingerprint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.json")
+            with open(path, "w") as handle:
+                json.dump({"results": []}, handle)
+            report = score_from_results(path, "skill")
+        self.assertEqual(report["grade"], "INCONCLUSIVE")
+        self.assertEqual(
+            report["metadata"]["scorer_fingerprint"], scorer_fingerprint()
+        )
+
+    def test_the_existing_metadata_cannot_tell_two_scorers_apart(self):
+        """Evidence that the fields already recorded are not a fingerprint.
+
+        `scoring_formula` and `schema_version` are literals in
+        score_execution.py, `epsilon` is a constant, and the rest are per-run
+        observations. Changing GATE_EVIDENCE_FLOOR moves gate_compliance and
+        leaves every one of them identical, which is why 144 stored baselines
+        look untouched by PR #16.
+        """
+        import importlib.util
+        import shutil
+        import sys
+
+        gates = [
+            {"step": "phase1_to_phase2", "judge": "self", "result": "pass",
+             "ts": "2026-01-01T00:00:00Z"},
+            {"step": "phase2_to_phase3", "judge": "self", "result": "pass",
+             "ts": "2026-01-01T00:01:00Z"},
+            {"step": "malformed"},
+        ]
+        record = {"results": [{
+            "test_id": "TC-001",
+            "test_profile": "execution",
+            "agent_response": "## Step 1\nDone.",
+            "execution_timeline": [
+                {"step_type": "tool_use", "tool_name": "Read",
+                 "tool_input": {"file_path": "/tmp/artifact.md"}},
+                {"step_type": "tool_use", "tool_name": "Write",
+                 "tool_input": {"file_path": "/tmp/workflow-1.json",
+                                "content": json.dumps({"gates": gates})}},
+                {"step_type": "text", "text": "Phase 1 complete."},
+            ],
+        }]}
+
+        def _score_with(source_dir):
+            spec = importlib.util.spec_from_file_location(
+                "variant_score_execution",
+                os.path.join(source_dir, "score_execution.py"),
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys.path.insert(0, source_dir)
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.path.remove(source_dir)
+            path = os.path.join(source_dir, "results.json")
+            with open(path, "w") as handle:
+                json.dump(record, handle)
+            return module.score_from_results(path, "skill")
+
+        with tempfile.TemporaryDirectory() as base:
+            baseline = _score_with(self._copy(base))
+            with tempfile.TemporaryDirectory() as tmp2:
+                variant_dir = self._copy(tmp2, **{"score_execution.py": (
+                    "GATE_EVIDENCE_FLOOR = 4",
+                    "GATE_EVIDENCE_FLOOR = 8",
+                )})
+                variant = _score_with(variant_dir)
+
+        shared = ("artifact_type", "scoring_formula", "critical_dim",
+                  "critical_floor_applied", "epsilon", "partial_scoring",
+                  "schema_version")
+        for field in shared:
+            with self.subTest(field=field):
+                self.assertEqual(
+                    baseline["metadata"][field], variant["metadata"][field],
+                    f"{field} would have distinguished the two scorers",
+                )
+        self.assertNotEqual(
+            baseline["aggregate_dimensions"]["gate_compliance"],
+            variant["aggregate_dimensions"]["gate_compliance"],
+            "the two scorers must actually score differently",
+        )
+        self.assertNotEqual(
+            baseline["metadata"]["scorer_fingerprint"],
+            variant["metadata"]["scorer_fingerprint"],
+        )

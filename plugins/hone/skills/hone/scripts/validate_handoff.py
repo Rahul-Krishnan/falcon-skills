@@ -159,6 +159,22 @@ def _baseline() -> dict:
     )
 
 
+def _scorer_fingerprint() -> dict:
+    """`metadata.scorer_fingerprint` copied out of this round's scores.
+
+    Optional, because every state file written before score_execution.py
+    recorded one has no value to copy, and because step 5 already has a
+    mechanical guard: step 3a's `check_eval_power.py` reads the fingerprint
+    from each round's deterministic_scores.json and returns `not_measurable`
+    on a mismatch or an absence, which the power precondition turns into "do
+    not auto-revert". What this field adds is survival: after a compaction
+    the state file is what the next round re-reads, and a record that names
+    its own scorer can say whether its baseline is still comparable without
+    re-reading a directory that may have been pruned.
+    """
+    return _str(required=False, non_empty=True)
+
+
 # Migration hints. `eval_results.output_dir` went optional -> required and
 # `power_verdict` was added as required in the same change, so a state file
 # written before it and resumed after it (SKILL.md's resume protocol keeps
@@ -459,6 +475,7 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             # `baseline_adjusted.per_test` in place of `per_test` when present.
             "baseline_original": _baseline(),
             "baseline_adjusted": _baseline(),
+            "scorer_fingerprint": _scorer_fingerprint(),
         },
     },
     # Phase 3 step 6 -> the next round's step 3a and step 5
@@ -495,6 +512,7 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             "power_discordant": _num(required=False, min_value=0),
             "baseline_original": _baseline(),
             "baseline_adjusted": _baseline(),
+            "scorer_fingerprint": _scorer_fingerprint(),
         },
     },
     # P2 Step 1 -> Step 1.7

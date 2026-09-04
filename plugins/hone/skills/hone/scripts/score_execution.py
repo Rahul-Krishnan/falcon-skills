@@ -11,6 +11,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import json
 import math
 import re
@@ -2225,6 +2227,107 @@ def _score_single_test(
     return scored
 
 
+# Source files whose executable content decides a score. `score_execution.py`
+# is the scorer; `hone_common.py` supplies DIMENSION_FLOOR (the composite's
+# per-dimension floor), `extract_results`, the typed criteria reader and
+# `is_halt_tail`, each of which moves dimension numbers without appearing in
+# this file. A fingerprint over only this file would have called a
+# hone_common change "same scorer".
+SCORER_SOURCE_MODULES = ("score_execution.py", "hone_common.py")
+
+# Prefix on every fingerprint, naming how it was derived. Bumping it
+# invalidates every recorded fingerprint at once, which is what a change to
+# the normalisation below must do: two files normalised different ways are
+# not comparable even when the digests happen to match.
+SCORER_FINGERPRINT_SCHEME = "ast1"
+
+_SCORER_FINGERPRINT: str | None = None
+_SCORER_FINGERPRINT_COMPUTED = False
+
+
+def _normalized_source(path: Path) -> str:
+    """A source file reduced to what can change a score.
+
+    Parses to an AST and drops docstrings, so the digest below moves on
+    executable content only. Comments never reach the AST; docstrings do, and
+    nothing in either module reads `__doc__`, so a reworded docstring cannot
+    move a number either.
+
+    Positions are excluded (`include_attributes=False`) so inserting a comment
+    block above a function -- which shifts every line number after it -- is
+    not a scorer change. Identifier names are kept: a rename cannot change a
+    score, so keeping them costs an occasional re-score and buys never having
+    to reason about which renames are safe.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        body = node.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            # A body of only a docstring must stay a syntactically valid body.
+            node.body = body[1:] or [ast.Pass()]
+    return ast.dump(tree, annotate_fields=True, include_attributes=False)
+
+
+def scorer_fingerprint(source_dir: Path | None = None) -> str | None:
+    """Identity of the scoring code that produced a set of numbers.
+
+    Recorded in `metadata.scorer_fingerprint` so a later round can tell,
+    from the stored scores alone, whether its baseline was produced by the
+    scorer it is about to compare against. Two rounds carrying the same
+    fingerprint were scored by identical scoring logic; two carrying
+    different ones were not, and their delta mixes an artifact change with a
+    measurement change (references/phase3-reevaluation.md step 5).
+
+    Why a content fingerprint and not the fields already in `metadata`:
+    `scoring_formula` and `schema_version` are literals in this file
+    ("weighted_geometric_mean", 2), and `epsilon`, `critical_dim`,
+    `partial_scoring` and `critical_floor_applied` are a constant and three
+    per-run observations. None of them moved when GATE_EVIDENCE_FLOOR was
+    introduced, which shifted the gate_compliance mean by 0.146 -- larger
+    than the 0.1 that auto-reverts a round. A fingerprint nobody has to
+    remember to bump is the only kind that survives a scorer change landing
+    through a merged PR rather than through a hone run.
+
+    Returns None when the source cannot be read or parsed. Absent is the
+    safe value: consumers treat a missing fingerprint as an unknown scorer
+    and re-score rather than assuming the scorer is unchanged.
+
+    `source_dir` names the directory the modules are read from, defaulting to
+    this file's own; only the default is cached, and only tests pass anything
+    else.
+    """
+    global _SCORER_FINGERPRINT, _SCORER_FINGERPRINT_COMPUTED
+    cached = source_dir is None
+    if cached and _SCORER_FINGERPRINT_COMPUTED:
+        return _SCORER_FINGERPRINT
+    here = Path(source_dir) if source_dir is not None else Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    try:
+        for name in SCORER_SOURCE_MODULES:
+            digest.update(_normalized_source(here / name).encode("utf-8"))
+            digest.update(b"\0")
+    except (OSError, SyntaxError, ValueError, RecursionError):
+        # A scorer that cannot identify itself says so. Reporting a
+        # partial digest, or the name of whichever module did parse, would
+        # let two different scorers share a fingerprint.
+        fingerprint = None
+    else:
+        fingerprint = f"{SCORER_FINGERPRINT_SCHEME}:{digest.hexdigest()[:16]}"
+    if cached:
+        _SCORER_FINGERPRINT = fingerprint
+        _SCORER_FINGERPRINT_COMPUTED = True
+    return fingerprint
+
+
 def score_from_results(
     results_path: str,
     artifact_type: str,
@@ -2282,6 +2385,7 @@ def score_from_results(
             "metadata": {
                 "artifact_type": artifact_type,
                 "scoring_formula": "weighted_geometric_mean",
+                "scorer_fingerprint": scorer_fingerprint(),
                 "error": error_reason,
                 "found_keys": top_level_keys,
                 "hint": hint,
@@ -2364,6 +2468,12 @@ def score_from_results(
             # field that makes that change visible in the artifact itself
             # rather than only in the git history.
             "gate_evidence_floor": GATE_EVIDENCE_FLOOR,
+            # Identity of the scoring code itself, so the round after this one
+            # can see a scorer change in the stored scores rather than only in
+            # the git history. `gate_evidence_floor` above records one
+            # constant; this records every constant and every dimension
+            # scorer, including the ones a future change adds.
+            "scorer_fingerprint": scorer_fingerprint(),
             "partial_scoring": any_partial,
             "inconclusive_tests": inconclusive_count,
             "schema_version": 2,

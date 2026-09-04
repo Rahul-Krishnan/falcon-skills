@@ -20,6 +20,23 @@ def _results(scores):
     return {"test_results": [{"test_id": k, "score": v} for k, v in scores.items()]}
 
 
+# The scorer identity every deterministic_scores.json written by the current
+# score_execution.py carries (metadata.scorer_fingerprint). Fixtures that mean
+# "two rounds scored the same way" have to say so now: absence of the field is
+# an unknown scorer, and check_compare refuses to rule on one. Tests about the
+# fingerprint itself set their own values.
+SAME_SCORER = "ast1:0000000000000000"
+
+
+def _with_scorer(payload, fingerprint=SAME_SCORER):
+    """A deterministic payload stamped with the scorer that produced it."""
+    if fingerprint is None:
+        return payload
+    metadata = dict(payload.get("metadata") or {})
+    metadata["scorer_fingerprint"] = fingerprint
+    return {**payload, "metadata": metadata}
+
+
 class TestSignTest(unittest.TestCase):
     def test_matches_published_thresholds(self):
         # The dotnet/skills create-skill-test table this implements:
@@ -250,7 +267,7 @@ class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
             json.dump(results, handle)
         if deterministic is not None:
             with open(os.path.join(directory, "deterministic_scores.json"), "w") as handle:
-                json.dump(deterministic, handle)
+                json.dump(_with_scorer(deterministic), handle)
         return results_path
 
     def test_a_results_path_reads_the_sibling_deterministic_file(self):
@@ -661,7 +678,7 @@ class TestInconclusiveCasesAreNotSilentlyDropped(unittest.TestCase):
             os.makedirs(os.path.join(tmp, name))
             path = os.path.join(tmp, name, "deterministic_scores.json")
             with open(path, "w") as handle:
-                json.dump(payload, handle)
+                json.dump(_with_scorer(payload), handle)
             paths.append(path)
         return paths
 
@@ -870,8 +887,13 @@ def _run_cli(*argv):
     )
 
 
-def _write_round(tmp, name, per_test, artifact_type=None, raw=None):
-    """A round directory holding a deterministic_scores.json; returns its path."""
+def _write_round(tmp, name, per_test, artifact_type=None, raw=None,
+                 scorer=SAME_SCORER):
+    """A round directory holding a deterministic_scores.json; returns its path.
+
+    `scorer` is the `metadata.scorer_fingerprint` the file records; pass None
+    for a round written by a scorer old enough not to record one.
+    """
     import json
     import os
 
@@ -884,7 +906,7 @@ def _write_round(tmp, name, per_test, artifact_type=None, raw=None):
             payload = {"per_test": per_test}
             if artifact_type:
                 payload["metadata"] = {"artifact_type": artifact_type}
-            json.dump(payload, handle)
+            json.dump(_with_scorer(payload, scorer), handle)
     return path
 
 
@@ -1327,9 +1349,9 @@ class TestAdvisoryHoldsInBothDirections(unittest.TestCase):
             os.makedirs(directory)
             path = os.path.join(directory, "deterministic_scores.json")
             with open(path, "w") as handle:
-                json.dump({"per_test": [
+                json.dump(_with_scorer({"per_test": [
                     {"test_id": k, "composite": v} for k, v in scores.items()
-                ]}, handle)
+                ]}), handle)
             paths.append(path)
         proc = subprocess.run(
             [
@@ -1457,6 +1479,210 @@ class TestTheAdvisoryLineIsSizingOnly(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("VERDICT: powered", proc.stdout)
         self.assertNotIn("advisory: not blocking", proc.stdout)
+
+
+class TestTheScorerThatProducedEachRoundIsChecked(unittest.TestCase):
+    """A comparison is only a comparison when one scorer produced both sides.
+
+    The rule Phase 3 had was provenance: re-score the previous round "when the
+    scorer itself changed this round", meaning when a hone run edited
+    score_execution.py. A scorer change landing through a merged PR fired it
+    for nobody. PR #16 moved the gate_compliance mean 0.859 -> 0.713 on a
+    dimension weighted 0.151, against a 0.1 auto-revert threshold, and the 144
+    stored baselines carried nothing that revealed it. The trigger is now
+    evidence: `metadata.scorer_fingerprint`, compared.
+    """
+
+    CASES = [{"id": f"t{i}", "test_profile": "execution"} for i in range(6)] + [
+        {"id": "t6", "test_profile": "knowledge_extraction"}
+    ]
+
+    def _pair(self, tmp, before_scorer, after_scorer):
+        criteria = _write_criteria(tmp, self.CASES)
+        before = _write_round(
+            tmp, "r1", [{"test_id": f"t{i}", "composite": 0.5} for i in range(6)],
+            "skill", scorer=before_scorer,
+        )
+        after = _write_round(
+            tmp, "r2", [{"test_id": f"t{i}", "composite": 0.9} for i in range(6)],
+            "skill", scorer=after_scorer,
+        )
+        return criteria, before, after
+
+    def _compare(self, tmp, before_scorer, after_scorer):
+        from check_eval_power import _load_round
+
+        _, before_path, after_path = self._pair(tmp, before_scorer, after_scorer)
+        before, before_source = _load_round(before_path)
+        after, after_source = _load_round(after_path)
+        return check_compare(before, after, 0.05, before_source, after_source)
+
+    def test_one_scorer_on_both_sides_still_reaches_a_verdict(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self._compare(tmp, "ast1:aaaaaaaaaaaaaaaa", "ast1:aaaaaaaaaaaaaaaa")
+        self.assertEqual(report["verdict"], "improved")
+        self.assertEqual(report["errors"], [])
+
+    def test_a_changed_scorer_is_not_measurable(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self._compare(tmp, "ast1:aaaaaaaaaaaaaaaa", "ast1:bbbbbbbbbbbbbbbb")
+        self.assertEqual(report["verdict"], "not_measurable")
+        said = " ".join(report["errors"])
+        self.assertIn("ast1:aaaaaaaaaaaaaaaa", said)
+        self.assertIn("ast1:bbbbbbbbbbbbbbbb", said)
+        self.assertIn("scoring code changed", said)
+        # The remedy is a re-score of the older round, not more test cases.
+        self.assertIn("Re-score", said)
+
+    def test_a_baseline_with_no_fingerprint_is_not_assumed_unchanged(self):
+        # The 144 stored baselines: no metadata.scorer_fingerprint at all.
+        # Reading that as "same scorer" is what let a merged scorer change
+        # auto-revert a round's working edits on its first re-evaluation.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self._compare(tmp, None, "ast1:bbbbbbbbbbbbbbbb")
+        self.assertEqual(report["verdict"], "not_measurable")
+        said = " ".join(report["errors"])
+        self.assertIn("--before", said)
+        self.assertNotIn("--after", said.split("Re-score")[0])
+        self.assertIn("Absent is not unchanged", said)
+
+    def test_two_unfingerprinted_rounds_are_two_unknown_scorers(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self._compare(tmp, None, None)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertIn("--before and --after", " ".join(report["errors"]))
+
+    def test_the_report_names_both_scorers(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = self._compare(tmp, "ast1:aaaaaaaaaaaaaaaa", None)
+        self.assertEqual(report["before_scorer_fingerprint"], "ast1:aaaaaaaaaaaaaaaa")
+        self.assertIsNone(report["after_scorer_fingerprint"])
+
+    def test_a_judge_deterministic_swap_is_still_reported_as_the_swap(self):
+        # Precedence: the source mismatch is the more fundamental problem and
+        # keeps its own message; the fingerprint check must not shadow it.
+        report = check_compare(
+            _deterministic({f"t{i}": 0.5 for i in range(6)}),
+            _results({f"t{i}": 0.9 for i in range(6)}),
+            0.05, "deterministic", "results",
+        )
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertIn("scorer; both are 0-1", " ".join(report["errors"]))
+
+    def test_hand_built_rounds_are_unaffected(self):
+        # `_deterministic` carries no scorer_fingerprint key at all, which is
+        # a caller that never read a file, not a round of unknown provenance.
+        report = check_compare(
+            _deterministic({f"t{i}": 0.5 for i in range(6)}),
+            _deterministic({f"t{i}": 0.9 for i in range(6)}),
+            0.05, "deterministic", "deterministic",
+        )
+        self.assertEqual(report["verdict"], "improved")
+
+    def test_the_cli_refuses_a_stale_baseline(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria, before, after = self._pair(
+                tmp, None, "ast1:bbbbbbbbbbbbbbbb"
+            )
+            proc = _run_cli(criteria, "--before", before, "--after", after, "--json")
+        report = json.loads(proc.stdout)
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(report["blocking"])
+        self.assertIn(
+            "scorer_fingerprint", " ".join(report["comparison"]["errors"])
+        )
+
+    def test_a_real_scorer_change_is_visible_end_to_end(self):
+        """The gap, closed: score the same results.json under two scorers.
+
+        Byte-identical executor output, one constant moved, and the
+        comparison sees a scorer rather than a round.
+        """
+        import json
+        import os
+        import shutil
+        import subprocess
+        import sys
+        import tempfile
+
+        scripts = os.path.dirname(os.path.abspath(__file__))
+        gates = [
+            {"step": "phase1_to_phase2", "judge": "self", "result": "pass",
+             "ts": "2026-01-01T00:00:00Z"},
+            {"step": "phase2_to_phase3", "judge": "self", "result": "pass",
+             "ts": "2026-01-01T00:01:00Z"},
+            {"step": "malformed"},
+        ]
+        results = {"results": [
+            {
+                "test_id": f"t{i}",
+                "test_profile": "execution",
+                "agent_response": "## Step 1\nDone.",
+                "execution_timeline": [
+                    {"step_type": "tool_use", "tool_name": "Read",
+                     "tool_input": {"file_path": "/tmp/artifact.md"}},
+                    {"step_type": "tool_use", "tool_name": "Write",
+                     "tool_input": {"file_path": "/tmp/workflow-1.json",
+                                    "content": json.dumps({"gates": gates})}},
+                    {"step_type": "text", "text": "Phase 1 complete."},
+                ],
+            }
+            for i in range(6)
+        ]}
+
+        def _score(round_dir, floor):
+            os.makedirs(round_dir)
+            for name in ("score_execution.py", "hone_common.py"):
+                shutil.copy(os.path.join(scripts, name),
+                            os.path.join(round_dir, name))
+            scorer = os.path.join(round_dir, "score_execution.py")
+            with open(scorer, encoding="utf-8") as handle:
+                source = handle.read()
+            with open(scorer, "w", encoding="utf-8") as handle:
+                handle.write(source.replace("GATE_EVIDENCE_FLOOR = 4",
+                                            f"GATE_EVIDENCE_FLOOR = {floor}", 1))
+            results_path = os.path.join(round_dir, "results.json")
+            with open(results_path, "w") as handle:
+                json.dump(results, handle)
+            proc = subprocess.run(
+                [sys.executable, scorer, results_path, "--type", "skill", "--json"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            path = os.path.join(round_dir, "deterministic_scores.json")
+            with open(path, "w") as handle:
+                handle.write(proc.stdout)
+            return path, json.loads(proc.stdout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = _write_criteria(tmp, self.CASES)
+            before, before_report = _score(os.path.join(tmp, "r1"), 4)
+            after, after_report = _score(os.path.join(tmp, "r2"), 8)
+            proc = _run_cli(criteria, "--before", before, "--after", after, "--json")
+
+        # The two scorers really do disagree about the same execution trace.
+        self.assertNotEqual(
+            before_report["aggregate_dimensions"]["gate_compliance"],
+            after_report["aggregate_dimensions"]["gate_compliance"],
+        )
+        report = json.loads(proc.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertIn("scoring code changed",
+                      " ".join(report["comparison"]["errors"]))
 
 
 if __name__ == "__main__":
