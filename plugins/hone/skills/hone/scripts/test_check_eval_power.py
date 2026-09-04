@@ -47,7 +47,12 @@ class TestSizing(unittest.TestCase):
     def test_below_floor_is_underpowered(self):
         report = check_sizing(self._criteria(3), 5, 2)
         self.assertEqual(report["verdict"], "underpowered")
-        self.assertTrue(report["errors"])
+        # The floor is advisory: reported, with the floor it enforced and the
+        # reason, but not an error and not a blocking finding.
+        self.assertTrue(report["advisories"])
+        self.assertEqual(report["errors"], [])
+        self.assertFalse(report["blocking"])
+        self.assertEqual(report["effective_floor"], 5)
 
     def test_at_floor_is_powered(self):
         report = check_sizing(self._criteria(5), 5, 1)
@@ -214,7 +219,8 @@ class TestSizingHonoursAlpha(unittest.TestCase):
         strict = check_sizing(criteria, 5, 2, alpha=0.01)
         self.assertEqual(strict["verdict"], "underpowered")
         self.assertEqual(strict["effective_floor"], 7)
-        self.assertTrue(strict["errors"])
+        self.assertTrue(strict["advisories"])
+        self.assertFalse(strict["blocking"])
 
     def test_the_floor_never_drops_below_min_stimuli(self):
         """A loose alpha must not let a caller under --min-stimuli through."""
@@ -1164,6 +1170,223 @@ class TestFalsyIdsSurviveTheResultsFallback(unittest.TestCase):
         after = {"test_results": [{"test_id": None, "score": 0.9}]}
         report = check_compare(before, after, 0.05, "deterministic", "deterministic")
         self.assertEqual(report["paired_cases"], 0)
+
+
+class TestUnderpoweredSizingIsAdvisoryNotAHalt(unittest.TestCase):
+    """Step 6b runs on every route and is not skippable, but below the floor
+    it warns rather than halting. hone's own generation minimums (2 cases on
+    the lightweight tier, 3 at the Step 3/5 gates, 4 standard) certify suites
+    under any floor this script can enforce; a blocking floor made those tiers
+    unrunnable, and the only escape was padding the suite with near-duplicates,
+    which is the anti-pattern Step 6b warns against."""
+
+    def _write(self, tmp, cases):
+        import json
+        import os
+
+        path = os.path.join(tmp, "criteria.json")
+        with open(path, "w") as handle:
+            json.dump({"test_cases": cases}, handle)
+        return path
+
+    def _run(self, path, *extra):
+        import os
+        import subprocess
+        import sys
+
+        return subprocess.run(
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), "check_eval_power.py"),
+                path,
+                *extra,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_a_lightweight_two_case_suite_reports_underpowered_and_exits_zero(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                {"id": "TC-001", "test_profile": "execution"},
+                {"id": "TC-002", "test_profile": "error_handling"},
+            ])
+            proc = self._run(path, "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = json.loads(proc.stdout)
+        self.assertEqual(report["verdict"], "underpowered")
+        self.assertFalse(report["blocking"])
+        self.assertEqual(report["scorable_cases"], 2)
+        self.assertEqual(report["effective_floor"], 5)
+        # The floor it enforced and the reason both survive into the report.
+        self.assertTrue(report["advisories"])
+        self.assertIn("floor is 5", report["advisories"][0])
+        self.assertEqual(report["errors"], [])
+
+    def test_the_advisory_is_printed_in_the_human_readable_mode_too(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                {"id": "TC-001", "test_profile": "execution"},
+            ])
+            proc = self._run(path)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("VERDICT: underpowered", proc.stdout)
+        self.assertIn("ADVISORY:", proc.stdout)
+        self.assertIn("advisory: not blocking", proc.stdout)
+
+    def test_a_powered_suite_is_still_powered_and_carries_no_advisory(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                {"id": f"TC-00{i}", "test_profile": f"p{i % 2}"} for i in range(1, 6)
+            ])
+            proc = self._run(path, "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        report = json.loads(proc.stdout)
+        self.assertEqual(report["verdict"], "powered")
+        self.assertFalse(report["blocking"])
+        self.assertEqual(report["advisories"], [])
+
+    def test_duplicate_ids_still_block_and_exit_one(self):
+        """Not every sizing finding went advisory. Duplicate ids break the
+        identity the next round pairs on, so carrying that forward is not
+        safe the way a small-but-honest suite is."""
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, [
+                {"id": "TC-001", "test_profile": f"p{i}"} for i in range(6)
+            ])
+            proc = self._run(path, "--json")
+        self.assertEqual(proc.returncode, 1)
+        report = json.loads(proc.stdout)
+        self.assertTrue(report["blocking"])
+        self.assertTrue(any("duplicate" in e for e in report["errors"]))
+
+    def test_a_genuine_input_error_still_exits_two(self):
+        """The advisory exit must not swallow the error exits: a bad path, an
+        unreadable file, and a non-object root are all still failures."""
+        import os
+        import tempfile
+
+        missing = self._run("/nonexistent/dir/eval_criteria.json", "--json")
+        self.assertEqual(missing.returncode, 2)
+        self.assertNotIn("Traceback", missing.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "criteria.json")
+            with open(bad, "w") as handle:
+                handle.write("{not json")
+            unreadable = self._run(bad, "--json")
+        self.assertEqual(unreadable.returncode, 2)
+        self.assertNotIn("Traceback", unreadable.stderr)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rooted = os.path.join(tmp, "criteria.json")
+            with open(rooted, "w") as handle:
+                handle.write('[{"id": "TC-001"}]')
+            non_object = self._run(rooted, "--json")
+        self.assertEqual(non_object.returncode, 2)
+        self.assertIn("must be a JSON object", non_object.stderr)
+
+
+class TestAdvisoryHoldsInBothDirections(unittest.TestCase):
+    """Making Step 6b advisory routes under-floor suites into Phase 3 as the
+    common path instead of halting them at Phase 1. Phase 3 step 5 keys its
+    auto-revert off the power verdict, so the verdict an underpowered round
+    hands it must never read `regressed` -- otherwise the change just feeds an
+    auto-revert that Step 9a calls unjustified."""
+
+    # Four scorable cases against a floor of five, so sizing reads
+    # `underpowered`, while all five ids pair and sweep one way, so the
+    # comparison nominally reads `regressed`. This is the reviewer's scenario.
+    CASES = [
+        {"id": f"TC-00{i}", "test_profile": "execution"} for i in range(1, 5)
+    ] + [{"id": "TC-005", "test_profile": "knowledge_extraction"}]
+
+    def _compare(self, tmp, before_scores, after_scores):
+        import json
+        import os
+        import subprocess
+        import sys
+
+        criteria = os.path.join(tmp, "criteria.json")
+        with open(criteria, "w") as handle:
+            json.dump({"test_cases": self.CASES}, handle)
+        paths = []
+        for name, scores in (("before", before_scores), ("after", after_scores)):
+            directory = os.path.join(tmp, name)
+            os.makedirs(directory)
+            path = os.path.join(directory, "deterministic_scores.json")
+            with open(path, "w") as handle:
+                json.dump({"per_test": [
+                    {"test_id": k, "composite": v} for k, v in scores.items()
+                ]}, handle)
+            paths.append(path)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), "check_eval_power.py"),
+                criteria, "--before", paths[0], "--after", paths[1], "--json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return proc, json.loads(proc.stdout) if proc.stdout else None
+
+    def test_an_underpowered_round_never_hands_phase_3_a_regressed_verdict(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, report = self._compare(
+                tmp,
+                {f"TC-00{i}": 0.8 for i in range(1, 6)},
+                {f"TC-00{i}": 0.3 for i in range(1, 6)},
+            )
+        self.assertEqual(report["verdict"], "underpowered")
+        # Non-zero on purpose: `underpowered` is not a result Phase 3 may act
+        # on in either direction, and exit 0 would read as the clean pass the
+        # sizing half just denied.
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(report["blocking"])
+        # The nominal movement survives for a human to read.
+        self.assertEqual(report["comparison"]["verdict"], "regressed")
+        self.assertTrue(
+            any("suppressed" in w for w in report["comparison"]["warnings"])
+        )
+
+    def test_an_underpowered_round_never_claims_an_improvement_either(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc, report = self._compare(
+                tmp,
+                {f"TC-00{i}": 0.3 for i in range(1, 6)},
+                {f"TC-00{i}": 0.9 for i in range(1, 6)},
+            )
+        self.assertEqual(report["verdict"], "underpowered")
+        self.assertEqual(proc.returncode, 1)
+        self.assertTrue(report["blocking"])
+
+    def test_the_sizing_half_of_a_compare_report_carries_the_advisory(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, report = self._compare(
+                tmp,
+                {f"TC-00{i}": 0.8 for i in range(1, 6)},
+                {f"TC-00{i}": 0.3 for i in range(1, 6)},
+            )
+        self.assertTrue(report["sizing"]["advisories"])
+        self.assertFalse(report["sizing"]["blocking"])
 
 
 if __name__ == "__main__":

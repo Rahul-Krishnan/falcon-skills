@@ -13,6 +13,18 @@ Two modes:
            verdict at all? Below the floor the correct answer is "underpowered",
            which is neither a pass nor a regression.
 
+           Below the floor the verdict is ADVISORY, because hone's own
+           generation minimums (2 cases on the lightweight tier, 3 at the
+           Step 3/5 gates, 4 standard) all certify suites under any floor
+           this script can enforce: a blocking floor made those tiers
+           unrunnable and left padding with near-duplicates as the only
+           escape, which is the remedy Step 6b warns against. So the gate
+           yields, not the generator. Sizing still reports `underpowered`
+           with the floor it enforced and the reason, and exits 0 with
+           `blocking` false so the run carries the warning forward. A
+           duplicate test case id still exits 1: it breaks the identity the
+           next round pairs on. Usage and input errors keep exiting 2.
+
            The floor counts only the cases compare mode could actually pair.
            A case whose test_profile can never produce a deterministic
            composite never reaches the sign test, so counting it certified
@@ -63,8 +75,14 @@ borrowed 5-7-8 table is kept as it stands rather than halved; the combined
 figure is reported as `two_sided_alpha` so a consumer reading the emitted
 JSON is not left to infer it from `alpha`.
 
-Exit codes: 0 powered, 1 underpowered, not measurable, or not significant,
-2 usage error.
+Exit codes: 0 when nothing blocks the caller (sizing `powered`, sizing
+`underpowered` on the floor alone, and compare `improved`); 1 when a finding
+must stop the caller (a sizing criteria defect such as duplicate ids, and any
+compare verdict outside `improved`); 2 usage or input error (a missing or
+unreadable path, a non-object criteria root, a directory where a round file
+was expected, only one of --before/--after). The `blocking` field in the
+report carries the same decision, so a consumer reading `--json` never has to
+re-derive it from the verdict.
 
 Stdlib only. Read-only: it never writes to the criteria or results files.
 """
@@ -258,6 +276,9 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
     profiles = sorted({_profile_of(c) for c in scorable})
 
     errors: list[str] = []
+    # `advisories` is the under-floor finding: real, reported, and carried
+    # forward rather than halting the run. `errors` is what still blocks.
+    advisories: list[str] = []
     warnings: list[str] = []
 
     if len(ids) != len(distinct_ids):
@@ -267,12 +288,15 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
             "identity across rounds, so duplicates make pairing ambiguous"
         )
     if len(scorable_ids) < floor:
-        errors.append(
+        advisories.append(
             f"{len(scorable_ids)} deterministically scorable test case(s) of "
             f"{len(distinct_ids)} distinct, floor is {floor} "
             f"(max of --min-stimuli {min_stimuli} and {alpha_floor} required by "
             f"alpha {alpha}); no arrangement of wins reaches p<={alpha} below "
-            "the floor"
+            "the floor. Advisory: the run continues and carries the "
+            "`underpowered` verdict, which justifies neither a promotion nor "
+            "a revert. Add cases that discriminate a different property; do "
+            "not pad the suite with near-duplicates to clear the floor"
         )
     if excluded_ids:
         warnings.append(
@@ -293,10 +317,15 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
             "one profile measure one property repeatedly"
         )
 
-    powered = not errors
+    powered = not errors and not advisories
     return {
         "mode": "sizing",
         "verdict": "powered" if powered else "underpowered",
+        # Whether the caller must stop. An under-floor suite is `underpowered`
+        # and NOT blocking: Step 6b reports it and Phase 1 carries on. A
+        # duplicate-id suite is `underpowered` and blocking, because the
+        # comparison identity the next round pairs on is broken.
+        "blocking": bool(errors),
         "artifact_type": artifact_type,
         "distinct_cases": len(distinct_ids),
         "scorable_cases": len(scorable_ids),
@@ -306,6 +335,7 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
         "profiles": profiles,
         "min_discordant_for_significance": min_discordant_for_alpha(alpha),
         "errors": errors,
+        "advisories": advisories,
         "warnings": warnings,
     }
 
@@ -735,10 +765,16 @@ def _combined_verdict(sizing: dict, comparison: dict) -> str:
     directions. phase1-evaluation.md Step 9a: an `underpowered` run is
     "neither a pass nor a regression ... never let it justify a promotion or a
     revert", and the sign test is direction-blind under the null, so a suite
-    too small to promote on is equally too small to revert on. The case where
-    the override actually changes anything is a suite whose ids are duplicated
-    or whose criteria no longer match the rounds -- the one case where the
-    pairing identity has just been declared broken.
+    too small to promote on is equally too small to revert on.
+
+    This is what keeps "advisory" from meaning "ignored". Sizing no longer
+    halts Phase 1 below the floor, so under-floor suites now reach Phase 3 as
+    the common path rather than the exception; the override is what stops the
+    extra traffic from landing on Phase 3's auto-revert. An `underpowered`
+    sizing therefore still suppresses the comparison in BOTH directions: the
+    combined verdict never reads `improved` (no promotion) and never reads
+    `regressed` (no auto-revert), and phase3-reevaluation.md step 5 keys its
+    auto-revert precondition off exactly that.
 
     What the override must not do is happen quietly. The nested
     `comparison.verdict` is left intact for a human reading the JSON, and
@@ -855,14 +891,22 @@ def main() -> None:
         )
         # A top-level `mode`, like the sizing report's, so a consumer can tell
         # the two shapes apart without probing for a `comparison` key.
+        verdict = _combined_verdict(sizing, comparison)
+        # Compare mode keeps its original exit semantics: only `improved` is a
+        # result a caller may act on. `underpowered` here is non-zero on
+        # purpose -- Phase 3 must neither promote nor revert on it, and a zero
+        # exit would read as the clean pass the sizing half just denied.
         report = {"mode": "compare", "sizing": sizing, "comparison": comparison,
-                  "verdict": _combined_verdict(sizing, comparison)}
+                  "verdict": verdict, "blocking": verdict != "improved"}
 
     if args.json:
         json.dump(report, sys.stdout, indent=2)
         print()
     else:
         print(f"VERDICT: {report['verdict']}")
+        if not report["blocking"] and report["verdict"] != "powered":
+            print("  advisory: not blocking, the run continues carrying this "
+                  "verdict; it justifies neither a promotion nor a revert")
         sizing = report["sizing"] if report["mode"] == "compare" else report
         for section in (sizing, report.get("comparison")):
             if not section:
@@ -881,10 +925,12 @@ def main() -> None:
                     print(f"  inconclusive after: {section['inconclusive_after']}")
             for error in section["errors"]:
                 print(f"  ERROR: {error}")
+            for advisory in section.get("advisories", ()):
+                print(f"  ADVISORY: {advisory}")
             for warning in section["warnings"]:
                 print(f"  WARNING: {warning}")
 
-    sys.exit(0 if report["verdict"] in ("powered", "improved") else 1)
+    sys.exit(1 if report["blocking"] else 0)
 
 
 if __name__ == "__main__":
