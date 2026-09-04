@@ -417,9 +417,10 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
    ```json
    {
      "artifact": "{name}",
-     "max_rounds": 3,
+     "max_rounds": <max_rounds>,
      "rounds": [
        {"round": 1,
+        "run": "${RUN_ID}",
         "findings": [
           {"id": "F1", "severity": "critical", "file": "SKILL.md",
            "summary": "Step 4 has no stated exit condition", "status": "open"}
@@ -427,6 +428,8 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
      ]
    }
    ```
+
+   Both `max_rounds` and `run` are per-run values; everything else in the file accumulates. Resolve them before writing: `<max_rounds>` is this run's `--rounds N` budget, the same value the state-file template binds to `iteration.target`, and `run` is the resolved `${RUN_ID}` string, not the literal `${RUN_ID}`. A hardcoded `3` is the one that bites silently, because `check_convergence.py` reads `max_rounds` to decide `capped` and `capped` is a FORCED halt: a `--rounds 6` run stops at round 3 and reports itself capped.
 
    `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones the convergence check counts); `status` is `open`, `fixed`, or `rejected`. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged -- that repetition is what lets the check see a finding stay open across rounds.
 
@@ -440,7 +443,14 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 2. Run deterministic scoring on re-eval results, then the Step 9a power comparison (`check_eval_power.py --artifact-type <type> --before <prior round> --after <this round>`) and record `power_verdict` beside the composite. `underpowered` and `not_measurable` are never reported as an improvement, and neither justifies an auto-revert either: Phase 3 step 5 withholds the restore on both and hands the suspected regression to the human. On the first round of a `--fix-only` run there is no prior round: run the sizing half alone and record `powered`/`underpowered`; the comparison starts on round 2.
 3. Compare before/after per-dimension. A drop > 0.1 in any dimension flags a regression, but resample first: re-run the tests feeding that dimension twice more and take the median. Auto-revert only if the median still shows the drop. If the prior round's `deterministic_scores.json` records a different `metadata.scorer_fingerprint` than this round's -- or records none, which means an unidentified scorer, not an unchanged one -- re-score the prior round's results with the current scorer before comparing, so a measurement change is not read as an artifact change. The trigger is the recorded fingerprint, not whether this run edited `score_execution.py`: a scorer change that lands through a merged PR touches no run at all. `check_eval_power.py` returns `not_measurable` on a mismatch or an absence, which is already a verdict Phase 3 must not revert on.
 4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid.
-5. Run `check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json`. It returns `converged`, `capped`, `escalate`, or `in_progress`. **Branch on the JSON `verdict`, not the exit code:** only `converged` exits 0, so `in_progress` -- the ordinary continue case in step 7 below -- exits 1 alongside the two halt verdicts. Treat exit 1 as "not converged yet" and read the verdict; only exit 2 (missing or unparseable ledger) is a real failure. On `escalate` the loop is not converging (a finding open three rounds, blocking count flat, or a finding closed in one file reopened in another): halt, emit a `fail` gate event for `convergence`, and report the finding ids. On `capped`, report it as **capped, not converged**, and list the open blocking findings. Never present a capped run as success.
+5. Run `check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json`. It returns `converged`, `capped`, `escalate`, or `in_progress`. **Branch on the JSON `verdict`, not the exit code:** only `converged` exits 0, so `in_progress` -- the ordinary continue case in step 7 below -- exits 1 alongside the two halt verdicts. Treat exit 1 as "not converged yet" and read the verdict; only exit 2 (missing or unparseable ledger) is a real failure.
+
+   **Emit the `convergence` gate event on every verdict, not only the halting ones.** `result: "pass"` for `converged` and `in_progress` (the check ran and did not stop the loop), `result: "fail"` for `escalate` and `capped`. `validate_gates.py` hard-errors on a missing `convergence` in normal and fix-only runs, so an omitted event on the ordinary round invalidates the state file.
+
+   - `escalate`: the loop is not converging (a finding open three rounds, blocking count flat, or a finding closed in one file reopened in another, each measured within this run). Emit `fail`, report the finding ids, then halt.
+   - `capped`: the round budget ran out with blocking findings still open. Emit `fail`, report it as **capped, not converged**, list the open blocking findings, then halt. Never present a capped run as success.
+   - `converged` / `in_progress`: emit `pass` and continue to step 6.
+   - **Exit 2** (no ledger, or one the script cannot parse) is a Phase 2 Step 8 omission, and it is repairable rather than fatal. Emit `convergence` with `result: "fail"` and `"reason": "ledger_missing"`, write the ledger from this round's findings per Phase 2 Step 8, and re-run the check once. The re-run's verdict then drives the branches above, and its `pass` closes the failed event as the repair loop the Handoff Validation Protocol already describes. If the second run still exits 2, that is an error halt: report the path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop.
 6. Check the mechanical exit gate. It runs **after** the convergence check, never before it: the gate emits `workflow_exit`, and a `convergence` event recorded after that exit reads as forward progress past the halt rather than as the halt itself. Same order as the Phase 3 reference (steps 7 then 8).
 7. If rounds remain, the verdict is `in_progress`, and the score is improving: loop back to Phase 2.
 

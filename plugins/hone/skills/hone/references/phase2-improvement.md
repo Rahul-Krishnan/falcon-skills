@@ -387,6 +387,48 @@ trigger_test: {
 
 After writing the handoff, set `steps.phase2_trigger_test` to `"done"` in the workflow state file (`"skipped"` when `--skip-trigger-test` is set) — the key is seeded as `"pending"` by the SKILL.md state template and the Mechanical Exit Gate checks it.
 
+### Step 8: Ledger Append
+
+**Not optional, and not skippable.** Phase 3 step 7 runs `check_convergence.py` on every round and the `convergence` gate event is mandatory, so a round that ends without a ledger produces an exit-2 failure and a state file `validate_gates.py` rejects. This is the last Phase 2 step: the `phase2_to_phase3` gate event defined at the end of Step 7 is emitted after this step, not before it, and when Step 7 is skipped (hooks, scripts, `--skip-trigger-test`) this step still runs and still owns that emission.
+
+**What to write.** Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`, creating the file on round 1 of the first run. The ledger is the artifact's memory across rounds AND across runs: a resumed run reloads it instead of re-deriving findings, and a rejection recorded here is not re-litigated without new evidence.
+
+```json
+{
+  "artifact": "{name}",
+  "max_rounds": <max_rounds>,
+  "rounds": [
+    {"round": 1,
+     "run": "${RUN_ID}",
+     "findings": [
+       {"id": "F1", "severity": "critical", "file": "SKILL.md",
+        "summary": "Step 4 has no stated exit condition", "status": "open"}
+     ]}
+  ]
+}
+```
+
+- `severity` is `critical`, `major`, or `minor`. `critical` and `major` are the blocking ones the convergence check counts; a `minor` left open never blocks convergence.
+- `status` is `open`, `fixed`, or `rejected`. Only an explicit `fixed` counts as a close: a finding simply absent from a round reads as an unreported round, not a repair.
+- `max_rounds` is **this run's** `--rounds N` budget, the same value as `iteration.target` in the state file. Do not hardcode it. `check_convergence.py` reads it to decide `capped`, and `capped` is a forced halt, so a stale `3` stops a `--rounds 6` run at round 3.
+- `run` is the resolved `${RUN_ID}` string, identical on every round of this invocation. It is what tells the check where one invocation's rounds end and the next begins. Without it the boundary is inferred from repeated round numbers, which cannot see a run that never restarts its numbering, and the run-scoped signals (streak, stall window, relocation trail, round budget) then read the previous run's history as this run's.
+- Each round **appends a new entry** and restates every finding still live, carried-over ones included. That repetition is what lets the check see a finding stay open across rounds; it is also why those signals are scoped to the current run rather than the whole file.
+- Findings go **inside** the round entry. A bare array, or findings at the top level, is rejected with exit 2.
+- Record each constraint ablation (SKILL.md Phase 2 Step 6a) and its outcome here too, as a finding whose `status` is `fixed` (constraint removed, nothing regressed) or `rejected` (restored because a test regressed).
+
+**When `check_convergence.py` exits 2.** Exit 2 means the ledger is missing or unparseable, and it is the one exit code that is a real failure rather than a verdict. It is repairable, and the repair belongs to this step:
+
+1. Phase 3 emits `{"step": "convergence", "judge": "self-check", "result": "fail", "reason": "ledger_missing", ...}` so the omission is recorded rather than skipped.
+2. Come back here, write the ledger from this round's findings in the shape above, and re-run the check once.
+3. The re-run's verdict drives Phase 3 step 7 normally, and the `convergence` event it emits closes the failed one: `validate_gates.py` treats a `fail` followed by a later `pass` for the same step as a repair loop, the same shape handoff validation already uses.
+4. A second exit 2 is an error halt, not a third attempt. Report the ledger path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop. Never continue past a convergence check that could not run.
+
+**Gate: P2 Step 8 -> Phase 3 (checklist)**
+- [ ] A round entry for this round was appended (not overwritten)
+- [ ] It carries `run` = `${RUN_ID}` and the ledger carries `max_rounds` = this run's budget
+- [ ] Every still-live finding is restated in this round's entry
+- [ ] `python3 <skill-dir>/scripts/check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json` parses the file (exit 0 or 1, never 2)
+
 ## Context Compaction Protection (Phase 2)
 
 Phase 2 runs 20-40 minutes. Compaction will happen. After compaction:

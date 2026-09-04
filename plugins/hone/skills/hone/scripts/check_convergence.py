@@ -26,6 +26,30 @@ The ledger also fixes a smaller thing: hone currently re-derives findings every
 run. A ledger on disk carries findings, rejections, and verdicts across runs, so
 a resumed run restarts its rounds without re-deriving its history.
 
+Because the ledger is cumulative, every signal here has to say which scope it
+reads, and the answer is not the same for all of them:
+
+  run-scoped   `stuck` (the consecutive-open streak), the stall window, the
+               relocation trail, `rounds_run`, `blocking_counts`, and the
+               `max_rounds` budget. All of these are statements about ONE
+               invocation failing to converge, and all of them would otherwise
+               fire on a new run's FIRST round purely on inherited history --
+               a halt before the run does any work, repeating on every future
+               invocation because the history that caused it is permanent.
+               SKILL.md's Phase 2 Step 8 requires each round to restate every
+               still-open finding, so run 2 round 1 reproduces run 1's final
+               open set by construction; a cross-run streak or stall window
+               reads that mandated restatement as evidence of a stuck loop.
+  cross-run    the reopen counter, which is cross-run BY DESIGN (see
+               DEFAULT_REOPEN_LIMIT) and bounded by a trailing rounds window
+               instead. It cannot fire on a restatement: restating an
+               already-open finding records no fixed->open transition, so it
+               takes real churn inside the new run to move.
+  whole-ledger `severity_by_id` (a lookup, not a signal: the latest severity
+               recorded for an id anywhere) and the `total_rounds_logged` /
+               `runs_logged` counters, which are reported as history and feed
+               no verdict.
+
 This script additionally separates two outcomes hone reports as one. A run that
 exhausts its rounds with blocking findings still open is `capped`, not
 `converged`, and must not be presented as success.
@@ -284,7 +308,20 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # The severity last recorded for an id anywhere in the history. Severity
     # can be restated per round, and the latest record is the current one.
     severity_by_id: dict[str, str] = {}
+    # Where the current run begins in `rounds`. The single pass below reads
+    # the whole ledger, because the reopen counter and `severity_by_id` want
+    # it, but the STREAK is reset here: a consecutive-open streak is a
+    # statement about one invocation, and carrying it across a restart made
+    # `recurrence_limit` fire on the new run's first round. SKILL.md Phase 2
+    # Step 8 has every round restate its still-open findings, so run 2 round 1
+    # always repeats run 1's final open set; with a cross-run streak, a
+    # finding left open at the end of a 3-round run escalated the next run
+    # before it did any work, and every run after that, permanently.
+    run_start = len(rounds) - len(current_run)
     for position, round_entry in enumerate(rounds):
+        if position == run_start:
+            streaks.clear()
+            del stuck[:]
         statuses: dict[str, str] = {}
         for f in _as_list(round_entry.get("findings")):
             if isinstance(f, dict) and f.get("id"):
@@ -357,8 +394,16 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             f"again {reopen_limit}+ times"
         )
 
-    # Stalled: blocking count held still across the trailing window.
-    blocking_counts = [len(_blocking(_open_findings(r))) for r in rounds]
+    # Stalled: blocking count held still across the current run's trailing
+    # window. Current run, not the whole ledger: "the number stopped moving"
+    # is a claim about this invocation, and a window that straddles a restart
+    # is mostly previous-run history. Four distinct findings, run 1 ending
+    # [2, 2] and run 2 round 1 closing both carry-overs while opening two new
+    # ones, gave [2, 2, 2] and escalated on `rounds_run: 1` -- on a round that
+    # had just closed two findings. `blocking_counts` is reported at the same
+    # scope as `rounds_run` for the same reason; `total_rounds_logged` and
+    # `runs_logged` are where the cumulative view lives.
+    blocking_counts = [len(_blocking(_open_findings(r))) for r in current_run]
     # Flat and non-zero, which is what the docstring means by "the number does
     # not move". `window[-1] >= max(window)` also fired on a *rising* window,
     # so [0, 0, 1] -- two clean rounds and then a newly found blocking finding
@@ -377,6 +422,15 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # Relocated: signature closed in one file reappears in another, and is
     # still open in the latest round (see `last_open_signatures` above -- a
     # relocation that has since been fixed is history, not an escalation).
+    #
+    # Read over the CURRENT RUN only, for the same reason as the streak and
+    # the stall window. "Closed here, opened there" describes a loop chasing
+    # one problem around an artifact, which is a within-invocation shape. Over
+    # the whole ledger it also became permanent: a signature recorded `fixed`
+    # in run 1 and found open elsewhere in run 2 escalated run 2 on round 1,
+    # and since Phase 2 Step 8 restates that still-open finding every
+    # subsequent run while run 1's `fixed` record never expires, it escalated
+    # every run after that too, with no recovery short of deleting the file.
     relocations: list[dict] = []
     # One relocation still open across three rounds is one relocation, not
     # three: the reason line counts entries, so without this it read as
@@ -391,7 +445,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # restate live findings so it usually self-corrected, but not on the last
     # one. Collecting the round's closes first makes detection independent of
     # array order and catches the same-round relocation either way round.
-    for round_entry in rounds:
+    for round_entry in current_run:
         findings = [
             f for f in _as_list(round_entry.get("findings")) if isinstance(f, dict)
         ]
@@ -452,8 +506,8 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
         "verdict": verdict,
         # Rounds in the CURRENT run, which is what `max_rounds` budgets and
         # what a caller reporting "round N of M" means. The cumulative figures
-        # are reported alongside rather than folded in, because the ledger's
-        # whole history is still the thing the escalation checks read.
+        # are reported alongside rather than folded in; see the module
+        # docstring for which signals read which scope.
         "rounds_run": len(current_run),
         "total_rounds_logged": len(rounds),
         "runs_logged": len(segments),

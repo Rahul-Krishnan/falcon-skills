@@ -20,6 +20,14 @@ def ledger(rounds, max_rounds=5):
             "rounds": [{"round": i + 1, "findings": f} for i, f in enumerate(rounds)]}
 
 
+def round_entry(number, findings, run=None):
+    """A round with an explicit number, and a `run` id when the test needs one."""
+    entry = {"round": number, "findings": findings}
+    if run is not None:
+        entry["run"] = run
+    return entry
+
+
 class TestConvergence(unittest.TestCase):
     def test_empty_ledger_is_in_progress(self):
         self.assertEqual(analyze({"rounds": []}, 3, 3)["verdict"], "in_progress")
@@ -139,10 +147,6 @@ class TestEscalation(unittest.TestCase):
     def test_rejected_findings_do_not_count_as_open(self):
         report = analyze(ledger([[finding("f1", status="rejected")]]), 3, 3)
         self.assertEqual(report["verdict"], "converged")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestLedgerRootShape(unittest.TestCase):
@@ -437,21 +441,14 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
     (`len(rounds)` measured against a per-run `max_rounds`).
     """
 
-    @staticmethod
-    def _round(number, findings, run=None):
-        entry = {"round": number, "findings": findings}
-        if run is not None:
-            entry["run"] = run
-        return entry
-
     def test_a_second_runs_open_finding_is_not_sorted_away(self):
         """Run 1's rounds 1-3 then run 2's rounds 1-2 sorted to [1,1,2,2,3]."""
         report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
-            self._round(1, [finding("A")]),
-            self._round(2, [finding("A")]),
-            self._round(3, [finding("A", status="fixed")]),
-            self._round(1, [finding("B")]),
-            self._round(2, [finding("B")]),
+            round_entry(1, [finding("A")]),
+            round_entry(2, [finding("A")]),
+            round_entry(3, [finding("A", status="fixed")]),
+            round_entry(1, [finding("B")]),
+            round_entry(2, [finding("B")]),
         ]}, 3, 3)
         self.assertNotEqual(report["verdict"], "converged")
         self.assertEqual([f["id"] for f in report["open_blocking"]], ["B"])
@@ -460,10 +457,10 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
     def test_max_rounds_is_measured_against_the_current_run(self):
         """A 4-round ledger must not cap run 2 on its first round."""
         report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
-            self._round(1, [finding("A", status="fixed")]),
-            self._round(2, [finding("A", status="fixed")]),
-            self._round(3, [finding("A", status="fixed")]),
-            self._round(1, [finding("C")]),
+            round_entry(1, [finding("A", status="fixed")]),
+            round_entry(2, [finding("A", status="fixed")]),
+            round_entry(3, [finding("A", status="fixed")]),
+            round_entry(1, [finding("C")]),
         ]}, 9, 9)
         self.assertEqual(report["verdict"], "in_progress")
         self.assertEqual(report["rounds_run"], 1)
@@ -472,10 +469,10 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
     def test_an_explicit_run_id_is_authoritative(self):
         """The `run` id beats the repeated-number inference."""
         report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
-            self._round(1, [finding("A", status="fixed")], run="r1"),
-            self._round(2, [finding("A", status="fixed")], run="r1"),
-            self._round(3, [finding("A", status="fixed")], run="r1"),
-            self._round(4, [finding("C")], run="r2"),
+            round_entry(1, [finding("A", status="fixed")], run="r1"),
+            round_entry(2, [finding("A", status="fixed")], run="r1"),
+            round_entry(3, [finding("A", status="fixed")], run="r1"),
+            round_entry(4, [finding("C")], run="r2"),
         ]}, 9, 9)
         self.assertEqual(report["runs_logged"], 2)
         self.assertEqual(report["rounds_run"], 1)
@@ -625,3 +622,103 @@ class TestMissingRoundsIsLoud(unittest.TestCase):
         result = self._run({"artifact": "x", "max_rounds": 3, "rounds": []})
         self.assertEqual(result.returncode, 1)
         self.assertIn("in_progress", result.stdout)
+
+
+class TestEscalationSignalsAreRunScoped(unittest.TestCase):
+    """The ledger is cumulative; the escalation signals are not.
+
+    The streak, the stall window and the relocation trail read the whole
+    array and had neither the run scoping `max_rounds` got nor the trailing
+    window the reopen counter got, so each halted a NEW run on its first
+    round on previous-run history alone -- permanently, since Phase 2 Step 8
+    restates still-open findings on every future invocation.
+    """
+
+    def _ledger(self, rounds, max_rounds=3):
+        return {"artifact": "demo", "max_rounds": max_rounds, "rounds": rounds}
+
+    def test_a_carried_over_finding_does_not_escalate_the_next_first_round(self):
+        """Run 1 ends with F1 open; run 2 round 1 restates it, as mandated."""
+        report = analyze(self._ledger([
+            round_entry(1, [finding("F1")], "run-1"),
+            round_entry(2, [finding("F1")], "run-1"),
+            round_entry(3, [finding("F1")], "run-1"),
+            round_entry(1, [finding("F1")], "run-2"),
+        ]), 3, 3)
+        self.assertEqual(report["verdict"], "in_progress")
+        self.assertEqual(report["rounds_run"], 1)
+        self.assertEqual(report["reasons"], [])
+        self.assertEqual(report["recurring"], [])
+
+    def test_a_streak_inside_one_run_still_escalates(self):
+        report = analyze(self._ledger([
+            round_entry(1, [finding("F1")], "run-1"),
+            round_entry(2, [finding("F1")], "run-1"),
+            round_entry(3, [finding("F1")], "run-1"),
+        ]), 3, 3)
+        self.assertEqual(report["verdict"], "escalate")
+        self.assertEqual(report["recurring"], ["F1"])
+
+    def test_the_stall_window_does_not_straddle_a_restart(self):
+        """Run 2 round 1 closes both carry-overs and opens two new findings."""
+        report = analyze(self._ledger([
+            round_entry(1, [finding("A", summary="a"), finding("B", summary="b")],
+                        "run-1"),
+            round_entry(2, [finding("A", summary="a"), finding("B", summary="b")],
+                        "run-1"),
+            round_entry(1, [finding("A", status="fixed", summary="a"),
+                            finding("B", status="fixed", summary="b"),
+                            finding("C", summary="c"), finding("D", summary="d")],
+                        "run-2"),
+        ]), 3, 3)
+        self.assertEqual(report["verdict"], "in_progress")
+        self.assertEqual(report["rounds_run"], 1)
+        self.assertEqual(report["reasons"], [])
+        self.assertEqual(report["blocking_counts"], [2])
+
+    def test_a_stall_inside_one_run_still_escalates(self):
+        """Distinct ids every round, so only the flat count can fire."""
+        rounds = [
+            round_entry(n, [finding(f"P{2 * n - 1}", summary=f"issue {2 * n - 1}"),
+                            finding(f"P{2 * n}", summary=f"issue {2 * n}")],
+                        "run-1")
+            for n in (1, 2, 3)
+        ]
+        report = analyze(self._ledger(rounds, max_rounds=9), 3, 3)
+        self.assertEqual(report["verdict"], "escalate")
+        self.assertEqual(report["blocking_counts"], [2, 2, 2])
+        self.assertTrue(any("did not move" in r for r in report["reasons"]))
+
+    def test_a_relocation_across_a_run_boundary_does_not_escalate(self):
+        """Closed in run 1's A.md, opened in run 2's B.md, is a new finding."""
+        report = analyze(self._ledger([
+            round_entry(1, [finding("X", file="A.md", summary="step lacks exit")],
+                        "run-1"),
+            round_entry(2, [finding("X", file="A.md", summary="step lacks exit",
+                                    status="fixed")], "run-1"),
+            round_entry(1, [finding("Y", file="B.md", summary="step lacks exit")],
+                        "run-2"),
+        ]), 3, 3)
+        self.assertEqual(report["verdict"], "in_progress")
+        self.assertEqual(report["relocations"], [])
+        self.assertEqual(report["reasons"], [])
+
+    def test_the_reopen_counter_still_spans_runs(self):
+        """The one signal that is cross-run by design keeps counting."""
+        report = analyze(self._ledger([
+            round_entry(1, [finding("F1")], "run-1"),
+            round_entry(2, [finding("F1", status="fixed")], "run-1"),
+            round_entry(3, [finding("F1")], "run-1"),
+            round_entry(1, [finding("F1")], "run-2"),
+            round_entry(2, [finding("F1", status="fixed")], "run-2"),
+            round_entry(3, [finding("F1")], "run-2"),
+        ]), 3, 3)
+        self.assertEqual(report["verdict"], "escalate")
+        self.assertEqual(report["reopen_counts"], {"F1": 2})
+        self.assertTrue(
+            any("found open again" in r for r in report["reasons"])
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

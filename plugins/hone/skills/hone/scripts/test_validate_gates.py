@@ -456,10 +456,6 @@ class TestHaltSequenceTail(unittest.TestCase):
                 self.assertEqual(report["warnings"], [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestResumedRuns(unittest.TestCase):
     """A resumed run must record that it resumed (regression: TC-011).
 
@@ -620,3 +616,7 @@ class TestHaltTailMatchesTheScorer(unittest.TestCase):
         ]
         report = validate_gates(gates, "normal")
         self.assertEqual(report["warnings"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

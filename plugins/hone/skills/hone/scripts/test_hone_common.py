@@ -454,10 +454,6 @@ class TestFrontmatterExtraction(unittest.TestCase):
         self.assertEqual(frontmatter_field(fm, "allowed-tools"), "[Read]")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestHaltTail(unittest.TestCase):
     """One definition of a halt tail, shared by validate_gates and the scorer.
 
@@ -639,3 +635,7 @@ class TestHaltTailVocabulary(unittest.TestCase):
             with self.subTest(step=unrelated):
                 self.assertEqual(halt_tail_vocabulary(unrelated),
                                  frozenset({"workflow_exit"}))
+
+
+if __name__ == "__main__":
+    unittest.main()
