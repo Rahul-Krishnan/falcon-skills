@@ -697,7 +697,7 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             "generation_success": _bool(),
         },
     },
-    # P2 Step 7 -> Phase 3 (trigger phrase testing)
+    # P2 Step 7 -> Step 8 (trigger phrase testing)
     "trigger_test": {
         "fields": {
             "accuracy": _num(min_value=0.0, max_value=1.0),
