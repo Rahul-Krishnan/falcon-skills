@@ -107,7 +107,7 @@ Steps:
    ```json
    {"output_dir": "$REEVAL_OUTPUT_DIR", "composite_score": 0.82, "per_test": [...], "power_verdict": "improved", "power_p_improved": 0.0312, "power_discordant": 6}
    ```
-   `output_dir` is the field step 3a reads on the following round; `per_test` is what step 5 reads (each entry carrying `test_id`, `score`, `status`, and `dimension_scores`, the shape `eval_results.per_test` uses). The record is validated against the `round_scores` schema in `scripts/validate_handoff.py`: `python3 <skill-dir>/scripts/validate_handoff.py $STATE_FILE --handoff round_{N}_scores`, and `--all` picks every `round_{N}_scores` key up on its own. Also append a gate event to `gates[]`:
+   `output_dir` is the field step 3a reads on the following round; `per_test` is what step 5 reads (each entry carrying `test_id`, `score`, `status`, and `dimension_scores`, the shape `eval_results.per_test` uses). The record is validated against the `round_scores` schema in `scripts/validate_handoff.py`: `python3 <skill-dir>/scripts/validate_handoff.py $STATE_FILE --handoff round_{N}_scores`, and `--all` picks every `round_{N}_scores` key up on its own. The record is required, not optional: `phase3_reevaluate` declares it as its produced handoff, so a `done` Phase 3 round that wrote none fails `--step phase3_reevaluate` and `--all` rather than passing silently and leaving the next round to re-baseline on `eval_results.output_dir`. Also append a gate event to `gates[]`:
    ```json
    {"step": "phase3_exit", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
    ```

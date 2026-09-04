@@ -36,9 +36,25 @@ Both anchor tests carry a collision guard, because an anchor that matches the
 artifact by accident is not recitation. MIN_ANCHOR_WORDS is the guard on the
 word side; MARKDOWN_SYNTAX_CHARS is its twin on the markup side, exempting
 generic markdown syntax (`##`, `---`, `|---|`) that every markdown artifact
-contains by construction. Exempt anchors of either kind leave the denominator,
-the way `required_absent` entries do; classifying them `outcome` let a set be
-padded to `within_threshold` with `##`/`---`/`**`.
+contains by construction.
+
+THE DENOMINATOR INVARIANT, which is what closes the dilution exploit for
+good (see `_carries_content` and the one guard in `check_overfit` that
+enforces it): an item yielding no normalised words carries no measurable
+content, and no such item is ever counted `outcome`. It is either a lift --
+artifact-specific decoration reproduced verbatim, counted in the numerator
+and the denominator alike -- or it leaves the scored set entirely, the way a
+`required_absent` entry does. It is never a bare denominator seat, so no
+quantity of it moves the ratio.
+
+The invariant is stated once, over `_normalize`'s output, and deliberately
+not over any decoration SHAPE. Three earlier fixes each matched a shape --
+identifier-like anchors, then short verbatim prose, then underscore runs --
+and each left the next shape seated in the denominator: `"| --- |"` and
+`"- - -"` carry internal whitespace, `"█"` is a single character, and all of
+them padded a ratio-1.0 criteria set down to `within_threshold`. Shape rules
+have to enumerate decoration and decoration is unbounded; "does this item
+contain a word" is a property of the item, so there is no next shape.
 
 `required_absent` lists are exempt by construction. They assert the artifact's
 own vocabulary must NOT appear in output, which is the opposite failure mode
@@ -123,27 +139,16 @@ JS_TECHNOLOGY_NAMES = frozenset({
 
 WORD = re.compile(r"[a-z0-9]+")
 
-# "Wordless" is no letters and no digits. Deliberately not `\W`, because `\w`
-# counts `_` as a word character and `_` is a MARKDOWN_SYNTAX_CHARS member
-# (`___` is a horizontal rule): under `[^\w\s]` an underscore run matched
-# neither pattern below, never reached `_is_generic_markdown`, and was
-# classified `outcome`, so 17 `"___"` anchors dropped a ratio-1.0 criteria
-# set to 0.1053. Spelled out rather than borrowed from `\w` so it cannot
-# drift from MARKDOWN_SYNTAX_CHARS again.
-WORDLESS_CHAR = r"[^0-9A-Za-z\s]"
-
-# Bare markup (`##`, `---`) carries no words at all, so the word-sequence test
-# below can never see it; it is matched as a raw substring instead. Identifier
-# anchors (`validate_handoff`, `gate-compliance`) need no special case: they
-# normalise to two or more words and the word-sequence test catches them,
-# including across a separator swap between the anchor and the artifact.
-MARKUP_ANCHOR = re.compile(rf"^{WORDLESS_CHAR}{{2,}}$")
-
-# Any wordless anchor, one character included. MARKUP_ANCHOR's two-character
-# floor is the lift test's collision guard; the exemption in _collect_items
-# needs none, since a lone `#` is markdown syntax as much as `##` and, left
-# in the scored set, pads the denominator.
-BARE_MARKUP = re.compile(rf"^{WORDLESS_CHAR}+$")
+# Minimum non-whitespace characters for a contentless anchor to be TESTED as a
+# verbatim lift. This is the markup side's collision guard, the twin of
+# MIN_ANCHOR_WORDS: a lone `#` or `█` occurs in almost any artifact by
+# accident, and calling that accident recitation inflates the very ratio being
+# gated. Below the floor an anchor is not a lift -- and, carrying no words, it
+# is not a denominator seat either (the invariant above), so it simply leaves
+# the scored set. Counting whitespace-stripped characters, because whitespace
+# is not a shape: `"|---|"` and `"| --- |"` are the same anchor and the fix
+# that treated them differently is the one this replaces.
+MIN_MARKUP_CHARS = 2
 
 # Characters that carry markdown structure rather than content. A bare-markup
 # anchor that is a run of a single one of them (`##`, `---`, ```` ``` ````) is
@@ -159,26 +164,27 @@ BARE_MARKUP = re.compile(rf"^{WORDLESS_CHAR}+$")
 # tables, rules, arrows, comments and emphasis from, so mixed-character
 # structure (`|---|`, `|:--|`, `->`, `<!--`) is exempt as well as a run of
 # one. Decoration outside the set (`▓▒░`) is artifact-specific and still
-# counts as a lift. An exempt anchor leaves the scored set entirely (see
-# _collect_items), so widening the exemption cannot dilute the ratio.
+# counts as a lift. Either way the anchor carries no words, so the invariant
+# above already keeps it out of the denominator; this set only decides
+# whether it is additionally counted as recitation.
 MARKDOWN_SYNTAX_CHARS = frozenset("#-*_`>|+~=:<!")
 
-# Every character the set claims must be able to REACH the exemption, which
-# sits behind BARE_MARKUP: a character MARKDOWN_SYNTAX_CHARS names and
-# BARE_MARKUP rejects is exempt in name only, and anchors built from it pad
-# the denominator instead of leaving the scored set. That gap is how `_`
-# reopened the dilution exploit after two fixes each closed one door, so
-# widening the set past what WORDLESS_CHAR admits fails here at import rather
-# than silently at the gate a phase later. test_check_overfit.py asserts the
-# same property end to end, once per character.
-_UNREACHABLE_SYNTAX_CHARS = sorted(
-    char for char in MARKDOWN_SYNTAX_CHARS if not BARE_MARKUP.match(char)
+# Every character the set claims must actually be content-free, or the set
+# lies about what it exempts: a member that `_normalize` reads as a word (a
+# letter or a digit slipped into the set) would make runs of it scorable
+# items and reintroduce a shape whose treatment depends on its characters.
+# The invariant is checked at import rather than discovered at a gate a phase
+# later. test_check_overfit.py asserts the end-to-end property, once per
+# character.
+_CONTENTFUL_SYNTAX_CHARS = sorted(
+    char for char in MARKDOWN_SYNTAX_CHARS if WORD.findall(char.lower())
 )
-if _UNREACHABLE_SYNTAX_CHARS:
+if _CONTENTFUL_SYNTAX_CHARS:
     raise AssertionError(
-        "MARKDOWN_SYNTAX_CHARS members cannot reach the generic-markdown "
-        f"exemption through BARE_MARKUP: {_UNREACHABLE_SYNTAX_CHARS}. Widen "
-        "WORDLESS_CHAR to admit them, or drop them from the set."
+        "MARKDOWN_SYNTAX_CHARS members must carry no normalised words, so "
+        "that anchors built from them leave the scored set rather than "
+        f"padding the denominator: {_CONTENTFUL_SYNTAX_CHARS} do. Drop them "
+        "from the set."
     )
 
 # The skill-name rule fires on a bare name only when the name is itself
@@ -193,6 +199,21 @@ NAME_CONTEXT_WORDS = r"skill|command|hook|artifact|invoke[ds]?|invoking|ran|run|
 
 def _normalize(text: str) -> list[str]:
     return WORD.findall(text.lower())
+
+
+def _carries_content(text: str) -> bool:
+    """Does this item carry anything the classifier can measure?
+
+    One word is enough; none is not. This is the whole of the denominator
+    invariant stated at the top of the module, and it is the ONLY test that
+    decides whether an item may occupy a denominator seat as `outcome`. It
+    looks at `_normalize`'s output and nothing else -- not at which characters
+    the item is built from, not at how many of them there are, not at whether
+    they are separated by whitespace -- because every previous version of this
+    rule was a character-shape test and every one of them was walked around by
+    the next shape (`"___"`, then `"| --- |"` and `"- - -"`, then `"█"`).
+    """
+    return bool(_normalize(text))
 
 
 def _ngrams(words: list[str], size: int) -> set[tuple[str, ...]]:
@@ -220,35 +241,58 @@ def _contains_phrase(haystack: list[str], phrase: list[str]) -> bool:
     return False
 
 
-def _is_generic_markdown(stripped: str) -> bool:
-    """Is this bare-markup anchor markdown syntax rather than artifact wording?
+def _markup_body(stripped: str) -> str:
+    """`stripped` with all whitespace removed.
 
-    True when every character is a structural one (`##`, `---`, `|---|`,
-    `->`, `<!--`). See MARKDOWN_SYNTAX_CHARS for why those are exempt. The
-    earlier test, a run of ONE structural character, exempted `---` and then
-    flagged the table separator `|---|` built from the same characters, so a
-    hand-written "outputs a table" check against any artifact with a table in
-    it was reported as a verbatim lift. Non-ASCII decoration (`▓▒░`) shares no
-    character with the set and stays a lift.
+    Whitespace inside decoration is layout, not content: `"|---|"`,
+    `"| --- |"` and `"|  ---  |"` are one anchor written three ways. The rule
+    they walked around treated them as three shapes and admitted two of them
+    to the denominator, so every test below reads this body rather than the
+    raw string.
     """
-    return bool(stripped) and set(stripped) <= MARKDOWN_SYNTAX_CHARS
+    return "".join(stripped.split())
+
+
+def _is_generic_markdown(stripped: str) -> bool:
+    """Is this contentless anchor markdown syntax rather than artifact wording?
+
+    True when every non-whitespace character is a structural one (`##`,
+    `---`, `|---|`, `| --- |`, `->`, `<!--`). See MARKDOWN_SYNTAX_CHARS for
+    why those are exempt from the lift test. The earlier test, a run of ONE
+    structural character, exempted `---` and then flagged the table separator
+    `|---|` built from the same characters, so a hand-written "outputs a
+    table" check against any artifact with a table in it was reported as a
+    verbatim lift. Non-ASCII decoration (`▓▒░`) shares no character with the
+    set and stays a lift.
+    """
+    body = _markup_body(stripped)
+    return bool(body) and set(body) <= MARKDOWN_SYNTAX_CHARS
 
 
 def _anchor_lift(stripped: str, artifact_text: str,
                  artifact_words: list[str]) -> str:
     """Why this `required_present` anchor is a verbatim lift, or "" if it is not.
 
-    Two shapes, because one of them has no words to compare. Bare markup
-    (`▓▒░`) is matched as a raw substring, minus the generic markdown syntax
-    exempted by `_is_generic_markdown`; everything else is matched on its
-    normalised words, and only at MIN_ANCHOR_WORDS or more. Below that bar an
-    anchor is a common token that collides with almost any artifact by
-    accident, and flagging it would inflate the very ratio being gated.
+    Two branches, split on the one property that matters: whether the anchor
+    carries words at all (`_carries_content`). A contentless anchor (`▓▒░`,
+    `▓ ▒ ░`) has nothing to compare word-wise, so it is matched as a raw
+    substring, minus the generic markdown syntax `_is_generic_markdown`
+    exempts and minus runs shorter than MIN_MARKUP_CHARS. Everything else is
+    matched on its normalised words, and only at MIN_ANCHOR_WORDS or more.
+    Below either bar an anchor collides with almost any artifact by accident,
+    and flagging the collision would inflate the very ratio being gated.
+
+    Whichever branch runs, a contentless anchor that is NOT a lift stays out
+    of the denominator: `check_overfit` exempts it rather than seating it as
+    `outcome`. That is why widening or narrowing this function cannot reopen
+    the dilution exploit -- it decides recitation, never denominator size.
     """
     if not artifact_text:
         return ""
-    if MARKUP_ANCHOR.match(stripped):
+    if not _carries_content(stripped):
         if _is_generic_markdown(stripped):
+            return ""
+        if len(_markup_body(stripped)) < MIN_MARKUP_CHARS:
             return ""
         if stripped.lower() in artifact_text.lower():
             return f"markup anchor lifted verbatim from the artifact: '{stripped}'"
@@ -348,8 +392,8 @@ def classify_item(text: str, artifact_ngrams: set, skill_name: str,
     return {"text": text, "class": label, "reasons": reasons}
 
 
-def _collect_items(criteria: dict) -> tuple[list[dict], int, int]:
-    """Return (scored items, exempt `required_absent` count, exempt markdown count).
+def _collect_items(criteria: dict) -> tuple[list[dict], int]:
+    """Return (candidate items, exempt `required_absent` count).
 
     Each item carries where it came from as well as what it says. Step 6a
     tells the agent to rewrite the flagged items, and a flagged item with no
@@ -362,17 +406,16 @@ def _collect_items(criteria: dict) -> tuple[list[dict], int, int]:
     are literal match anchors and the rest are prose; they need different lift
     tests. See classify_item.
 
-    A generic-markdown anchor (`##`, `---`) is exempt the same way a
-    `required_absent` entry is: it leaves the scored set here, before
-    classification, rather than being classified `outcome`. Labelling it
-    `outcome` put it in the denominator, and a denominator that grows on
-    `required_present: ["#", "##", "---", "**"]` is the dilution exploit the
-    anchor rule exists to close, reopened on the one anchor shape the rule
-    exempts.
+    Nothing is exempted HERE on the strength of its shape any more. This
+    function used to drop generic-markdown anchors before classification,
+    which meant the exemption and the lift test each had their own idea of
+    what "markup" looks like, and an anchor the two disagreed about (`"|
+    --- |"`, `"█"`) fell between them into the denominator. Contentless items
+    are now carried through classification and settled in one place, by
+    `check_overfit`'s single denominator guard.
     """
     items: list[dict] = []
     exempt = 0
-    exempt_markdown = 0
     for index, case in enumerate(criteria.get("test_cases") or []):
         if not isinstance(case, dict):
             continue
@@ -389,10 +432,6 @@ def _collect_items(criteria: dict) -> tuple[list[dict], int, int]:
             present_list = []
         for slot, present in enumerate(present_list):
             if not isinstance(present, str):
-                continue
-            stripped = present.strip()
-            if BARE_MARKUP.match(stripped) and _is_generic_markdown(stripped):
-                exempt_markdown += 1
                 continue
             items.append({"text": present, "literal_anchor": True,
                           "case_id": case_id,
@@ -418,7 +457,7 @@ def _collect_items(criteria: dict) -> tuple[list[dict], int, int]:
                     items.append({"text": rubric[top], "literal_anchor": False,
                                   "case_id": case_id,
                                   "location": f"checks[{slot}].rubric[{top}]"})
-    return items, exempt, exempt_markdown
+    return items, exempt
 
 
 def _as_int(value) -> int:
@@ -432,13 +471,31 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
                   max_ratio: float) -> dict:
     artifact_words = _normalize(artifact_text)
     artifact_ngrams = _ngrams(artifact_words, NGRAM_SIZE)
-    items, exempt, exempt_markdown = _collect_items(criteria)
+    items, exempt = _collect_items(criteria)
 
     classified = []
+    exempt_contentless = 0
     for item in items:
         entry = classify_item(item["text"], artifact_ngrams, skill_name,
                               artifact_text, item["literal_anchor"],
                               artifact_words)
+        # THE DENOMINATOR GUARD. The one place an item's membership of the
+        # scored set is decided, and the whole enforcement of the invariant at
+        # the top of this module: an item with no normalised words carries no
+        # measurable content, so it may not sit in the denominator as
+        # `outcome`. If classification found recitation in it (decoration
+        # lifted verbatim) it stays, counted in numerator and denominator
+        # alike; otherwise it leaves the scored set the way a `required_absent`
+        # entry does. Either way, adding more of it cannot move the ratio down.
+        #
+        # Deliberately applied to every item, not only to `required_present`
+        # anchors: a check description or rubric band of `"---"` measures
+        # exactly as much as an anchor of `"---"` does, which is nothing, and
+        # scoping the earlier fixes to anchors is part of why each one left a
+        # door open.
+        if entry["class"] == "outcome" and not _carries_content(item["text"]):
+            exempt_contentless += 1
+            continue
         entry["case_id"] = item["case_id"]
         entry["location"] = item["location"]
         classified.append(entry)
@@ -453,9 +510,11 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
     #
     # `overfit / total` guarded with an `else 0.0` made an empty ratio
     # indistinguishable from a perfect one, so a criteria set whose cases carry
-    # only exempt entries (`required_absent` lists, generic-markdown anchors)
+    # only exempt entries (`required_absent` lists, contentless decoration)
     # or no test cases at all cleared Step 6a's mandatory gate silently, on no
-    # evidence.
+    # evidence. A set padded entirely with `"| --- |"` lands here: every entry
+    # is exempt, nothing is classified, and the verdict is `not_measurable`
+    # with exit 1 rather than a diluted pass.
     #
     # An empty or wordless artifact is the same hole on the other side of the
     # comparison: `_ngrams` of it is empty and `_anchor_lift` returns "" on its
@@ -485,7 +544,10 @@ def check_overfit(criteria: dict, artifact_text: str, skill_name: str,
         "skill_name": skill_name,
         "items_classified": total,
         "items_exempt_required_absent": exempt,
-        "items_exempt_generic_markdown": exempt_markdown,
+        # Renamed from `items_exempt_generic_markdown`: the exemption is no
+        # longer "this looks like markdown" but "this carries no words", which
+        # covers generic markdown and every other decoration shape alike.
+        "items_exempt_contentless": exempt_contentless,
         "counts": counts,
         "overfit_ratio": ratio,
         "max_overfit_ratio": max_ratio,
@@ -540,7 +602,20 @@ def main() -> None:
         )
         sys.exit(2)
 
-    skill_name = criteria.get("skill_name") or ""
+    # `or ""` accepted any truthy value, and a non-string one reached
+    # `re.escape` in `_names_the_artifact` as an uncaught TypeError: exit 1
+    # with a traceback, which Step 6a reads as `overfitted` -- a gate failure
+    # blamed on the criteria rather than the malformed field it came from.
+    # Every other malformed-input path here exits 2 and names the field.
+    skill_name = criteria.get("skill_name")
+    if skill_name is not None and not isinstance(skill_name, str):
+        print(
+            f"ERROR: criteria file 'skill_name' must be a string, got "
+            f"{type(skill_name).__name__}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    skill_name = skill_name or ""
     # No guessed default. `~/.claude/skills/<name>/SKILL.md` is the path
     # phase1-evaluation.md says never to hardcode (wrong for plugin installs),
     # and a stale copy there produced a within_threshold verdict against a
@@ -570,7 +645,7 @@ def main() -> None:
               f"{counts['outcome']} outcome, {counts['technique']} technique, "
               f"{counts['vocabulary']} vocabulary "
               f"({report['items_exempt_required_absent']} required_absent, "
-              f"{report['items_exempt_generic_markdown']} generic markdown exempt)")
+              f"{report['items_exempt_contentless']} contentless exempt)")
         for item in report["flagged"]:
             # Truncate for the terminal only. The JSON carries the item whole,
             # because that is the copy the agent rewrites against.

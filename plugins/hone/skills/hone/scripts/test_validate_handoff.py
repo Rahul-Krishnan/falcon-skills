@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from validate_handoff import (
     HANDOFF_SCHEMAS,
+    POWER_VERDICT_MIGRATION,
     ROUND_SCORES_SCHEMA,
     STEP_CONTRACTS,
     validate_all,
@@ -1016,12 +1017,21 @@ class TestRunShapeTable(unittest.TestCase):
             [e.message for r in results for e in r.errors],
         )
 
-    def test_fix_only_done_phase3_needs_only_applied_edits(self) -> None:
+    def test_fix_only_done_phase3_needs_no_eval_results(self) -> None:
+        # Its own round record is still required (a done step produced its
+        # outputs in every shape); the eval_results a fix-only run never
+        # writes is not.
         state = {
             "steps": _fix_only_steps(
                 phase2_improve="done", phase3_reevaluate="done"
             ),
             **self.IMPROVEMENT_HANDOFFS,
+            "round_1_scores": {
+                "output_dir": "/tmp/skill-eval/demo/reeval-1",
+                "composite_score": 0.82,
+                "per_test": [{"test_id": "t", "score": 0.82, "status": "pass"}],
+                "power_verdict": "improved",
+            },
         }
         results = validate_step(state, "phase3_reevaluate")
         self.assertTrue(
@@ -1415,6 +1425,164 @@ class TestSchemaListingsMatchWhatHandoffAccepts(unittest.TestCase):
             self.assertNotIn(
                 "unknown handoff schema", result.errors[0].message, name
             )
+
+
+class TestAPhase3RoundMustRecordItsScores(unittest.TestCase):
+    """r5-B5. `phase3_reevaluate` declared `produces: []`, and --all validated
+    only the `round_*_scores` keys that happened to be present, so a Phase 3
+    round that skipped step 6's record passed `validate_handoff.py --all`
+    clean. The next round's step 3a then fell back to
+    `eval_results.output_dir` -- Phase 1's baseline -- and credited round N's
+    gain to round N+1.
+
+    Same standard `convergence` is held to in validate_gates.REQUIRED_STEPS: a
+    record the workflow calls mandatory that this script does not check is
+    prose."""
+
+    RECORD = {
+        "output_dir": "/tmp/skill-eval/demo/reeval-1",
+        "composite_score": 0.82,
+        "per_test": [{"test_id": "t", "score": 0.82, "status": "pass"}],
+        "power_verdict": "improved",
+    }
+
+    def _done_phase3(self, **extra) -> dict:
+        return {"steps": _fix_only_steps(phase3_reevaluate="done"), **extra}
+
+    def test_the_step_contract_declares_the_round_record(self) -> None:
+        self.assertIn(
+            ROUND_SCORES_SCHEMA, STEP_CONTRACTS["phase3_reevaluate"]["produces"]
+        )
+
+    def test_a_done_round_with_no_record_fails_all(self) -> None:
+        results = validate_all(self._done_phase3())
+        self.assertTrue(results, "a done Phase 3 round validated nothing at all")
+        self.assertFalse(all(r.valid for r in results))
+        messages = [e.message for r in results for e in r.errors]
+        self.assertTrue(
+            any("round_<N>_scores" in m for m in messages), messages
+        )
+
+    def test_a_done_round_with_no_record_fails_step_mode(self) -> None:
+        results = validate_step(self._done_phase3(), "phase3_reevaluate")
+        self.assertFalse(all(r.valid for r in results))
+
+    def test_a_recorded_round_passes(self) -> None:
+        state = self._done_phase3(round_1_scores=self.RECORD)
+        self.assertTrue(
+            all(r.valid for r in validate_all(state)),
+            [e.message for r in validate_all(state) for e in r.errors],
+        )
+        self.assertTrue(
+            all(r.valid for r in validate_step(state, "phase3_reevaluate"))
+        )
+
+    def test_a_malformed_record_still_fails_on_its_own_fields(self) -> None:
+        record = {k: v for k, v in self.RECORD.items() if k != "output_dir"}
+        results = validate_all(self._done_phase3(round_2_scores=record))
+        self.assertFalse(all(r.valid for r in results))
+        self.assertTrue(
+            any(e.path == "round_2_scores.output_dir"
+                for r in results for e in r.errors)
+        )
+
+    def test_a_round_that_never_ran_is_not_demanded(self) -> None:
+        # The run-shape gate every other produced handoff gets: a pending or
+        # skipped phase3_reevaluate has no record to show.
+        for status in ("pending", "skipped"):
+            state = {"steps": _fix_only_steps(phase3_reevaluate=status)}
+            messages = [
+                e.message for r in validate_all(state) for e in r.errors
+            ]
+            self.assertFalse(
+                any("round_<N>_scores" in m for m in messages), status
+            )
+
+    def test_every_round_present_is_still_validated(self) -> None:
+        state = self._done_phase3(
+            round_1_scores=self.RECORD,
+            round_2_scores={k: v for k, v in self.RECORD.items()
+                            if k != "power_verdict"},
+        )
+        results = {r.handoff: r for r in validate_all(state)}
+        self.assertTrue(results["round_1_scores"].valid)
+        self.assertFalse(results["round_2_scores"].valid)
+
+
+class TestThePowerVerdictRemedyIsRunnable(unittest.TestCase):
+    """r5-B3. POWER_VERDICT_MIGRATION told the reader to "run
+    check_eval_power.py over this round's output_dir". That script's only
+    positional argument is the eval criteria file, and a directory there is an
+    explicit exit-2 usage error, so the printed remedy failed when followed
+    literally. A remedy that does not run is worse than no remedy: it sends
+    the operator looking for a broken script."""
+
+    def test_the_message_names_the_criteria_file_and_the_round_flags(self) -> None:
+        self.assertIn("check_eval_power.py", POWER_VERDICT_MIGRATION)
+        self.assertIn("EVAL CRITERIA FILE", POWER_VERDICT_MIGRATION)
+        self.assertIn("--before", POWER_VERDICT_MIGRATION)
+        self.assertIn("--after", POWER_VERDICT_MIGRATION)
+        self.assertIn("deterministic_scores.json", POWER_VERDICT_MIGRATION)
+
+    def test_the_message_does_not_pass_a_directory_positionally(self) -> None:
+        import re
+
+        self.assertIsNone(
+            re.search(r"check_eval_power\.py`?\s+(?:over|on)\s+(?:this|that)",
+                      POWER_VERDICT_MIGRATION),
+            POWER_VERDICT_MIGRATION,
+        )
+
+    def test_the_remedy_the_message_prints_actually_runs(self) -> None:
+        # The reproduction, end to end: the command shape the message now
+        # describes exits 0 on a real pair of rounds, where the directory the
+        # old message named exits 2.
+        import json
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        power = str(Path(__file__).parent / "check_eval_power.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            criteria = os.path.join(tmp, "eval_criteria.json")
+            with open(criteria, "w") as handle:
+                json.dump({"test_cases": [
+                    {"id": f"t{i}", "test_profile": "execution"}
+                    for i in range(6)
+                ]}, handle)
+            rounds = []
+            for name, score in (("r1", 0.5), ("r2", 0.9)):
+                os.makedirs(os.path.join(tmp, name))
+                path = os.path.join(tmp, name, "deterministic_scores.json")
+                with open(path, "w") as handle:
+                    json.dump({
+                        "per_test": [{"test_id": f"t{i}", "composite": score}
+                                     for i in range(6)],
+                        "metadata": {"artifact_type": "skill"},
+                    }, handle)
+                rounds.append(path)
+
+            good = subprocess.run(
+                [sys.executable, power, criteria, "--artifact-type", "skill",
+                 "--before", rounds[0], "--after", rounds[1]],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(good.returncode, 0, good.stderr)
+            self.assertIn("improved", good.stdout)
+
+            sizing_only = subprocess.run(
+                [sys.executable, power, criteria, "--artifact-type", "skill"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(sizing_only.returncode, 0, sizing_only.stderr)
+
+            # What the old wording asked for.
+            directory = subprocess.run(
+                [sys.executable, power, os.path.dirname(rounds[1])],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(directory.returncode, 2)
 
 
 if __name__ == "__main__":

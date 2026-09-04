@@ -192,7 +192,13 @@ Both records matter. The `resumed` field is what makes the `resume` event *requi
 **Resuming a state file written by an older version of this skill.** `eval_results.output_dir` and `eval_results.power_verdict` are both required by the pre-Phase-2 gate, and both arrived after some state files were already on disk. A run resumed across that boundary fails `validate_handoff.py --all` with `required field missing` on one or the other. That is the gate working; migrate the record rather than deleting fields from the schema:
 
 - **`output_dir` missing** — set it to the directory holding that round's `results.json` and `deterministic_scores.json`. It is a **directory**, not the path to `results.json`; the older meaning was the file. An old value pointing at the file is reported as `expected a directory, got a path to a file`, because Phase 3 step 3a appends to it (`$PRIOR_OUTPUT_DIR/deterministic_scores.json`) and a file path there resolves to nothing. Keep the file path in `results_path`.
-- **`power_verdict` missing** — run `scripts/check_eval_power.py` over that round's `output_dir` and record its top-level `verdict`. A round with no earlier round to compare against records the Step 6b sizing verdict (`powered` or `underpowered`) instead.
+- **`power_verdict` missing** — re-run the Step 9a comparison and record its top-level `verdict`. The script's one positional argument is the **eval criteria file**, never a directory (a directory there exits 2); the rounds are passed as files:
+  ```bash
+  python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} --artifact-type {artifact_type} \
+    --before $PRIOR_OUTPUT_DIR/deterministic_scores.json \
+    --after $ROUND_OUTPUT_DIR/deterministic_scores.json
+  ```
+  A round with no earlier round to compare against runs the Step 6b sizing half alone (same command without `--before`/`--after`) and records that verdict (`powered` or `underpowered`) instead.
 
 `validate_handoff.py` prints both remedies with the failure, so the state file is the only thing you need in hand.
 
