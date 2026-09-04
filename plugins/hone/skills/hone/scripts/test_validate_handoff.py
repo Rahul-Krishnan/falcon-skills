@@ -1043,6 +1043,71 @@ class TestRunShapeTable(unittest.TestCase):
         self.assertIn("eval_results", failing)
 
 
+class TestReadBackIsAGate(unittest.TestCase):
+    """`applied_edits.confirmed_on_disk` must be true, not merely present.
+
+    Regression: the contract was `_bool()`, which requires the key. A handoff
+    recording `confirmed_on_disk: false` validated, so the post-edit read-back
+    that phase2-improvement.md calls "a gate, not a nudge" was unenforced --
+    a run could report that its edits were not on disk and still hand off to
+    Phase 3, which compares before/after scores and auto-reverts against a
+    snapshot on the assumption that they are.
+    """
+
+    HANDOFF = {
+        "edit_count": 1,
+        "confirmed_on_disk": True,
+        "artifact_before_snapshot": "/tmp/before.md",
+        "syntax_check_passed": True,
+    }
+
+    def test_confirmed_read_back_validates(self) -> None:
+        result = validate_handoff({"applied_edits": dict(self.HANDOFF)}, "applied_edits")
+        self.assertTrue(result.valid, f"Errors: {[e.message for e in result.errors]}")
+
+    def test_unconfirmed_read_back_fails(self) -> None:
+        handoff = dict(self.HANDOFF, confirmed_on_disk=False)
+        result = validate_handoff({"applied_edits": handoff}, "applied_edits")
+        self.assertFalse(result.valid)
+        self.assertTrue(
+            any(
+                e.path.endswith("confirmed_on_disk") and "must be true" in e.message
+                for e in result.errors
+            ),
+            [f"{e.path}: {e.message}" for e in result.errors],
+        )
+
+    def test_a_missing_key_still_fails(self) -> None:
+        handoff = {k: v for k, v in self.HANDOFF.items() if k != "confirmed_on_disk"}
+        result = validate_handoff({"applied_edits": handoff}, "applied_edits")
+        self.assertFalse(result.valid)
+
+    def test_a_non_boolean_is_still_a_type_error(self) -> None:
+        handoff = dict(self.HANDOFF, confirmed_on_disk="yes")
+        result = validate_handoff({"applied_edits": handoff}, "applied_edits")
+        self.assertFalse(result.valid)
+        self.assertTrue(
+            any("expected boolean" in e.message for e in result.errors),
+            [e.message for e in result.errors],
+        )
+
+    def test_the_constraint_is_opt_in(self) -> None:
+        """A plain boolean field still records false as a value, not an error.
+
+        Most of these booleans are findings (`has_state_persistence`,
+        `criteria_existed`): false is information the next step needs. Only a
+        field whose false value means the run may not continue opts in.
+        """
+        from validate_handoff import _bool
+
+        errors: list = []
+        validate_value(False, _bool(), "plain", errors)
+        self.assertEqual(errors, [])
+        validate_value(False, _bool(must_be_true=True), "gated", errors)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("must be true", errors[0].message)
+
+
 class TestCliExitCodes(unittest.TestCase):
     """Exit-code contract: 0 pass, 1 validation failure, 2 usage error."""
 

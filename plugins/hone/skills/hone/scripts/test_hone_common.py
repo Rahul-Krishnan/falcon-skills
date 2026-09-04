@@ -461,7 +461,8 @@ class TestHaltTail(unittest.TestCase):
 
     Both used to carry their own copy and the copies had drifted:
     validate_gates accepted a tail of `convergence` alone, and neither checked
-    that the trailing `convergence` had actually failed.
+    that the trailing `convergence` had actually failed. `convergence` has
+    since left the halt vocabulary entirely -- hone never emitted it.
     """
 
     def _gate(self, step, result="fail"):
@@ -480,40 +481,43 @@ class TestHaltTail(unittest.TestCase):
         self.assertFalse(is_halt_tail([], None))
 
     def test_workflow_exit_is_required(self):
-        self.assertFalse(is_halt_tail([self._gate("convergence")]))
+        self.assertFalse(is_halt_tail([self._gate("phase3_exit")]))
 
-    def test_capped_convergence_then_exit_is_a_halt(self):
+    def test_the_documented_regression_halt_is_a_halt(self):
+        """The auto-revert shape: phase3_exit fails, then the exit event."""
         self.assertTrue(is_halt_tail(
-            [self._gate("convergence"), self._gate("workflow_exit")]
+            [self._gate("workflow_exit", "pass")], "phase3_exit"
         ))
 
-    def test_passing_convergence_is_not_a_halt_for_an_unrelated_fail(self):
-        """A convergence check that passed says the run converged."""
-        self.assertFalse(is_halt_tail(
-            [self._gate("convergence", "pass"), self._gate("workflow_exit", "pass")],
-            "handoff_phase2_apply",
-        ))
+    def test_an_unemitted_step_before_the_exit_is_not_a_halt(self):
+        """Regression: an invented `convergence` event laundered any fail.
 
-    def test_passing_convergence_after_phase3_exit_is_a_halt(self):
-        """The documented regression auto-revert shape.
-
-        Phase 3 emits `phase3_exit` at step 6 and the mandatory `convergence`
-        check at step 7, so the halt that follows an auto-revert carries a
-        convergence event reporting `in_progress` or `converged` on the
-        pre-revert ledger. Rejecting it scored the documented halt as
-        non-compliant.
+        `convergence` was in HALT_SEQUENCE_STEPS but hone emits no such gate
+        -- it is in no row of SKILL.md's Gate Events table and in no Phase 3
+        step. An executor that appended one turned every failed gate into a
+        compliant halt, so the eval paid for emitting a step that does not
+        exist. No unemitted step belongs in the tail, whatever its result and
+        whatever failed.
         """
-        self.assertTrue(is_halt_tail(
-            [self._gate("convergence", "pass"), self._gate("workflow_exit", "pass")],
-            "phase3_exit",
-        ))
+        for failed_step in ("phase2_to_phase3", "phase3_exit", "handoff_x"):
+            for result in ("pass", "fail"):
+                for invented in ("convergence", "made_up_step"):
+                    with self.subTest(step=failed_step, result=result,
+                                      invented=invented):
+                        self.assertFalse(is_halt_tail(
+                            [
+                                self._gate(invented, result),
+                                self._gate("workflow_exit", "pass"),
+                            ],
+                            failed_step,
+                        ))
 
     def test_passing_workflow_exit_is_still_a_halt(self):
         self.assertTrue(is_halt_tail([self._gate("workflow_exit", "pass")]))
 
     def test_a_fail_with_no_exit_after_it_is_not_a_halt(self):
         self.assertFalse(is_halt_tail(
-            [self._gate("convergence", "fail")], "phase2_to_phase3"
+            [self._gate("phase3_exit", "fail")], "phase2_to_phase3"
         ))
 
     def test_forward_progress_is_not_a_halt(self):

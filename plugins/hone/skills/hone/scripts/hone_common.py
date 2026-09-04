@@ -123,12 +123,22 @@ RUN_SHAPE_ACTIVE_STEPS: dict[str, frozenset[str]] = {
 
 
 # Steps that may legitimately follow a failing gate without contradicting the
-# claim that the run halted there: `convergence` is the check the failure
-# capped, `workflow_exit` is the stop itself. Anything else after a fail is
-# forward progress, and a fail followed by forward progress is not a halt.
-# Shared so validate_gates.py's warning and score_execution.py's score read
-# the same halt shape.
-HALT_SEQUENCE_STEPS: frozenset[str] = frozenset({"convergence", "workflow_exit"})
+# claim that the run halted there. Only `workflow_exit` qualifies: it is the
+# stop itself, and SKILL.md mandates it before ANY exit. Anything else after a
+# fail is forward progress, and a fail followed by forward progress is not a
+# halt. Shared so validate_gates.py's warning and score_execution.py's score
+# read the same halt shape.
+#
+# `convergence` used to sit in this set as "the check the failure capped".
+# hone never emits it. It has no row in SKILL.md's Gate Events table, which is
+# the closed vocabulary of emitted events, and no Phase 3 step appends it --
+# the phase goes straight from the `phase3_exit` append (step 4) to the
+# mechanical exit gate (step 5), which emits `workflow_exit`. The word appears
+# in references/phase3-reevaluation.md only for the user-specified score
+# target, which is not a gate event. Keeping it here meant an executor that
+# invented the event turned ANY failed gate into a compliant halt: a scoring
+# bypass that paid for emitting a step that does not exist.
+HALT_SEQUENCE_STEPS: frozenset[str] = frozenset({"workflow_exit"})
 
 
 def is_halt_tail(later_gates: object, failed_step: object = None) -> bool:
@@ -140,8 +150,8 @@ def is_halt_tail(later_gates: object, failed_step: object = None) -> bool:
     `workflow_exit`, so the two disagreed about whether a run had halted even
     though a comment in each claimed they scored the same shape.
 
-    `failed_step` is the step of the gate that failed, and it decides two of
-    the three clauses below, so callers pass it.
+    `failed_step` is the step of the gate that failed, and it decides the
+    empty-tail clause below, so callers pass it.
 
     A tail is a halt when:
 
@@ -152,27 +162,20 @@ def is_halt_tail(later_gates: object, failed_step: object = None) -> bool:
       which is the "fewer events score better" hole one level up; or
     * `workflow_exit` is present (SKILL.md mandates it before ANY exit, so a
       tail without one is a run that carried on) and every event in the tail
-      is a halt-sequence step, and any `convergence` in the tail either failed
-      or follows a failing `phase3_exit`.
+      is a halt-sequence step -- which, since `convergence` left that set,
+      means the tail is the exit event and nothing else.
 
-    That last clause is the delicate one. Phase 3 emits `phase3_exit` (step 6)
-    *before* `convergence` (step 7), and the convergence check is mandatory --
-    "the run does not exit without it" -- so the documented regression
-    auto-revert halt is exactly `[phase3_exit:fail, convergence:pass,
-    workflow_exit]`, with the convergence check reporting `in_progress` or
-    `converged` on the pre-revert ledger. Rejecting every passing convergence
-    scored that documented halt as non-compliant. Rejecting none of them let
-    an unrelated earlier fail (an unrepaired handoff, say) borrow the Phase 3
-    tail and read as a halt, which is the hole this clause was added for.
-    Keying on the failing step keeps both closed. `workflow_exit` itself may
-    pass or fail: a passing exit is the ordinary clean stop, and it is the
-    halt rather than progress past it.
+    So the documented regression auto-revert halt is exactly
+    `[phase3_exit:fail, workflow_exit]`. `workflow_exit` itself may pass or
+    fail: a passing exit is the ordinary clean stop, and it is the halt rather
+    than progress past it. An event hone never emits -- `convergence` being
+    the one this used to admit -- is not a halt-sequence step, so appending
+    one cannot turn a failed gate into a compliant halt.
     """
     if not isinstance(later_gates, (list, tuple)):
         return False
     if not later_gates:
         return failed_step == "workflow_exit"
-    convergence_may_pass = failed_step == "phase3_exit"
     saw_exit = False
     for later in later_gates:
         if not isinstance(later, dict):
@@ -182,12 +185,6 @@ def is_halt_tail(later_gates: object, failed_step: object = None) -> bool:
             return False
         if step == "workflow_exit":
             saw_exit = True
-        elif (
-            step == "convergence"
-            and later.get("result") == "pass"
-            and not convergence_may_pass
-        ):
-            return False
     return saw_exit
 
 

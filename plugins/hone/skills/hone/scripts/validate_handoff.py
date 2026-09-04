@@ -46,6 +46,7 @@ from hone_common import get as null_safe_get
 #   type: "string" | "number" | "boolean" | "enum" | "object" | "array"
 #   required: bool (default True)
 #   non_empty: bool (for strings: must be non-empty; for arrays: must have items)
+#   must_be_true: bool (for booleans: false is a validation failure, not a value)
 #   values: list[str] (for enum type)
 #   fields: dict (for object type: nested field specs)
 #   items: dict (for array type: schema for each element)
@@ -94,8 +95,23 @@ def _num(
     return spec
 
 
-def _bool(required: bool = True) -> dict:
-    return {"type": "boolean", "required": required}
+def _bool(required: bool = True, must_be_true: bool = False,
+          false_message: str | None = None) -> dict:
+    """A boolean field. `must_be_true` makes the value, not the key, the gate.
+
+    Some of these fields record a check the run is required to have passed
+    before it may hand off at all. For those, requiring only that the key is
+    present validates the sentence "I checked, and it failed" as readily as
+    "I checked, and it passed" -- the read-back becomes a nudge with a schema
+    around it. `false_message` says what the false value means, so the error
+    names the halt rather than the type.
+    """
+    spec: dict = {"type": "boolean", "required": required}
+    if must_be_true:
+        spec["must_be_true"] = True
+        if false_message is not None:
+            spec["false_message"] = false_message
+    return spec
 
 
 def _enum(
@@ -616,7 +632,24 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     "applied_edits": {
         "fields": {
             "edit_count": _num(min_value=1),
-            "confirmed_on_disk": _bool(),
+            # True, not merely present. phase2-improvement.md calls the
+            # post-edit read-back "a gate, not a nudge" on the strength of
+            # this contract, and the step's gate checklist requires that the
+            # re-read confirm every planned edit. A run whose read-back did
+            # not confirm the edits has nothing to hand Phase 3: Phase 3
+            # compares before/after scores and auto-reverts from
+            # `artifact_before_snapshot`, both of which assume the edits are
+            # on disk. The documented failure path (the stale-write guard)
+            # STOPs without emitting this handoff at all, so no legitimate
+            # flow records false here.
+            "confirmed_on_disk": _bool(
+                must_be_true=True,
+                false_message=(
+                    "must be true: the post-edit read-back did not confirm "
+                    "the edits on disk, so the run halts rather than handing "
+                    "off to Phase 3"
+                ),
+            ),
             "artifact_before_snapshot": _str(non_empty=True),
             "syntax_check_passed": _bool(),
         },
@@ -869,6 +902,17 @@ def validate_value(
                 ValidationError(
                     path,
                     f"expected boolean, got {type(value).__name__}",
+                )
+            )
+        elif value is False and spec.get("must_be_true"):
+            errors.append(
+                ValidationError(
+                    path,
+                    spec.get(
+                        "false_message",
+                        "must be true; false means the check did not pass, "
+                        "which is a halt, not a handoff",
+                    ),
                 )
             )
 

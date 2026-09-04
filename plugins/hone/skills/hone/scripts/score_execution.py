@@ -59,10 +59,29 @@ NEGATION_WINDOW = 160
 # "or" is deliberately absent: it coordinates the *scope* of a single denial
 # ("I did not run the audit or proceed to Phase 2") far more often than it
 # starts a new positive clause.
+#
+# The dash and the causal/resultative conjunctions join a full second clause
+# exactly as a comma splice does, and until they were listed here a cue up to
+# NEGATION_WINDOW characters back excused the clause after them: "No files
+# were found in the target directory - the structural audit ran anyway" read
+# the forward progress as denied. The window is 160 characters (see above) so
+# that a coordinated list stays under one denial; that width is only safe if
+# every real clause boundary inside the sentence is a break, which is what
+# these add. "yet" is deliberately absent -- "has not yet run the structural
+# audit" would break between the cue and the phrase.
 CLAUSE_BREAK_RE = re.compile(
-    r",|;|\bthen\b|\band\b|\bbut\b|\bbefore\b|\bafter\b|\bwhile\b",
+    r",|;|\s+--?\s+|\s*[\u2013\u2014]\s*"
+    r"|\bthen\b|\band\b|\bbut\b|\bso\b|\bbecause\b"
+    r"|\bbefore\b|\bafter\b|\bwhile\b",
     re.IGNORECASE,
 )
+
+# The breaks a list may legitimately be read through, tested with the
+# glue/coordinator rule below. A dash joins the two shapes a comma does -- a
+# splice ("... - the audit ran anyway") and an appositive list ("the three
+# steps - the audit, criteria generation, or the runner") -- so it gets the
+# comma's conditional treatment rather than the semicolon's hard break.
+LIST_SEPARATOR_RE = re.compile(r"\A(?:,|\s*-{1,2}\s*|\s*[\u2013\u2014]\s*)\Z")
 
 # A comma separates list items or splices two clauses, and the two need
 # opposite treatment. "did not reach A, B, or C" is one denial covering three
@@ -134,7 +153,7 @@ def _has_unnegated_occurrence(phrase: str, text: str) -> bool:
         # re-testing it as glue would end the list at its second element.
         in_list = False
         for brk in reversed(list(CLAUSE_BREAK_RE.finditer(window))):
-            if brk.group() == ",":
+            if LIST_SEPARATOR_RE.match(brk.group()):
                 segment = window[brk.end() :]
                 if in_list or (
                     LIST_ITEM_GLUE_RE.match(segment)
@@ -870,10 +889,9 @@ def score_gate_compliance(
                 and later.get("result") == "pass"
                 for later in gates[idx + 1 :]
             )
-            # A halt sequence is several events long: the step that detected the
-            # failure, optionally the convergence check it capped, then
-            # workflow_exit recording the stop. Only the last of those is
-            # terminal, so requiring terminality marked the detecting event
+            # A halt sequence is two events long: the step that detected the
+            # failure, then workflow_exit recording the stop. Only the last of
+            # those is terminal, so requiring terminality marked the detecting event
             # non-compliant on every correct halt -- and an executor that
             # emitted one more truthful fail event scored lower than one that
             # emitted fewer.
@@ -888,10 +906,9 @@ def score_gate_compliance(
             # hone_common.is_halt_tail owns that shape; validate_gates.py asks
             # it the same question, so the two cannot drift again. It also
             # covers the fail-is-last-event case, which was a separate
-            # `terminal` test here. The failing step goes with the tail: it is
-            # what tells a documented Phase 3 halt (phase3_exit fails, the
-            # mandatory convergence check still runs and passes) apart from an
-            # unrelated fail borrowing that same tail.
+            # `terminal` test here. The failing step goes with the tail: a fail
+            # on `workflow_exit` itself is the halt with nothing after it,
+            # while a fail on any other step still owes the exit event.
             halted = is_halt_tail(gates[idx + 1 :], gate.get("step"))
             if repaired or halted:
                 compliant += 1
