@@ -222,11 +222,15 @@ ECHOED_GATE_CAP = 0.7
 #     reaches all of them.
 #   - 4 is the first bucket past the distribution's elbow: the per-bucket
 #     share falls 21.8% -> 5.6%, a factor of ~3.9, between 3 and 4.
-#   - 4 is the length of the mandatory gate sequence a complete run owes
-#     (phase1_to_phase2, phase2_to_phase3, phase3_exit, workflow_exit; see
-#     SKILL.md > Gate Events). So the floor asks for the events the artifact
-#     already declares mandatory, and 1.0 means "emitted what it owed, all
-#     compliant" rather than "emitted one event, and it was fine".
+#   - 4 does not exceed the mandatory gate sequence a complete run owes,
+#     which is FIVE events since `convergence` became mandatory
+#     (phase1_to_phase2, phase2_to_phase3, phase3_exit, convergence,
+#     workflow_exit; see SKILL.md > Gate Events). That bound is the reason,
+#     not the equality: a floor at or below the mandatory length never pads a
+#     complete run, so 1.0 still means "emitted what it owed, all compliant"
+#     rather than "emitted one event, and it was fine". An earlier revision
+#     of this comment read 4 AS the mandatory length, which was true only
+#     before `convergence` joined it.
 #   - 4 is the first integer above the measured mean of 3.00 gates per test,
 #     so for a test of typical size the real evidence still outweighs the
 #     padding. A larger floor (10 is where one event's move first falls under

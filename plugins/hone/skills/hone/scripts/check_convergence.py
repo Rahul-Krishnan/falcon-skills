@@ -81,9 +81,20 @@ while `round` restarts at 1 and `max_rounds` is a per-run budget. So `rounds`
 is a cumulative log holding several runs, and the two facts that follow are
 what `run` is for. Give every round the same `run` id for the whole
 invocation (any stable string: the RUN_ID the workflow state file already
-carries is the obvious one). Without it this module falls back to inferring
-run boundaries from repeated round numbers, which is weaker; see
-`_run_segments`.
+carries is the obvious one). It is the ONLY run boundary this module reads:
+without it the whole ledger is one run, `rounds_run` counts every round ever
+logged for the artifact, and `capped` therefore arrives early. There is no
+fallback inference, because the only candidate signal -- a repeated round
+number -- is already spoken for by the compaction re-append the ledger format
+mandates; see `_run_segments`. `analyze` reports `run_scoping` so a caller can
+tell a run-scoped verdict from a degraded whole-ledger one.
+
+Finding ids are scoped the same way and need the same care. `id` is what the
+cross-run reopen counter pairs on, and SKILL.md's Phase 2 Step 8 template
+starts each run's findings at `F1`, so ids alone do not identify a finding
+across runs. This module pairs `id` WITH the finding's summary signature for
+that reason (see `_reopen_key`); ids that are unique per artifact rather than
+per run make the pairing exact instead of merely safe.
 
 Exit codes: 0 converged, 1 anything else (escalate, capped, or in_progress),
 2 usage error.
@@ -196,6 +207,36 @@ def _signature(summary: str) -> str:
     """File-independent identity for a finding, used to spot relocation."""
     words = sorted(set(WORD.findall((summary or "").lower())))
     return " ".join(words)
+
+
+def _reopen_key(finding: dict) -> str:
+    """Cross-run identity for the reopen counter: id AND summary signature.
+
+    The reopen counter is cross-run by design (see DEFAULT_REOPEN_LIMIT), so
+    it needs an identity that survives a restart -- and `id` alone does not.
+    SKILL.md's Phase 2 Step 8 template starts every run's findings at `F1`,
+    and the ledger is per artifact, so run 1's `F1`, run 2's `F1` and run 3's
+    `F1` are routinely three unrelated findings. Keyed on the bare id, three
+    ordinary runs that each recorded their `F1` fixed and opened a new `F1`
+    next time produced `reopen_counts: {"F1": 2}` and `escalate` on run 3's
+    FIRST round -- a forced halt, routed away from the `--confirm` gate, with
+    no recovery until the trailing window aged out.
+
+    The `run` field fixed the same problem for round numbers. Ids get the
+    signature instead of a scope, because the counter has to keep working
+    ACROSS runs: scoping the key per run would delete the check. Pairing the
+    id with `_signature(summary)` keeps a genuinely recurring finding on one
+    key -- Step 8 restates it verbatim, so its signature is stable -- while
+    two different findings that merely share an id fall on two keys.
+
+    The residual error is one-directional and it is the safe one. A finding
+    whose summary gets REWORDED between runs splits into two keys and its
+    reopen count is undercounted, so the check stays silent where it might
+    have fired. Missing an escalation costs a round; a false `escalate` is an
+    unrecoverable halt on a healthy run, which is what this replaces.
+    """
+    signature = _signature(finding.get("summary", ""))
+    return f"{finding.get('id') or ''}\u0000{signature}"
 
 
 def _status(finding: dict) -> str:
@@ -332,39 +373,56 @@ def _run_segments(rounds: list[dict]) -> list[list[dict]]:
         per-run budget, so a 4-round ledger with `max_rounds: 3` returned
         `capped` on the second run's FIRST round, halting before any work.
 
-    An explicit `run` id is the authoritative boundary: consecutive rounds
-    sharing an id are one run. When no round carries one, the only evidence
-    left is a REPEATED round number, which is what a restart looks like from
-    here.
+    An explicit `run` id is the authoritative boundary, and it is the ONLY
+    boundary: consecutive rounds sharing an id are one run, and a ledger whose
+    rounds carry no id at all is read as one run.
 
-    That heuristic is deliberately narrower than "the round number went
-    down". A lone out-of-order append -- `[{"round": 2}, {"round": 1}]` -- is
-    one run whose entries need sorting, not two runs, and it is precisely the
-    shape the within-segment sort and `_as_int` exist to absorb. A decreasing
-    number would split it and lose a round; a repeated number would not.
+    WHY THERE IS NO FALLBACK INFERENCE. A repeated round number used to infer
+    a boundary here. But `_dedupe_rounds` reads the same signal as the
+    opposite fact -- Phase 2's compaction-recovery protocol has the executor
+    APPEND a redone round, so a repeat is a re-append -- and this function
+    runs first, so on any `run`-less ledger the dedupe path was unreachable.
+    `max_rounds: 3` with rounds `[1, 2, 2, 3]` and no `run` returned
+    `in_progress` with `rounds_run: 2`; the identical ledger with a `run` id
+    returned `capped` with `rounds_run: 3`. One compaction silently bought a
+    run an unbounded extra budget.
 
-    The heuristic's real limit is an executor that never restarts its
-    numbering, counting 1..N across every invocation: it leaves no boundary
-    evidence at all and reads as a single run, which is the old behaviour.
-    Nothing can recover a boundary that was never recorded, which is why the
-    module docstring asks for `run` rather than treating it as optional
-    polish.
+    One signal cannot carry two meanings, so the repeat carries the one the
+    ledger format actually mandates -- the compaction re-append -- and the run
+    boundary carries the one the format actually records, the `run` id.
+
+    The error direction is why it resolves this way and not the other. Missing
+    a boundary over-counts the current run's rounds, which can only bring
+    `capped` on earlier; `capped` is a FORCED halt that reaches the `--confirm`
+    human gate (references/phase3-reevaluation.md), so the failure is visible
+    and a human can grant more rounds. Inventing a boundary resets the per-run
+    budget mid-run, which disables `capped` entirely: the loop runs past
+    `max_rounds` with nothing to stop it and no gate to notice. A conservative
+    early halt beats a silent unbounded loop.
+
+    The cost is real and is the old second bug, now scoped to `run`-less
+    ledgers only: a 4-round `run`-less ledger with `max_rounds: 3` reports
+    `capped` on the second run's first round. `analyze` reports
+    `run_scoping: "absent"` so that degradation is legible in the output
+    rather than silent, and the module docstring asks for `run` on every
+    round.
+
+    A ledger where only SOME rounds carry an id is treated the same way: an
+    entry with no id continues the current segment. Merging errs toward the
+    over-count, which is the recoverable direction.
     """
+    explicit = any(entry.get("run") is not None for entry in rounds)
     segments: list[list[dict]] = []
-    seen_numbers: set[int] = set()
     previous_run: object = None
     for entry in rounds:
         run_id = entry.get("run")
-        if run_id is not None:
+        boundary = False
+        if explicit and run_id is not None:
             boundary = bool(segments) and run_id != previous_run
             previous_run = run_id
-        else:
-            boundary = _round_number(entry) in seen_numbers
         if boundary or not segments:
             segments.append([])
-            seen_numbers = set()
         segments[-1].append(entry)
-        seen_numbers.add(_round_number(entry))
     return segments
 
 
@@ -413,6 +471,13 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     ]
     rounds = [entry for segment in segments for entry in segment]
     current_run = segments[-1] if segments else []
+    # Whether run boundaries were READ off the ledger or merely assumed. See
+    # `_run_segments`: without a `run` id the whole ledger reads as one run,
+    # so `rounds_run` may over-count and `capped` may arrive early. Reported
+    # so a caller can tell a scoped verdict from a degraded one.
+    run_scoping = "explicit" if any(
+        entry.get("run") is not None for entry in logged
+    ) else "absent"
     reasons: list[str] = []
 
     if not rounds:
@@ -423,6 +488,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             "verdict": "in_progress", "rounds_run": 0,
             "total_rounds_logged": 0, "runs_logged": 0,
             "max_rounds": _as_int(ledger.get("max_rounds")), "reasons": [],
+            "run_scoping": run_scoping,
             "open_blocking": [], "open_minor_count": 0,
             "recurring": [], "reopened": [], "reopen_counts": {},
             "open_streaks": {},
@@ -461,8 +527,13 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # one would escalate every ledger that lists open findings only.
     streaks: dict[str, int] = {}
     # Each finding's fixed-then-open transitions, recorded by their position in
-    # the ordered history so the window below can age them out.
+    # the ordered history so the window below can age them out. Keyed on
+    # `_reopen_key` (id AND summary signature), not on the bare id: the
+    # counter is cross-run and ids restart per run.
     reopen_positions: dict[str, list[int]] = {}
+    # id -> the reopen key it was last recorded `fixed` under, so a reopen is
+    # reported against the id a reader recognizes.
+    reopen_key_id: dict[str, str] = {}
     fixed_since_open: set[str] = set()
     stuck: list[str] = []
     # The severity last recorded for an id anywhere in the history. Severity
@@ -483,9 +554,11 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
             streaks.clear()
             del stuck[:]
         statuses: dict[str, str] = {}
+        keys: dict[str, str] = {}
         for f in _as_list(round_entry.get("findings")):
             if isinstance(f, dict) and f.get("id"):
                 statuses[f["id"]] = _status(f)
+                keys[f["id"]] = _reopen_key(f)
                 severity_by_id[f["id"]] = _severity(f)
         open_ids = {fid for fid, status in statuses.items() if status == "open"}
         for finding_id in list(streaks):
@@ -493,14 +566,16 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
                 streaks[finding_id] = 0
         for finding_id in open_ids:
             streaks[finding_id] = streaks.get(finding_id, 0) + 1
-            if finding_id in fixed_since_open:
-                fixed_since_open.discard(finding_id)
-                reopen_positions.setdefault(finding_id, []).append(position)
+            key = keys[finding_id]
+            if key in fixed_since_open:
+                fixed_since_open.discard(key)
+                reopen_positions.setdefault(key, []).append(position)
+                reopen_key_id[key] = finding_id
             if streaks[finding_id] >= recurrence_limit and finding_id not in stuck:
                 stuck.append(finding_id)
         for finding_id, status in statuses.items():
             if status == "fixed":
-                fixed_since_open.add(finding_id)
+                fixed_since_open.add(keys[finding_id])
 
     def _is_blocking_id(finding_id: str) -> bool:
         return severity_by_id.get(finding_id, "") in BLOCKING
@@ -509,10 +584,21 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
     # DEFAULT_REOPEN_WINDOW_ROUNDS: without this the counter never expired and
     # one historical alternation escalated the artifact forever.
     window_start = len(rounds) - max(int(reopen_window or 0), 0)
-    reopens = {
-        finding_id: len([p for p in positions if p >= window_start])
-        for finding_id, positions in reopen_positions.items()
+    # Counted per reopen key, then reported per id: the key is what makes the
+    # count correct, the id is what a reader and the `reopened` list use. Two
+    # distinct findings sharing an id keep their own counts and the id shows
+    # the larger of them, rather than their sum -- summing would rebuild the
+    # exact false escalation the key exists to prevent.
+    counts_by_key = {
+        key: len([p for p in positions if p >= window_start])
+        for key, positions in reopen_positions.items()
     }
+    reopens: dict[str, int] = {}
+    for key, count in counts_by_key.items():
+        if not count:
+            continue
+        finding_id = reopen_key_id.get(key, "")
+        reopens[finding_id] = max(reopens.get(finding_id, 0), count)
     reopens = {k: v for k, v in sorted(reopens.items()) if v}
     reopened = sorted(
         finding_id for finding_id, count in reopens.items()
@@ -729,6 +815,7 @@ def analyze(ledger: dict, recurrence_limit: int, stall_limit: int,
         "rounds_run": len(current_run),
         "total_rounds_logged": len(rounds),
         "runs_logged": len(segments),
+        "run_scoping": run_scoping,
         "max_rounds": max_rounds,
         "reasons": reasons,
         "open_blocking": [

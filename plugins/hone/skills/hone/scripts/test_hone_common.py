@@ -705,8 +705,64 @@ class TestSettledByRetry(unittest.TestCase):
     """
 
     def test_an_adjacent_retry_settles_a_halt_order(self):
-        self.assertTrue(is_settled_by_retry([_g("convergence", "fail")],
-                                            "convergence"))
+        """The exit-2 repair: re-run adjacent, then the halt it reported."""
+        self.assertTrue(is_settled_by_retry(
+            [_g("convergence", "fail"), _g("workflow_exit")], "convergence"))
+
+    def test_a_retry_with_no_halt_behind_it_settles_nothing(self):
+        """A run that stopped emitting before its mandated exit is not a halt.
+
+        The adjacent retry alone used to be enough. It is not: the halt has
+        to be recorded, and `workflow_exit` is what records it.
+        """
+        self.assertFalse(is_settled_by_retry([_g("convergence", "fail")],
+                                             "convergence"))
+
+    def test_a_halt_orders_retry_is_fail_closed_on_whatever_follows_it(self):
+        """The property, not one ordering of it.
+
+        For a halt order, an adjacent retry settles the fail ONLY when
+        everything after the retry is that halt's own tail. Any step the halt
+        vocabulary does not admit -- whatever it is, wherever the reviewer
+        finds the next one -- makes the fail unaccounted. This is the
+        asymmetry the restriction is for: over-strict is a lost quarter-point
+        on `gate_compliance`, permissive is a run credited for ignoring a
+        halt.
+        """
+        vocabulary = halt_tail_vocabulary("convergence")
+        intruders = [
+            step for step in (
+                "phase1_to_phase2", "phase2_to_phase3", "phase3_exit",
+                "fixonly_entry", "handoff_input", "resume",
+            ) if step not in vocabulary
+        ]
+        self.assertTrue(intruders, "the test needs steps outside the tail")
+        for intruder in intruders:
+            for result in ("pass", "fail"):
+                with self.subTest(step=intruder, result=result):
+                    self.assertFalse(is_settled_by_retry(
+                        [_g("convergence", "pass"), _g(intruder, result),
+                         _g("workflow_exit")],
+                        "convergence"))
+
+    def test_the_reported_post_retry_laundering_shape(self):
+        """The exact sequence round 6 found: the extra round moved AFTER the
+        retry instead of before it."""
+        self.assertFalse(fail_is_accounted(
+            [_g("convergence", "pass"), _g("phase2_to_phase3"),
+             _g("phase3_exit"), _g("convergence"), _g("workflow_exit")],
+            "convergence"))
+
+    def test_a_validation_verdict_retry_is_not_constrained_from_behind(self):
+        """The restriction is scoped to halt orders.
+
+        A `handoff_<name>` fail ordered nothing about the run, so work after
+        its retry was never forbidden and must not be read as laundering.
+        """
+        self.assertTrue(is_settled_by_retry(
+            [_g("handoff_input", "fail"), _g("phase2_to_phase3"),
+             _g("workflow_exit")],
+            "handoff_input"))
 
     def test_a_non_repeatable_step_is_never_settled_by_retry(self):
         self.assertFalse(is_settled_by_retry([_g("phase3_exit", "fail")],
@@ -781,6 +837,33 @@ class TestAuthorizedRestart(unittest.TestCase):
 
     def test_a_non_list_tail_is_not_a_restart(self):
         self.assertFalse(is_authorized_restart("gates", "convergence"))
+
+    def test_a_failed_resume_authorizes_nothing(self):
+        """`resume:fail` is a restart that did not happen.
+
+        The predicate read the event's presence and never its `result`, so a
+        failed restart settled the halt exactly as a granted one did.
+        """
+        tail = [_g("workflow_exit"), _g("resume", "fail"),
+                _g("phase2_to_phase3"), _g("phase3_exit"),
+                _g("convergence"), _g("workflow_exit")]
+        self.assertFalse(is_authorized_restart(tail, "convergence"))
+
+    def test_only_documented_restarts_are_authorized(self):
+        """A `resume` is not a universal laundering suffix.
+
+        `convergence` has the `capped` human gate and `workflow_exit` has the
+        cross-session resume; no other gate has a documented way back from
+        its own halt, so appending an exit and a `resume` behind one settles
+        nothing.
+        """
+        for step in ("phase3_exit", "phase1_to_phase2", "phase2_to_phase3"):
+            with self.subTest(step=step):
+                tail = [_g("workflow_exit"), _g("resume"),
+                        _g("phase2_to_phase3"), _g("phase3_exit"),
+                        _g("convergence"), _g("workflow_exit")]
+                self.assertFalse(is_authorized_restart(tail, step))
+                self.assertFalse(fail_is_accounted(tail, step))
 
 
 class TestFailIsAccounted(unittest.TestCase):

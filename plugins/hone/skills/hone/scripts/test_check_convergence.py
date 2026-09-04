@@ -503,11 +503,11 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
     def test_a_second_runs_open_finding_is_not_sorted_away(self):
         """Run 1's rounds 1-3 then run 2's rounds 1-2 sorted to [1,1,2,2,3]."""
         report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
-            round_entry(1, [finding("A")]),
-            round_entry(2, [finding("A")]),
-            round_entry(3, [finding("A", status="fixed")]),
-            round_entry(1, [finding("B")]),
-            round_entry(2, [finding("B")]),
+            round_entry(1, [finding("A")], run="r1"),
+            round_entry(2, [finding("A")], run="r1"),
+            round_entry(3, [finding("A", status="fixed")], run="r1"),
+            round_entry(1, [finding("B")], run="r2"),
+            round_entry(2, [finding("B")], run="r2"),
         ]}, 3, 3)
         self.assertNotEqual(report["verdict"], "converged")
         self.assertEqual([f["id"] for f in report["open_blocking"]], ["B"])
@@ -516,10 +516,10 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
     def test_max_rounds_is_measured_against_the_current_run(self):
         """A 4-round ledger must not cap run 2 on its first round."""
         report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
-            round_entry(1, [finding("A", status="fixed")]),
-            round_entry(2, [finding("A", status="fixed")]),
-            round_entry(3, [finding("A", status="fixed")]),
-            round_entry(1, [finding("C")]),
+            round_entry(1, [finding("A", status="fixed")], run="r1"),
+            round_entry(2, [finding("A", status="fixed")], run="r1"),
+            round_entry(3, [finding("A", status="fixed")], run="r1"),
+            round_entry(1, [finding("C")], run="r2"),
         ]}, 9, 9)
         self.assertEqual(report["verdict"], "in_progress")
         self.assertEqual(report["rounds_run"], 1)
@@ -540,8 +540,9 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
     def test_an_out_of_order_append_is_one_run_not_two(self):
         """[round 2, round 1] needs sorting, not splitting.
 
-        A "the number went down" boundary rule would read this as two runs and
-        lose a round; a repeated number does not fire here.
+        A "the number went down" boundary rule would read this as two runs
+        and lose a round. Nothing infers a boundary here at all now, which is
+        the same answer for a stronger reason.
         """
         report = analyze({"max_rounds": 5, "rounds": [
             {"round": "2", "findings": [finding("f1")]},
@@ -556,6 +557,142 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
         self.assertEqual(report["runs_logged"], 1)
         self.assertEqual(report["rounds_run"], 2)
         self.assertEqual(report["total_rounds_logged"], 2)
+
+
+class TestARepeatedRoundNumberMeansCompaction(unittest.TestCase):
+    """The signal carries ONE meaning, and this is the one it carries.
+
+    `_run_segments` used to read a repeated round number as a run boundary
+    while `_dedupe_rounds` read it as a compaction re-append, and the former
+    runs first, so on a `run`-less ledger the dedupe path was unreachable.
+    The boundary now needs the explicit `run` id and the repeat means
+    compaction, everywhere.
+    """
+
+    @staticmethod
+    def _ledger(run=None):
+        return {"artifact": "x", "max_rounds": 3, "rounds": [
+            round_entry(n, [finding("A")], run=run) for n in (1, 2, 2, 3)]}
+
+    def test_the_run_less_ledger_now_agrees_with_the_run_scoped_one(self):
+        """`[1, 2, 2, 3]` with `max_rounds: 3` is a capped 3-round run.
+
+        With the boundary inference it returned `in_progress` at
+        `rounds_run: 2` and the run kept looping past its budget; the
+        identical ledger carrying a `run` id returned `capped`.
+        """
+        without = analyze(self._ledger(), 9, 9)
+        withid = analyze(self._ledger(run="r1"), 9, 9)
+        self.assertEqual(without["verdict"], "capped")
+        self.assertEqual(without["rounds_run"], 3)
+        self.assertEqual(without["runs_logged"], 1)
+        self.assertEqual(without["verdict"], withid["verdict"])
+        self.assertEqual(without["rounds_run"], withid["rounds_run"])
+
+    def test_the_stall_window_does_not_see_the_duplicate_twice(self):
+        report = analyze({"artifact": "x", "max_rounds": 9, "rounds": [
+            round_entry(1, [finding("A")]),
+            round_entry(2, [finding("A")]),
+            round_entry(2, [finding("A")]),
+        ]}, 9, 2)
+        self.assertEqual(report["blocking_counts"], [1, 1])
+
+    def test_the_latest_append_of_a_round_wins(self):
+        report = analyze({"artifact": "x", "max_rounds": 9, "rounds": [
+            round_entry(1, [finding("A")]),
+            round_entry(2, []),
+            round_entry(2, [finding("A", status="fixed")]),
+        ]}, 9, 9)
+        self.assertEqual(report["verdict"], "converged")
+
+    def test_run_scoping_reports_which_reading_was_used(self):
+        """The degradation is legible rather than silent.
+
+        Without a `run` id the whole ledger is one run, so `rounds_run`
+        over-counts and `capped` can arrive early. That is the conservative
+        direction -- `capped` reaches the human gate -- but a caller has to
+        be able to see it.
+        """
+        self.assertEqual(
+            analyze(self._ledger(), 9, 9)["run_scoping"], "absent")
+        self.assertEqual(
+            analyze(self._ledger(run="r1"), 9, 9)["run_scoping"], "explicit")
+        self.assertEqual(
+            analyze({"max_rounds": 3, "rounds": []}, 9, 9)["run_scoping"],
+            "absent")
+
+    def test_a_partially_scoped_ledger_does_not_split_on_the_gap(self):
+        """An entry with no id continues the current segment.
+
+        Merging over-counts the run, which is the recoverable error; a split
+        would reset the budget, which is not.
+        """
+        report = analyze({"artifact": "x", "max_rounds": 9, "rounds": [
+            round_entry(1, [finding("A")], run="r1"),
+            round_entry(2, [finding("A")]),
+            round_entry(3, [finding("A")]),
+        ]}, 9, 9)
+        self.assertEqual(report["runs_logged"], 1)
+        self.assertEqual(report["rounds_run"], 3)
+
+
+class TestReopenIdentityIsCrossRunSafe(unittest.TestCase):
+    """The reopen counter is cross-run, so its key has to survive a restart.
+
+    `id` does not: SKILL.md's Phase 2 Step 8 template starts every run's
+    findings at `F1` and the ledger is per artifact, so three ordinary runs
+    produced `reopen_counts: {"F1": 2}` and `escalate` on run 3's first
+    round -- a forced halt, routed away from the `--confirm` gate, before the
+    run did any work.
+    """
+
+    @staticmethod
+    def _runs(summaries):
+        """One two-round run per summary, each numbering its finding `F1`."""
+        rounds = []
+        for index, summary in enumerate(summaries, 1):
+            for status in ("open", "fixed"):
+                rounds.append({"round": 1 if status == "open" else 2,
+                               "run": f"r{index}",
+                               "findings": [{"id": "F1", "status": status,
+                                             "severity": "critical",
+                                             "summary": summary,
+                                             "file": "a.py"}]})
+        return {"artifact": "x", "max_rounds": 3, "rounds": rounds}
+
+    def test_three_runs_reusing_F1_do_not_escalate(self):
+        report = analyze(self._runs(
+            ["step 4 has no exit condition",
+             "the handoff schema is undocumented",
+             "the retry loop has no cap"]), 9, 9)
+        self.assertEqual(report["reopen_counts"], {})
+        self.assertEqual(report["reopened"], [])
+        self.assertEqual(report["verdict"], "converged")
+
+    def test_a_genuinely_recurring_finding_still_counts_across_runs(self):
+        """Scoping the key per run would delete the check, so it is not.
+
+        Step 8 restates a live finding verbatim, so a finding that really
+        does keep coming back keeps one key across every run.
+        """
+        report = analyze(self._runs(["step 4 has no exit condition"] * 3),
+                         9, 9)
+        self.assertGreaterEqual(report["reopen_counts"].get("F1", 0), 2)
+        self.assertEqual(report["reopened"], ["F1"])
+        self.assertEqual(report["verdict"], "escalate")
+
+    def test_two_findings_sharing_an_id_do_not_pool_their_counts(self):
+        """The larger of the two, not their sum.
+
+        Summing would rebuild the false escalation the key exists to
+        prevent: two unrelated findings reopened once each are not one
+        finding reopened twice.
+        """
+        report = analyze(self._runs(
+            ["alpha alpha alpha", "alpha alpha alpha",
+             "beta beta beta", "beta beta beta"]), 9, 9)
+        self.assertEqual(report["reopen_counts"].get("F1"), 1)
+        self.assertEqual(report["reopened"], [])
 
 
 class TestReopenCounterExpires(unittest.TestCase):
@@ -1073,13 +1210,16 @@ class TestRoundNumbersNotLedgerEntries(unittest.TestCase):
     """
 
     def test_a_re_appended_round_does_not_exhaust_the_budget(self):
-        report = analyze({"artifact": "demo", "max_rounds": 3, "rounds": [
-            round_entry(1, [finding("f1")], run="run-1"),
-            round_entry(2, [finding("f1")], run="run-1"),
-            round_entry(2, [finding("f1")], run="run-1"),
-        ]}, 9, 9)
-        self.assertEqual(report["rounds_run"], 2)
-        self.assertEqual(report["verdict"], "in_progress")
+        for run in ("run-1", None):
+            with self.subTest(run=run):
+                report = analyze({"artifact": "demo", "max_rounds": 3,
+                                  "rounds": [
+                    round_entry(1, [finding("f1")], run=run),
+                    round_entry(2, [finding("f1")], run=run),
+                    round_entry(2, [finding("f1")], run=run),
+                ]}, 9, 9)
+                self.assertEqual(report["rounds_run"], 2)
+                self.assertEqual(report["verdict"], "in_progress")
 
     def test_the_stall_window_does_not_see_the_duplicate_twice(self):
         report = analyze({"artifact": "demo", "max_rounds": 9, "rounds": [
