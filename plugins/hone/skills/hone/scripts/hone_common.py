@@ -129,15 +129,22 @@ RUN_SHAPE_ACTIVE_STEPS: dict[str, frozenset[str]] = {
 # halt. Shared so validate_gates.py's warning and score_execution.py's score
 # read the same halt shape.
 #
-# `convergence` used to sit in this set as "the check the failure capped".
-# hone never emits it. It has no row in SKILL.md's Gate Events table, which is
-# the closed vocabulary of emitted events, and no Phase 3 step appends it --
-# the phase goes straight from the `phase3_exit` append (step 4) to the
-# mechanical exit gate (step 5), which emits `workflow_exit`. The word appears
-# in references/phase3-reevaluation.md only for the user-specified score
-# target, which is not a gate event. Keeping it here meant an executor that
-# invented the event turned ANY failed gate into a compliant halt: a scoring
-# bypass that paid for emitting a step that does not exist.
+# `convergence` used to sit in this set as "the check the failure capped",
+# and it stays out even though Phase 3 now emits it. The two facts are
+# independent: being a real event is not the same as being a legal tail
+# element. Walk the three ways a run can fail around it, given the required
+# order `... phase2_to_phase3, convergence, phase3_exit, workflow_exit`:
+#
+#   * `phase2_to_phase3` fails -- the run halts and Phase 3 never runs, so a
+#     `convergence` after it was invented;
+#   * `convergence` itself fails (escalate or capped) -- it is the FAILING
+#     gate, not part of the tail behind one;
+#   * `phase3_exit` fails -- `convergence` already passed, ahead of the
+#     failure, so it is not in the tail either.
+#
+# No legitimate halt puts it in a tail. Admitting it meant an executor that
+# appended one turned ANY failed gate into a compliant halt: a scoring bypass
+# that paid for claiming Phase 3 reached a checkpoint it never reached.
 HALT_SEQUENCE_STEPS: frozenset[str] = frozenset({"workflow_exit"})
 
 

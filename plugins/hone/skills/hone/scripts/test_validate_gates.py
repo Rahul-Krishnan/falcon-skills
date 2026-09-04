@@ -266,6 +266,7 @@ class TestModeDerivation(unittest.TestCase):
             "gates": [
                 gate("fixonly_entry"),
                 gate("phase2_to_phase3"),
+                gate("convergence"),
                 gate("phase3_exit"),
                 gate("workflow_exit"),
             ],
@@ -404,6 +405,7 @@ class TestHaltSequenceTail(unittest.TestCase):
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
+            gate("convergence"),
             gate("phase3_exit", result="fail"),
             gate("workflow_exit", result="fail"),
         ]
@@ -412,10 +414,12 @@ class TestHaltSequenceTail(unittest.TestCase):
         self.assertEqual(report["warnings"], [])
 
     def test_an_unemitted_step_in_the_tail_still_warns(self):
-        """Regression: `convergence` is not an event hone emits.
+        """Regression: a step Phase 3 never reached must not excuse the failure.
 
-        It was in HALT_SEQUENCE_STEPS anyway, so appending one silenced this
-        warning for any failed gate.
+        `convergence` is emitted, but only by Phase 3. A failed
+        `phase2_to_phase3` means Phase 3 never ran, so a `convergence` event
+        after it is invented. It was in HALT_SEQUENCE_STEPS anyway, so
+        appending one silenced this warning for any failed gate.
         """
         gates = [
             gate("phase1_to_phase2"),
