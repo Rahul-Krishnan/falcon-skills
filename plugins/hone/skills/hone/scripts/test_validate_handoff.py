@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from validate_handoff import (
     HANDOFF_SCHEMAS,
+    ROUND_SCORES_SCHEMA,
     STEP_CONTRACTS,
     validate_all,
     validate_fields,
@@ -336,7 +337,8 @@ class TestValidateHandoff(unittest.TestCase):
     def test_valid_eval_results(self) -> None:
         state = {
             "eval_results": {
-                "composite_score": 0.85,
+
+                "output_dir": "/tmp/skill-eval/demo/run-1",                "composite_score": 0.85,
                 "grade": "B",
                 "per_test": [
                     {
@@ -352,18 +354,50 @@ class TestValidateHandoff(unittest.TestCase):
                     },
                 ],
                 "actionable_failures": 1,
+                "power_verdict": "powered",
             },
         }
         result = validate_handoff(state, "eval_results")
         self.assertTrue(result.valid, f"Errors: {[e.message for e in result.errors]}")
 
+    def test_eval_results_without_a_power_verdict_fails(self) -> None:
+        # Step 9a: a composite without a power verdict is a number, not a
+        # result, and the gate is what enforces that.
+        state = {
+            "eval_results": {
+
+                "output_dir": "/tmp/skill-eval/demo/run-1",                "composite_score": 0.85,
+                "grade": "B",
+                "per_test": [{"test_id": "t", "score": 0.85, "status": "pass"}],
+                "actionable_failures": 0,
+            },
+        }
+        result = validate_handoff(state, "eval_results")
+        self.assertFalse(result.valid)
+        self.assertTrue(any(e.path == "eval_results.power_verdict" for e in result.errors))
+
+    def test_eval_results_power_verdict_outside_the_enum_fails(self) -> None:
+        state = {
+            "eval_results": {
+
+                "output_dir": "/tmp/skill-eval/demo/run-1",                "composite_score": 0.85,
+                "grade": "B",
+                "per_test": [{"test_id": "t", "score": 0.85, "status": "pass"}],
+                "actionable_failures": 0,
+                "power_verdict": "pass",
+            },
+        }
+        self.assertFalse(validate_handoff(state, "eval_results").valid)
+
     def test_eval_results_score_out_of_range(self) -> None:
         state = {
             "eval_results": {
-                "composite_score": 1.5,
+
+                "output_dir": "/tmp/skill-eval/demo/run-1",                "composite_score": 1.5,
                 "grade": "A",
                 "per_test": [{"test_id": "t", "score": 0.5, "status": "pass"}],
                 "actionable_failures": 0,
+                "power_verdict": "powered",
             },
         }
         result = validate_handoff(state, "eval_results")
@@ -372,10 +406,12 @@ class TestValidateHandoff(unittest.TestCase):
     def test_eval_results_empty_per_test(self) -> None:
         state = {
             "eval_results": {
-                "composite_score": 0.0,
+
+                "output_dir": "/tmp/skill-eval/demo/run-1",                "composite_score": 0.0,
                 "grade": "F",
                 "per_test": [],
                 "actionable_failures": 0,
+                "power_verdict": "powered",
             },
         }
         result = validate_handoff(state, "eval_results")
@@ -444,10 +480,12 @@ class TestValidateStep(unittest.TestCase):
         state = {
             "steps": {"phase1_evaluate": "done"},
             "eval_results": {
-                "composite_score": 0.8,
+
+                "output_dir": "/tmp/skill-eval/demo/run-1",                "composite_score": 0.8,
                 "grade": "B",
                 "per_test": [{"test_id": "t", "score": 0.8, "status": "pass"}],
                 "actionable_failures": 0,
+                "power_verdict": "powered",
             },
         }
         results = validate_step(state, "phase1_evaluate")
@@ -504,10 +542,12 @@ class TestValidateStep(unittest.TestCase):
                 "phase3_reevaluate": "skipped",
             },
             "eval_results": {
-                "composite_score": 0.9,
+
+                "output_dir": "/tmp/skill-eval/demo/run-1",                "composite_score": 0.9,
                 "grade": "A",
                 "per_test": [{"test_id": "t", "score": 0.9, "status": "pass"}],
                 "actionable_failures": 0,
+                "power_verdict": "improved",
             },
         }
         results = validate_step(state, "phase3_reevaluate")
@@ -1086,6 +1126,230 @@ class TestCliReadErrors(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
         self.assertNotIn("Traceback", result.stderr)
         self.assertIn("cannot read state file", result.stderr)
+
+
+
+class TestOutputDirIsLoadBearing(unittest.TestCase):
+    """r3-S5. `eval_results.output_dir` is what Phase 3 step 3a reads as
+    $PRIOR_OUTPUT_DIR, so an eval_results that omits it, or writes it empty,
+    leaves Phase 3 with no baseline and has to fail at this gate rather than
+    as check_eval_power's exit 2 a phase later."""
+
+    def _state(self, **overrides):
+        block = {
+            "output_dir": "/tmp/skill-eval/demo/run-1",
+            "composite_score": 0.85,
+            "grade": "B",
+            "per_test": [{"test_id": "t", "score": 0.85, "status": "pass"}],
+            "actionable_failures": 0,
+            "power_verdict": "powered",
+        }
+        block.update(overrides)
+        return {"eval_results": {k: v for k, v in block.items() if v is not ...}}
+
+    def test_eval_results_without_output_dir_fails(self) -> None:
+        result = validate_handoff(self._state(output_dir=...), "eval_results")
+        self.assertFalse(result.valid)
+        self.assertTrue(any(e.path == "eval_results.output_dir" for e in result.errors))
+
+    def test_eval_results_with_an_empty_output_dir_fails(self) -> None:
+        self.assertFalse(validate_handoff(self._state(output_dir=""), "eval_results").valid)
+
+
+class TestRoundScoresHaveASchema(unittest.TestCase):
+    """r3-S5. Phase 3 step 6 writes `round_{N}_scores`, and the next round
+    reads its `output_dir` (step 3a) and `per_test` (step 5); with no schema a
+    round could omit `output_dir` and round N+1 fell back to Phase 1's
+    baseline, crediting round N's gain to round N+1."""
+
+    RECORD = {
+        "output_dir": "/tmp/skill-eval/demo/reeval-1",
+        "composite_score": 0.82,
+        "per_test": [{"test_id": "t", "score": 0.82, "status": "pass"}],
+        "power_verdict": "improved",
+        "power_p_improved": 0.0312,
+        "power_discordant": 6,
+    }
+
+    def test_a_complete_round_record_passes(self) -> None:
+        result = validate_handoff({"round_1_scores": self.RECORD}, "round_1_scores")
+        self.assertTrue(result.valid, f"Errors: {[e.message for e in result.errors]}")
+
+    def test_a_round_record_without_output_dir_fails(self) -> None:
+        record = {k: v for k, v in self.RECORD.items() if k != "output_dir"}
+        result = validate_handoff({"round_2_scores": record}, "round_2_scores")
+        self.assertFalse(result.valid)
+        self.assertTrue(any(e.path == "round_2_scores.output_dir" for e in result.errors))
+
+    def test_a_round_record_without_a_power_verdict_fails(self) -> None:
+        record = {k: v for k, v in self.RECORD.items() if k != "power_verdict"}
+        self.assertFalse(validate_handoff({"round_1_scores": record}, "round_1_scores").valid)
+
+    def test_the_adjusted_baseline_is_validated_when_present(self) -> None:
+        record = dict(self.RECORD)
+        record["baseline_original"] = {"composite_score": 0.71, "per_test": [{"test_id": "t"}]}
+        record["baseline_adjusted"] = {"composite_score": 0.74, "per_test": [{"test_id": "t"}]}
+        self.assertTrue(validate_handoff({"round_1_scores": record}, "round_1_scores").valid)
+        record["baseline_adjusted"] = {"composite_score": 0.74}
+        self.assertFalse(validate_handoff({"round_1_scores": record}, "round_1_scores").valid)
+
+    def test_eval_results_carries_the_same_adjusted_baseline(self) -> None:
+        # Round 1's re-score writes into eval_results, the prior record there.
+        block = {
+            "output_dir": "/tmp/skill-eval/demo/run-1",
+            "composite_score": 0.71,
+            "grade": "C",
+            "per_test": [{"test_id": "t", "score": 0.71, "status": "fail"}],
+            "actionable_failures": 1,
+            "power_verdict": "powered",
+            "baseline_adjusted": {"composite_score": 0.74},
+        }
+        result = validate_handoff({"eval_results": block}, "eval_results")
+        self.assertFalse(result.valid)
+        self.assertTrue(any("baseline_adjusted" in e.path for e in result.errors))
+
+    def test_validate_all_picks_up_every_round_present(self) -> None:
+        state = {
+            "steps": {},
+            "round_1_scores": self.RECORD,
+            "round_2_scores": {k: v for k, v in self.RECORD.items() if k != "output_dir"},
+        }
+        results = {r.handoff: r for r in validate_all(state)}
+        self.assertIn("round_1_scores", results)
+        self.assertIn("round_2_scores", results)
+        self.assertTrue(results["round_1_scores"].valid)
+        self.assertFalse(results["round_2_scores"].valid)
+        self.assertNotIn("round_scores", results)
+
+    def test_the_template_name_itself_is_not_a_handoff(self) -> None:
+        result = validate_handoff({"round_scores": self.RECORD}, "round_scores")
+        self.assertFalse(result.valid)
+        self.assertIn("unknown handoff schema", result.errors[0].message)
+
+    def test_the_cli_accepts_a_concrete_round_key(self) -> None:
+        import json
+        import subprocess
+        import tempfile
+
+        script = str(Path(__file__).parent / "validate_handoff.py")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_path = Path(tmp_dir) / "state.json"
+            state_path.write_text(json.dumps({"round_3_scores": self.RECORD}))
+            result = subprocess.run(
+                [sys.executable, script, str(state_path), "--handoff", "round_3_scores"],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class TestPreMigrationStateFilesGetAMigrationPath(unittest.TestCase):
+    """r4-S1. `eval_results.output_dir` went optional -> required-non-empty and
+    `power_verdict` was added as required, so a state file written before this
+    change and resumed after it (SKILL.md's resume protocol keeps runs alive
+    across sessions) hard-stops at the mandatory pre-Phase-2 gate. The stop is
+    correct; a stop that says only "required field missing" is a dead end."""
+
+    PRE_MIGRATION = {
+        "results_path": "/tmp/skill-eval/demo/baseline/results.json",
+        "composite_score": 0.71,
+        "grade": "B",
+        "per_test": [{"test_id": "t1", "score": 0.71, "status": "pass"}],
+        "actionable_failures": 0,
+    }
+
+    def _messages(self, record):
+        result = validate_handoff({"eval_results": record}, "eval_results")
+        self.assertFalse(result.valid)
+        return {e.path: e.message for e in result.errors}
+
+    def test_both_new_required_fields_name_their_migration(self) -> None:
+        messages = self._messages(self.PRE_MIGRATION)
+        output_dir = messages["eval_results.output_dir"]
+        self.assertIn("required field missing", output_dir)
+        self.assertIn("Migration:", output_dir)
+        self.assertIn("results_path", output_dir)
+        verdict = messages["eval_results.power_verdict"]
+        self.assertIn("required field missing", verdict)
+        self.assertIn("check_eval_power.py", verdict)
+
+    def test_the_old_output_dir_meaning_is_rejected_not_accepted(self) -> None:
+        # Pre-change, `output_dir` held the path to results.json. That value is
+        # a legal non-empty string, so without the directory check it validated
+        # clean here and Phase 3 step 3a then resolved
+        # `.../results.json/deterministic_scores.json`, a path that cannot
+        # exist, reading the baseline as absent with nothing on stderr.
+        record = dict(
+            self.PRE_MIGRATION,
+            output_dir="/tmp/skill-eval/demo/baseline/results.json",
+            power_verdict="powered",
+        )
+        message = self._messages(record)["eval_results.output_dir"]
+        self.assertIn("expected a directory", message)
+        self.assertIn("Migration:", message)
+
+    def test_a_directory_value_passes(self) -> None:
+        record = dict(
+            self.PRE_MIGRATION,
+            output_dir="/tmp/skill-eval/demo/baseline",
+            power_verdict="powered",
+        )
+        result = validate_handoff({"eval_results": record}, "eval_results")
+        self.assertTrue(result.valid, [e.message for e in result.errors])
+
+    def test_round_scores_carries_the_same_migration(self) -> None:
+        record = {
+            "output_dir": "/tmp/skill-eval/demo/reeval-1/results.json",
+            "composite_score": 0.82,
+            "per_test": [{"test_id": "t", "score": 0.82, "status": "pass"}],
+            "power_verdict": "improved",
+        }
+        result = validate_handoff({"round_2_scores": record}, "round_2_scores")
+        self.assertFalse(result.valid)
+        self.assertIn("expected a directory", result.errors[0].message)
+
+
+class TestSchemaListingsMatchWhatHandoffAccepts(unittest.TestCase):
+    """r4-N3. `--list-schemas` and the unknown-name error both printed
+    `round_scores` as a valid `--handoff` name, but `_schema_name` rejects it
+    by design, so `--handoff round_scores` exits 2. Only `main()`'s message
+    carried the clarifying parenthetical."""
+
+    def _cli(self, *args):
+        import json
+        import subprocess
+        import tempfile
+
+        script = str(Path(__file__).parent / "validate_handoff.py")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            state_path = Path(tmp_dir) / "state.json"
+            state_path.write_text(json.dumps({}))
+            return subprocess.run(
+                [sys.executable, script, str(state_path), *args],
+                capture_output=True,
+                text=True,
+            )
+
+    def test_list_schemas_says_how_round_scores_is_addressed(self) -> None:
+        out = self._cli("--list-schemas").stdout
+        line = next(
+            l for l in out.splitlines() if l.strip().startswith(ROUND_SCORES_SCHEMA)
+        )
+        self.assertIn("round_<N>_scores", line)
+
+    def test_the_unknown_name_error_says_the_same_thing(self) -> None:
+        result = self._cli("--handoff", ROUND_SCORES_SCHEMA)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("round_<N>_scores", result.stderr)
+
+    def test_every_listed_name_except_the_template_is_addressable(self) -> None:
+        for name in sorted(HANDOFF_SCHEMAS):
+            if name == ROUND_SCORES_SCHEMA:
+                continue
+            result = validate_handoff({}, name)
+            self.assertNotIn(
+                "unknown handoff schema", result.errors[0].message, name
+            )
 
 
 if __name__ == "__main__":

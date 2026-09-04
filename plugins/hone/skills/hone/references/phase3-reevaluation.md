@@ -35,6 +35,33 @@ python3 <skill-dir>/scripts/enrich_programmatic_checks.py \
 
 This is idempotent: it strips stale identifier-shaped `required_present` entries (no longer occurring in the artifact — hand-written phrases are untouched) and adds any new identifiers introduced by Phase 2 edits, so a Phase 2 rename cannot leave a permanently-MISSING check behind.
 
+**Then re-run the overfit gate (Phase 1 Step 6a), because the refresh re-derives anchors from the current artifact.** An identifier Step 6a had you remove as a `vocabulary` lift is still in the artifact and still in the check text, so the refresh adds it back, and without a gate here Phase 3 scores the recitation anchors Step 6a rejected:
+
+```bash
+python3 <skill-dir>/scripts/check_overfit.py {eval_criteria_path} --artifact {artifact_path} --json
+```
+
+Apply Step 6a's rule unchanged: rewrite flagged items, `vocabulary` anchors first, until the verdict is `within_threshold`, and do not touch a set that already reports it. Do this before re-running eval runner, so the after-round is scored against the same kind of criteria the before-round was.
+
+**A criteria edit invalidates the prior round's scores, exactly as a scorer edit does.** The refresh and the overfit rewrites both change the criteria file, and `score_execution.py`'s `quality_checks` dimension is `passed / total` over `required_present`: remove three anchors the before-round output was missing and every composite rises with byte-identical executor output, which step 3a then reads as a clean sweep and reports `improved`. So, once the refresh and the overfit gate are done, compare the criteria file against the copy that scored the prior round (the `.pre-enrich` backup the refresh wrote, or a hash of the file recorded with that round's scores). If anything changed, re-score the prior round's `results.json` against the *current* criteria before step 3a runs, the same way the scorer-change rule in step 5 re-scores it against a changed scorer.
+
+**Re-score against the artifact the prior round ran against, not the current one.** `--artifact-path` is not a formality here: `score_workflow_sequence` and `score_output_structure` derive the expected steps and headings from that file, so passing the post-Phase-2 artifact re-measures the baseline against a step list its executor never saw. A `## Step N` heading Phase 2 added is then counted as a step the baseline skipped, its composite drops, and step 3a reports `improved` on byte-identical executor behaviour, which is the measurement change this re-score exists to remove. Phase 2 Step 6 wrote the pre-edit content to `applied_edits.artifact_before_snapshot` in the state file; on round 1 it is the same content as `artifact_context.original_backup_path`. Read the path from the state file and pass it:
+
+```bash
+python3 <skill-dir>/scripts/score_execution.py $PRIOR_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_before_snapshot} --criteria-path {eval_criteria_path} --require-timeline --json
+```
+
+The only input that differs between this re-score and the prior round's original scoring is the criteria file. Everything else (trace, artifact, scorer) is held fixed, so the delta is the criteria change alone.
+
+That rewrites `$PRIOR_OUTPUT_DIR/deterministic_scores.json`, which is the file step 3a's `--before` reads. Step 5's per-dimension regression check reads something else, `eval_results.per_test` or `round_{N-1}_scores.per_test` in the state file, and those still hold the scores the retired criteria produced. Leaving them there gives the two checks two different baselines: 3a compares against the adjusted one while step 5 compares against the stale one, so a criteria change that moved `quality_checks` either masks a real drop or fires a phantom regression that survives resampling (the criteria delta is deterministic) and auto-reverts working edits. So, before overwriting the deterministic file, record two fields inside the prior round's own record in the state file (`eval_results` on round 1, `round_{N-1}_scores` after that; both schemas in `scripts/validate_handoff.py` carry them as optional fields):
+
+```json
+"baseline_original": {"composite_score": 0.71, "per_test": [...]},
+"baseline_adjusted": {"composite_score": 0.74, "per_test": [...]}
+```
+
+`baseline_original` copies the record's own `composite_score` and `per_test`; `baseline_adjusted` carries the same two fields from the re-score, with `per_test` in the shape step 6 writes (each entry's `dimension_scores` included). Step 5 reads `baseline_adjusted.per_test` when it is present and the record's own `per_test` otherwise; both rounds are then compared against one criteria set on every check, and the sign test and the regression check measure the artifact change alone. `check_eval_power.py` cannot detect a criteria change for you: `deterministic_scores.json` records the artifact type that scored it, not the criteria that did.
+
 Steps:
 1. Re-read artifact and eval criteria from disk (compaction protection).
 2. Re-run eval runner with `--reuse-criteria`.
@@ -42,8 +69,23 @@ Steps:
    ```bash
    python3 <skill-dir>/scripts/score_execution.py $REEVAL_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --require-timeline --json
    ```
-4. Compare scores: before/after table per-dimension using deterministic scores from workflow state file.
-5. **Regression check (rubric):** Re-read previous scores from the workflow state file (`eval_results.per_test` or last round's recorded scores). Do NOT use in-memory scores from earlier in the conversation. For each dimension, compare new score to previous score read from the state file. If ANY dimension dropped by more than 0.1, flag as regression, then run the variance control below before reverting anything.
+3a. **Power verdict (Phase 1 Step 9a).** The composite from step 3 is a number, not a result, until the sign test says whether the round's movement is distinguishable from noise. Run the comparison Step 9a specifies, with `$PRIOR_OUTPUT_DIR` read from the workflow state file, never from memory: on round 1 it is `eval_results.output_dir` (Phase 1's baseline); on round N >= 2 it is `round_{N-1}_scores.output_dir`, which step 6 records for exactly this purpose. Comparing round 2 against Phase 1's baseline would credit round 1's gain to round 2. Point `--after` at this round:
+   ```bash
+   python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} --artifact-type {artifact_type} --before $PRIOR_OUTPUT_DIR/deterministic_scores.json --after $REEVAL_OUTPUT_DIR/deterministic_scores.json --json
+   ```
+   Record `power_verdict` (the top-level `verdict`), `power_p_improved` (`comparison.p_improved`), and `power_discordant` (`comparison.discordant`) beside this round's composite in the state file, and read the verdict as Step 9a does: `underpowered` and `not_measurable` are neither a pass nor a regression, and neither is ever reported as an improvement. The per-dimension comparison and regression check below still run; the power verdict is recorded alongside them, and the Final Output reports it with the grade.
+
+   **`underpowered` and `not_measurable` gate the auto-revert in step 5.** Phase 1 Step 6b is advisory below its floor, so an under-floor round no longer halts at Phase 1 — it arrives here. Step 9a's rule ("never let it justify a promotion or a revert") has to hold in both directions or making 6b non-blocking would just route more runs into a revert the same rule calls unjustified. Concretely: on either verdict, step 5 does not auto-revert and this round claims no improvement. Record the composite with the verdict beside it as the qualifier, report a suspected regression as suspected, and leave the call to the human.
+
+   **On a `--fix-only` run there is no baseline on round 1.** That run shape skips Phase 1 entirely (`eval_results` is never written, and Step 6b never ran either), so `$PRIOR_OUTPUT_DIR` is empty and the comparison has nothing to pair; pointing `--before` at `/deterministic_scores.json` is a usage error (exit 2), not a verdict. On the first Phase 3 round of a fix-only run, run the sizing half alone and record its verdict, which is the same thing Phase 1 records on a first round with nothing to compare against:
+   ```bash
+   python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} --artifact-type {artifact_type} --json
+   ```
+   Record `power_verdict` as `powered` or `underpowered` with no `power_p_improved` or `power_discordant`; this round's scores are the baseline, not a delta, and steps 4 and 5 below have no previous round to compare against, so skip them and write step 6's record. The comparison starts on round 2, against `round_1_scores.output_dir`.
+4. Compare scores: before/after table per-dimension using deterministic scores from workflow state file (`baseline_adjusted.per_test` when the pre-re-evaluation section recorded it, the prior round's own `per_test` otherwise).
+5. **Regression check (rubric):** Re-read previous scores from the workflow state file (`eval_results.per_test` or last round's recorded scores). Do NOT use in-memory scores from earlier in the conversation. If the pre-re-evaluation section recorded `baseline_adjusted` for the prior round, its `per_test` is the previous score: it is the same criteria set this round was scored against, and the file step 3a compared against. For each dimension, compare new score to previous score read from the state file. If ANY dimension dropped by more than 0.1, flag as regression, then run the variance control below before reverting anything.
+
+   **Power precondition (checked before any revert, including after resampling).** If step 3a recorded `power_verdict` as `underpowered` or `not_measurable`, do NOT auto-revert, whatever this check and the resampling below conclude. Record the flagged dimensions, the medians, and the power verdict; report "Round N shows a suspected regression in {dimensions}, unverifiable at this suite size ({power_verdict}); edits left in place for review" and halt the improvement loop for the human rather than restoring the snapshot. The regression check and the sign test measure different quantities, so they are not statistically contradictory, but the evidence standard is the same one: a suite too small to promote on is too small to revert on, and reverting on it discards working edits on evidence Step 9a says cannot carry a verdict. The remedy is the one Step 6b names — add cases that discriminate a different property — not a revert. Everything below still runs and is still recorded; only the restore is withheld.
 
    **Before believing any before/after delta, bound it.** Run-to-run variance in agentic evals is large enough to swamp a small-N comparison, and a chunk of it is infrastructure rather than the artifact. Bootstrap a confidence interval over the per-test scores on each side and compare intervals, not point estimates. A delta whose interval straddles zero is not a result in either direction, and neither improving nor reverting on it is justified.
 
@@ -53,15 +95,19 @@ Steps:
 
    - Identify which tests feed the regressed dimension. Re-run only those tests, twice more, using identical criteria and the same blind framing.
    - Recompute the dimension from the **median** of the three samples per test.
-   - If the median still shows a drop > 0.1: the regression is real. Auto-revert and halt.
+   - If the median still shows a drop > 0.1: the regression is real. Auto-revert and halt — unless the power precondition above withheld the revert, in which case halt and report without restoring.
    - If the median clears the threshold: record `"variance_confirmed": true` with the per-sample scores in the state file and continue. Do not revert.
 
    Record the attribution alongside the decision: which edits this round touched the sections or scripts that feed the regressed dimension. A regressed dimension with no edit touching its inputs is evidence for variance, but it does not replace the resampling. Resampling is the operative test, because attribution reasoning is exactly the kind of judgment call the mechanical gate exists to constrain.
 
-   When the regression survives resampling, auto-revert edits from the last round (restore from the pre-edit re-read) and report "Round N caused regression in {dimensions}; changes reverted." **After auto-revert, halt the improvement loop immediately — do not loop back to Phase 2.** A regression signals that the improvement direction was wrong; blindly retrying without understanding the failure would waste rounds. Present final output using pre-revert scores.
+   When the regression survives resampling and the power precondition allows a revert, auto-revert edits from the last round (restore from the pre-edit re-read) and report "Round N caused regression in {dimensions}; changes reverted." **After auto-revert, halt the improvement loop immediately — do not loop back to Phase 2.** A regression signals that the improvement direction was wrong; blindly retrying without understanding the failure would waste rounds. Present final output using pre-revert scores.
 
-   **When the scorer itself changed this round** (any edit to `score_execution.py`), re-score the previous round's `results.json` with the updated scorer before comparing. Otherwise the before/after delta mixes an artifact change with a measurement change, and improvements to the scorer read as improvements to the artifact. Record both the original and adjusted baseline in the state file.
-6. Write this round's scores to the workflow state file under `round_{N}_scores`. Also append a gate event to `gates[]`:
+   **When the scorer itself changed this round** (any edit to `score_execution.py`), re-score the previous round's `results.json` with the updated scorer before comparing. Otherwise the before/after delta mixes an artifact change with a measurement change, and improvements to the scorer read as improvements to the artifact. Record both the original and adjusted baseline in the state file, in the `baseline_original` / `baseline_adjusted` shape the pre-re-evaluation section defines, and re-score against the artifact the prior round ran against (`artifact_before_snapshot`), not the current one. A criteria change is the same kind of measurement change and gets the same treatment; the pre-re-evaluation section above says when and how.
+6. Write this round's scores to the workflow state file under `round_{N}_scores`, together with where they came from, so the next round can find its baseline after a compaction:
+   ```json
+   {"output_dir": "$REEVAL_OUTPUT_DIR", "composite_score": 0.82, "per_test": [...], "power_verdict": "improved", "power_p_improved": 0.0312, "power_discordant": 6}
+   ```
+   `output_dir` is the field step 3a reads on the following round; `per_test` is what step 5 reads (each entry carrying `test_id`, `score`, `status`, and `dimension_scores`, the shape `eval_results.per_test` uses). The record is validated against the `round_scores` schema in `scripts/validate_handoff.py`: `python3 <skill-dir>/scripts/validate_handoff.py $STATE_FILE --handoff round_{N}_scores`, and `--all` picks every `round_{N}_scores` key up on its own. Also append a gate event to `gates[]`:
    ```json
    {"step": "phase3_exit", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
    ```

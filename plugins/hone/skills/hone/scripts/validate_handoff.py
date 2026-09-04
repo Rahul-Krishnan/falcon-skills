@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -52,8 +53,29 @@ from hone_common import get as null_safe_get
 #   max_value: number (for number type: inclusive maximum)
 
 
-def _str(required: bool = True, non_empty: bool = False) -> dict:
-    return {"type": "string", "required": required, "non_empty": non_empty}
+def _str(required: bool = True, non_empty: bool = False,
+         migration: str | None = None) -> dict:
+    spec: dict = {"type": "string", "required": required, "non_empty": non_empty}
+    if migration is not None:
+        spec["migration"] = migration
+    return spec
+
+
+def _dir(migration: str) -> dict:
+    """A required non-empty string naming a DIRECTORY, not a file inside it.
+
+    `output_dir` changed meaning in the same change that made it required: it
+    held the path to results.json, it now holds the directory containing it.
+    An old value passes the non-empty check untouched and then resolves
+    `$PRIOR_OUTPUT_DIR/deterministic_scores.json` to
+    `.../results.json/deterministic_scores.json`, a path that cannot exist,
+    so the baseline reads as absent a phase later with nothing on stderr.
+    Here is the only place that can catch the old shape while it still knows
+    what the field means, and name the migration in the message.
+    """
+    spec = _str(required=True, non_empty=True, migration=migration)
+    spec["dir_path"] = True
+    return spec
 
 
 def _num(
@@ -77,14 +99,18 @@ def _bool(required: bool = True) -> dict:
 
 
 def _enum(
-    values: list[str], required: bool = True, allow_null: bool = False
+    values: list[str], required: bool = True, allow_null: bool = False,
+    migration: str | None = None,
 ) -> dict:
-    return {
+    spec: dict = {
         "type": "enum",
         "required": required,
         "values": values,
         "allow_null": allow_null,
     }
+    if migration is not None:
+        spec["migration"] = migration
+    return spec
 
 
 def _obj(fields: dict, required: bool = True) -> dict:
@@ -98,6 +124,50 @@ def _arr(
     if items is not None:
         spec["items"] = items
     return spec
+
+
+def _baseline() -> dict:
+    """A round's scores as re-read by the following round's criteria re-score.
+
+    Optional on both `eval_results` and `round_scores`: it exists only when
+    the next round changed the criteria file and re-scored this round's
+    trace, and Phase 3 step 5 reads its `per_test` in place of the record's
+    own when it does.
+    """
+    return _obj(
+        {
+            "composite_score": _num(min_value=0.0, max_value=1.0, allow_null=True),
+            "per_test": _arr(non_empty=True),
+        },
+        required=False,
+    )
+
+
+# Migration hints. `eval_results.output_dir` went optional -> required and
+# `power_verdict` was added as required in the same change, so a state file
+# written before it and resumed after it (SKILL.md's resume protocol keeps
+# runs alive across sessions) hard-stops at the mandatory pre-Phase-2 gate
+# with nothing but "required field missing" to act on. The gate is correct to
+# stop -- Phase 2 must not act on a composite with no power verdict beside
+# it -- but a hard stop that does not say how to move is a dead end, and the
+# validator is the only component that knows both the old shape and the new
+# one. These travel with the field specs so the message arrives at the field
+# that is missing. references/phase1-evaluation.md carries the same steps in
+# prose; keep the two in step.
+OUTPUT_DIR_MIGRATION = (
+    "state files written before the power and overfit gates landed either "
+    "omit this field or carry the pre-change meaning, the path to "
+    "results.json. To migrate, set it to the DIRECTORY holding that round's "
+    "results.json and deterministic_scores.json, and leave the file path "
+    "itself in results_path"
+)
+POWER_VERDICT_MIGRATION = (
+    "state files written before the power and overfit gates landed omit this "
+    "field. To migrate, run check_eval_power.py over this round's output_dir "
+    "and record its top-level verdict; a round with no earlier round to "
+    "compare against records the sizing verdict instead (powered or "
+    "underpowered)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +382,11 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     # (Phase 1 -> Phase 2)"); keep the enums there in sync with these.
     "eval_results": {
         "fields": {
-            "output_dir": _str(required=False),
+            # Directory holding results.json and deterministic_scores.json.
+            # Phase 3 step 3a reads it as $PRIOR_OUTPUT_DIR; required here so a
+            # missing baseline fails this gate, not check_eval_power a phase
+            # later. Inconclusive runs still have an output directory.
+            "output_dir": _dir(OUTPUT_DIR_MIGRATION),
             "results_path": _str(required=False),
             "composite_score": _num(min_value=0.0, max_value=1.0, allow_null=True),
             "grade": _enum(["A", "B", "C", "D", "F", "INCONCLUSIVE"]),
@@ -336,6 +410,61 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
                 non_empty=True,
             ),
             "actionable_failures": _num(min_value=0),
+            # Steps 6b and 9a (references/phase1-evaluation.md): the power
+            # verdict recorded beside the composite. `powered` and
+            # `underpowered` are the sizing values a first round writes; the
+            # other four come from the before/after comparison. Required,
+            # because a composite without it is the number Phase 2 must not
+            # act on: an eval_results that omits it fails this gate the same
+            # way one carrying a value outside the enum ("pass") does.
+            "power_verdict": _enum(
+                ["powered", "underpowered", "improved", "regressed",
+                 "inconclusive", "not_measurable"],
+                migration=POWER_VERDICT_MIGRATION,
+            ),
+            "power_p_improved": _num(required=False, min_value=0.0, max_value=1.0),
+            "power_discordant": _num(required=False, min_value=0),
+            # Written into this record by the next round's criteria re-score
+            # (phase3-reevaluation.md); that round's step 5 reads
+            # `baseline_adjusted.per_test` in place of `per_test` when present.
+            "baseline_original": _baseline(),
+            "baseline_adjusted": _baseline(),
+        },
+    },
+    # Phase 3 step 6 -> the next round's step 3a and step 5
+    # (references/phase3-reevaluation.md). Stored under `round_{N}_scores`,
+    # one key per round, so state keys matching ROUND_SCORES_KEY resolve to
+    # this schema and --handoff takes the concrete key. Without `output_dir`
+    # round N+1 falls back to Phase 1's baseline and credits round N's gain
+    # to itself.
+    "round_scores": {
+        "fields": {
+            "output_dir": _dir(OUTPUT_DIR_MIGRATION),
+            "composite_score": _num(min_value=0.0, max_value=1.0, allow_null=True),
+            "per_test": _arr(
+                items={
+                    "type": "object",
+                    "fields": {
+                        "test_id": _str(non_empty=True),
+                        "score": _num(
+                            min_value=0.0, max_value=1.0, allow_null=True
+                        ),
+                        "status": _enum(
+                            ["pass", "fail", "error", "inconclusive", "score_error"]
+                        ),
+                    },
+                },
+                non_empty=True,
+            ),
+            "power_verdict": _enum(
+                ["powered", "underpowered", "improved", "regressed",
+                 "inconclusive", "not_measurable"],
+                migration=POWER_VERDICT_MIGRATION,
+            ),
+            "power_p_improved": _num(required=False, min_value=0.0, max_value=1.0),
+            "power_discordant": _num(required=False, min_value=0),
+            "baseline_original": _baseline(),
+            "baseline_adjusted": _baseline(),
         },
     },
     # P2 Step 1 -> Step 1.7
@@ -632,6 +761,18 @@ class ValidationResult:
     fields_checked: int = 0
 
 
+def _with_migration(message: str, spec: dict) -> str:
+    """`message`, plus the field's migration note when it carries one.
+
+    A field that became required, or changed meaning, after state files were
+    already on disk needs the remedy attached to the failure. "required field
+    missing" alone is a hard stop at a mandatory gate with no next move; see
+    OUTPUT_DIR_MIGRATION and POWER_VERDICT_MIGRATION.
+    """
+    migration = spec.get("migration")
+    return f"{message}. Migration: {migration}" if migration else message
+
+
 def validate_value(
     value: object,
     spec: dict,
@@ -653,6 +794,22 @@ def validate_value(
             )
         elif spec.get("non_empty") and not value.strip():
             errors.append(ValidationError(path, "string must be non-empty"))
+        elif spec.get("dir_path") and Path(value.strip()).name.endswith(".json"):
+            # The pre-change `output_dir`, which named results.json itself.
+            # It is a legal non-empty string, so without this it validates
+            # clean here and fails silently one phase later, where
+            # `$PRIOR_OUTPUT_DIR/deterministic_scores.json` resolves under a
+            # file. Reported here, where the migration is still nameable.
+            errors.append(
+                ValidationError(
+                    path,
+                    _with_migration(
+                        f"expected a directory, got a path to a file: "
+                        f"{value.strip()!r}",
+                        spec,
+                    ),
+                )
+            )
 
     elif field_type == "number":
         checked += 1
@@ -783,7 +940,7 @@ def validate_fields(
                 errors.append(
                     ValidationError(
                         field_path,
-                        "required field missing",
+                        _with_migration("required field missing", spec),
                     )
                 )
             continue
@@ -793,12 +950,56 @@ def validate_fields(
     return checked
 
 
+# `round_{N}_scores` keys, one per Phase 3 round; all validate against the
+# `round_scores` schema.
+ROUND_SCORES_KEY = re.compile(r"^round_[1-9]\d*_scores$")
+ROUND_SCORES_SCHEMA = "round_scores"
+
+
+def _schema_name(handoff_name: str) -> str | None:
+    """The HANDOFF_SCHEMAS entry `handoff_name` validates against, or None.
+
+    Most handoffs are their own schema name. The per-round score records are
+    keyed `round_1_scores`, `round_2_scores`, ... and share one schema, so
+    the concrete key is what --handoff and the state file carry and the
+    pattern is what resolves it. `round_scores` itself is not a state key.
+    """
+    if handoff_name in HANDOFF_SCHEMAS and handoff_name != ROUND_SCORES_SCHEMA:
+        return handoff_name
+    if ROUND_SCORES_KEY.match(handoff_name):
+        return ROUND_SCORES_SCHEMA
+    return None
+
+
+def _valid_handoff_names() -> str:
+    """The names `--handoff` actually accepts, as a message fragment.
+
+    `round_scores` is a schema name, not a state key: `_schema_name` rejects
+    it by design, so `--handoff round_scores` exits 2. Every place that lists
+    valid names has to say so, or it advertises an argument that does not
+    work. `main()` carried the parenthetical and the two listings below did
+    not; they all go through here now.
+    """
+    return (
+        f"{', '.join(sorted(HANDOFF_SCHEMAS))} "
+        f"({ROUND_SCORES_SCHEMA} is a schema name, addressed as "
+        "round_<N>_scores)"
+    )
+
+
+def _round_scores_keys(state: dict) -> list[str]:
+    """Every `round_{N}_scores` key present in `state`, in round order."""
+    keys = [k for k in state if isinstance(k, str) and ROUND_SCORES_KEY.match(k)]
+    return sorted(keys, key=lambda k: int(k.split("_")[1]))
+
+
 def validate_handoff(
     state: dict,
     handoff_name: str,
 ) -> ValidationResult:
     """Validate a single handoff's data in the workflow state."""
-    if handoff_name not in HANDOFF_SCHEMAS:
+    schema_name = _schema_name(handoff_name)
+    if schema_name is None:
         return ValidationResult(
             handoff=handoff_name,
             valid=False,
@@ -806,13 +1007,13 @@ def validate_handoff(
                 ValidationError(
                     handoff_name,
                     f"unknown handoff schema: {handoff_name!r}. "
-                    f"Valid names: {sorted(HANDOFF_SCHEMAS.keys())}",
+                    f"Valid names: {_valid_handoff_names()}",
                     severity="error",
                 )
             ],
         )
 
-    schema = HANDOFF_SCHEMAS[handoff_name]
+    schema = HANDOFF_SCHEMAS[schema_name]
 
     if handoff_name not in state:
         return ValidationResult(
@@ -960,8 +1161,14 @@ def validate_all(state: dict) -> list[ValidationResult]:
     steps = null_safe_get(state, "steps", {}, expected=dict)
     results: list[ValidationResult] = []
     for handoff_name in HANDOFF_SCHEMAS:
+        if handoff_name == "round_scores":
+            continue  # pattern-keyed; the concrete keys are collected below
         if handoff_name in state or _input_expected(steps, handoff_name):
             results.append(validate_handoff(state, handoff_name))
+    # Phase 3 writes one record per round under a key the schema table cannot
+    # name in advance; validate whichever rounds are present.
+    for key in _round_scores_keys(state):
+        results.append(validate_handoff(state, key))
     return results
 
 
@@ -1063,7 +1270,14 @@ def main() -> int:
         for name in sorted(HANDOFF_SCHEMAS.keys()):
             schema = HANDOFF_SCHEMAS[name]
             field_count = len(schema.get("fields", {}))
-            print(f"  {name} ({field_count} fields)")
+            # This listing is read as the --handoff menu, and `round_scores`
+            # is the one entry that is not one: passing it exits 2.
+            addressing = (
+                "; addressed as round_<N>_scores"
+                if name == ROUND_SCORES_SCHEMA
+                else ""
+            )
+            print(f"  {name} ({field_count} fields{addressing})")
         print("\nStep contracts:")
         for step_name, contract in sorted(STEP_CONTRACTS.items()):
             requires = ", ".join(contract["requires"]) or "(none)"
@@ -1096,10 +1310,10 @@ def main() -> int:
     # "fix the state file, re-validate", which misdirects an exit-code
     # consumer when the failure is a one-character typo in the name.
     if args.handoff:
-        if args.handoff not in HANDOFF_SCHEMAS:
+        if _schema_name(args.handoff) is None:
             print(
                 f"Error: unknown handoff name: {args.handoff!r}. "
-                f"Valid names: {', '.join(sorted(HANDOFF_SCHEMAS))}",
+                f"Valid names: {_valid_handoff_names()}",
                 file=sys.stderr,
             )
             return 2
