@@ -1226,6 +1226,14 @@ class TestMalformedTestInput(unittest.TestCase):
         self.assertIsInstance(scored["composite_score"], float)
 
 
+# What an all-compliant run scores for the number of gate events it emitted.
+# Below score_execution.GATE_EVIDENCE_FLOOR the un-emitted events count as
+# neutral, so unanimity on thin evidence buys a ceiling, not a 1.0. Written
+# out as literals rather than recomputed from the scorer's own constants: a
+# change to the floor has to fail here loudly, not agree with itself.
+GATE_FULL_CREDIT = {1: 0.625, 2: 0.75, 3: 0.875, 4: 1.0, 5: 1.0}
+
+
 def _score_written_gates(gates: list[dict]) -> dict:
     """Score gates that were actually written to a state file.
 
@@ -1258,13 +1266,13 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
             self._gate("phase3_exit", "fail"),
             self._gate("workflow_exit", "fail"),
         ])
-        self.assertEqual(result["score"], 1.0)
+        self.assertEqual(result["score"], GATE_FULL_CREDIT[2])
         self.assertIn("expected-fail", result["evidence"])
 
     def test_a_failing_exit_event_is_compliant_on_its_own(self):
         """`workflow_exit` is the last event a run owes, so a fail there ends it."""
         result = _score_written_gates([self._gate("workflow_exit", "fail")])
-        self.assertEqual(result["score"], 1.0)
+        self.assertEqual(result["score"], GATE_FULL_CREDIT[1])
         self.assertIn("expected-fail", result["evidence"])
 
     def test_a_fail_that_simply_stops_emitting_is_not_compliant(self):
@@ -1287,7 +1295,7 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
                 self._gate("handoff_eval_results", "pass"),
             ]
         )
-        self.assertEqual(result["score"], 1.0)
+        self.assertEqual(result["score"], GATE_FULL_CREDIT[2])
 
     def test_fail_then_unrelated_progress_is_not_compliant(self):
         result = _score_written_gates(
@@ -1298,10 +1306,26 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
         )
         self.assertLess(result["score"], 1.0)
 
-    def test_all_pass_still_scores_one(self):
+    def test_all_pass_scores_the_ceiling_for_its_evidence(self):
+        """Two compliant events is unanimity, and unanimity on two is 0.75.
+
+        A full 1.0 needs GATE_EVIDENCE_FLOOR compliant events; see
+        TestGateEvidenceFloor.
+        """
         result = _score_written_gates(
             [
                 self._gate("phase1_to_phase2", "pass"),
+                self._gate("workflow_exit", "pass"),
+            ]
+        )
+        self.assertEqual(result["score"], GATE_FULL_CREDIT[2])
+
+    def test_four_compliant_events_still_score_one(self):
+        result = _score_written_gates(
+            [
+                self._gate("phase1_to_phase2", "pass"),
+                self._gate("phase2_to_phase3", "pass"),
+                self._gate("phase3_exit", "pass"),
                 self._gate("workflow_exit", "pass"),
             ]
         )
@@ -1319,7 +1343,7 @@ class TestGateComplianceFailSemantics(unittest.TestCase):
                 self._gate("workflow_exit", "fail"),
             ]
         )
-        self.assertEqual(result["score"], 1.0)
+        self.assertEqual(result["score"], GATE_FULL_CREDIT[2])
 
     def test_fail_then_silence_is_not_a_halt(self):
         # No later pass, but no workflow_exit either: the run failed a gate
@@ -1684,7 +1708,9 @@ class TestScoringEvidenceIntegrity(unittest.TestCase):
         for key in ("tool_name", "tool"):
             with self.subTest(key=key):
                 entry = self._gate_entry(key)
-                self.assertEqual(score_gate_compliance([entry], "", "")["score"], 1.0)
+                self.assertEqual(
+                    score_gate_compliance([entry], "", "")["score"], GATE_FULL_CREDIT[1]
+                )
                 self.assertEqual(score_state_persistence([entry])["score"], 1.0)
 
     def test_tool_alias_recognized_by_bash_scorers(self):
@@ -2085,11 +2111,23 @@ class TestEchoedGateTemplate(unittest.TestCase):
         result = score_gate_compliance([], self.RESPONSE)
         self.assertLessEqual(result["score"], 0.7)
 
-    def test_written_gate_still_scores_one(self):
-        result = _score_written_gates(
+    def test_written_gate_outranks_the_same_gate_quoted(self):
+        """The class penalty survives the evidence floor.
+
+        Both rules bite hardest on one event, and a flat 0.7 cap stopped
+        composing there: the padded ceiling is already 0.625, so a quoted gate
+        used to score exactly what a written one did.
+        """
+        written = _score_written_gates(
             [{"step": "phase1_evaluate", "judge": "self", "result": "pass"}]
         )
-        self.assertEqual(result["score"], 1.0)
+        self.assertEqual(written["score"], GATE_FULL_CREDIT[1])
+        self.assertLess(self._quoted_score(), written["score"])
+
+    def _quoted_score(self):
+        from score_execution import score_gate_compliance
+
+        return score_gate_compliance([], self.RESPONSE)["score"]
 
     def test_guarded_run_with_no_tool_calls_is_inconclusive(self):
         from score_execution import _score_single_test
@@ -2567,9 +2605,19 @@ class TestHaltSequenceGateCompliance(unittest.TestCase):
         from score_execution import ECHOED_GATE_CAP
 
         result = score_gate_compliance([], self._resp(gates))
-        self.assertEqual(result["score"], ECHOED_GATE_CAP)
+        # Both evidence discounts apply: quoted rather than written
+        # (ECHOED_GATE_CAP) and two events rather than the evidence floor's
+        # four (GATE_FULL_CREDIT[2]). 0.7 * 0.75.
+        self.assertEqual(result["score"], 0.525)
+        self.assertLess(result["score"], ECHOED_GATE_CAP)
 
     def test_extra_truthful_fail_does_not_lower_the_score(self):
+        """Never lower, and below the evidence floor strictly higher.
+
+        The floor is what makes it strictly higher: a run's denominator is the
+        number of events it chose to emit, so before the floor the terse run
+        and the candid one both scored the cap and under-emitting was free.
+        """
         from score_execution import score_gate_compliance
 
         terse = [
@@ -2583,7 +2631,7 @@ class TestHaltSequenceGateCompliance(unittest.TestCase):
             {"step": "phase3_exit", "judge": "self-check", "result": "fail"},
             {"step": "workflow_exit", "judge": "self-check", "result": "pass"},
         ]
-        self.assertEqual(
+        self.assertGreater(
             score_gate_compliance([], self._resp(candid))["score"],
             score_gate_compliance([], self._resp(terse))["score"],
         )
@@ -2922,6 +2970,172 @@ class TestRequiredAbsentSeesFallbackProse(unittest.TestCase):
         self.assertEqual(self._score("tool_result"), 1.0)
 
 
+class TestGateEvidenceFloor(unittest.TestCase):
+    """gate_compliance divides by at least GATE_EVIDENCE_FLOOR events.
+
+    Measured over 289 scored gate_compliance records in ~/skill-eval: the mean
+    run emits 3.00 gate events and 30.6% emit exactly one, on a dimension
+    weighted 0.151 for skills (0.51 for failure-mode tests) that Phase 3
+    auto-reverts on when it moves more than 0.1. Before the floor, one gate
+    event's adjudication moved the dimension across its entire range.
+    """
+
+    def _gate(self, step, result="pass"):
+        return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
+
+    def test_one_event_cannot_swing_the_whole_range(self):
+        """The reproduction: one `fail`, two readings of it, 1.0 vs 0.0.
+
+        `workflow_exit:fail` is a halt with nothing owed after it;
+        `phase3_exit:fail` is the same event on a step that still owes the
+        exit. That single distinction used to be the difference between a
+        perfect score and a zero.
+        """
+        halt = _score_written_gates([self._gate("workflow_exit", "fail")])
+        not_halt = _score_written_gates([self._gate("phase3_exit", "fail")])
+        self.assertEqual(halt["score"], 0.625)
+        self.assertEqual(not_halt["score"], 0.375)
+        self.assertAlmostEqual(halt["score"] - not_halt["score"], 0.25)
+
+    def test_one_event_never_moves_more_than_one_over_the_floor(self):
+        """The invariant, checked at every gate count the corpus contains."""
+        from score_execution import GATE_EVIDENCE_FLOOR
+
+        for total in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14):
+            with self.subTest(total=total):
+                clean = [self._gate(f"s{i}") for i in range(total)]
+                # One event malformed: the smallest possible change of reading.
+                dirty = list(clean)
+                dirty[0] = {"step": "s0", "judge": "j", "result": "enter_phase2"}
+                delta = (
+                    _score_written_gates(clean)["score"]
+                    - _score_written_gates(dirty)["score"]
+                )
+                self.assertLessEqual(delta, 1.0 / GATE_EVIDENCE_FLOOR + 1e-9)
+
+    def test_the_floor_is_symmetric(self):
+        """It lowers a thin all-compliant run by what it lifts a thin failure."""
+        for total in (1, 2, 3):
+            with self.subTest(total=total):
+                clean = _score_written_gates(
+                    [self._gate(f"s{i}") for i in range(total)]
+                )["score"]
+                broken = _score_written_gates(
+                    [
+                        {"step": f"s{i}", "judge": "j", "result": "enter_phase2"}
+                        for i in range(total)
+                    ]
+                )["score"]
+                self.assertAlmostEqual(1.0 - clean, broken - 0.0)
+
+    def test_at_and_above_the_floor_the_plain_ratio_is_untouched(self):
+        cases = {4: 1.0, 5: 1.0, 10: 1.0}
+        for total, expected in cases.items():
+            with self.subTest(total=total):
+                gates = [self._gate(f"s{i}") for i in range(total)]
+                self.assertEqual(_score_written_gates(gates)["score"], expected)
+        four = [self._gate(f"s{i}") for i in range(3)] + [
+            {"step": "s3", "judge": "j", "result": "enter_phase2"}
+        ]
+        self.assertEqual(_score_written_gates(four)["score"], 0.75)
+
+    def test_under_emitting_can_no_longer_buy_a_top_score(self):
+        """The denominator is executor-chosen, so it needed a floor.
+
+        One compliant event scored 1.0 while four events with one malformed
+        scored 0.8: emitting less was worth more than emitting honestly.
+        """
+        terse = _score_written_gates([self._gate("workflow_exit")])["score"]
+        candid = _score_written_gates(
+            [self._gate(f"s{i}") for i in range(3)]
+            + [{"step": "s3", "judge": "j", "result": "enter_phase2"}]
+        )["score"]
+        self.assertLess(terse, candid)
+
+    def test_the_floor_is_recorded_in_run_metadata(self):
+        """So a round can tell which floor produced its numbers."""
+        from score_execution import GATE_EVIDENCE_FLOOR, score_from_results
+
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False
+        ) as handle:
+            json.dump({"results": [{"test_id": "t", "agent_response": "x"}]}, handle)
+            path = handle.name
+        try:
+            output = score_from_results(path, "skill")
+        finally:
+            os.unlink(path)
+        self.assertEqual(
+            output["metadata"]["gate_evidence_floor"], GATE_EVIDENCE_FLOOR
+        )
+
+    def test_evidence_names_the_padding(self):
+        result = _score_written_gates([self._gate("workflow_exit")])
+        self.assertIn("4-event evidence floor", result["evidence"])
+        self.assertIn("3 counted neutral", result["evidence"])
+
+    def test_no_padding_note_at_or_above_the_floor(self):
+        gates = [self._gate(f"s{i}") for i in range(4)]
+        self.assertNotIn("evidence floor", _score_written_gates(gates)["evidence"])
+
+    def test_the_legacy_keyword_path_is_outside_the_floor(self):
+        """Its denominator is a keyword count, and 0.7 is already its answer."""
+        from score_execution import score_gate_compliance
+
+        narration = "Gate check passed. Validation complete. Checklist done."
+        self.assertEqual(score_gate_compliance([], narration)["score"], 0.7)
+        self.assertNotIn(
+            "evidence floor", score_gate_compliance([], narration)["evidence"]
+        )
+        # And a run that emitted no gate language at all is still a measured
+        # zero, not a padded 0.5: there is no gate event to pad.
+        self.assertEqual(score_gate_compliance([], "Done.")["score"], 0.0)
+
+    def test_thin_evidence_no_longer_trips_the_failure_mode_critical_cap(self):
+        """Deliberate consequence, pinned so it cannot change unnoticed.
+
+        gate_compliance is the critical dimension for failure-mode and
+        side-effect-guarded tests, and compute_composite caps the composite at
+        0.5 when it scores below 0.3. One malformed event now scores 0.375, so
+        the cap no longer fires on a single event -- which is the same claim
+        the floor makes in the other direction: one event is not enough to
+        prove total compliance, and not enough to declare total failure
+        either. Two malformed events (0.25) still trip it.
+        """
+        from score_execution import _score_single_test
+
+        def fm(gates):
+            return _score_single_test(
+                {
+                    "test_id": "fm",
+                    "agent_response": "Halted on the injected failure.",
+                    "execution_timeline": [
+                        {
+                            "step_type": "tool_use",
+                            "tool_name": "Write",
+                            "step_index": 0,
+                            "tool_input": {
+                                "file_path": "/tmp/workflow-state.json",
+                                "content": json.dumps({"gates": gates}),
+                            },
+                        }
+                    ],
+                    "test_input": {"test_profile": "failure_mode"},
+                },
+                "skill",
+                "",
+            )
+
+        bad = {"step": "phase3_exit", "judge": "j", "result": "enter_phase3"}
+        one = fm([bad])
+        self.assertEqual(one["dimensions"]["gate_compliance"]["score"], 0.375)
+        self.assertGreater(one["composite"], 0.5)
+
+        two = fm([bad, dict(bad, step="workflow_exit")])
+        self.assertEqual(two["dimensions"]["gate_compliance"]["score"], 0.25)
+        self.assertLessEqual(two["composite"], 0.5)
+
+
 class TestGateComplianceHaltTail(unittest.TestCase):
     """The scorer reads the halt tail through the shared helper."""
 
@@ -2967,7 +3181,7 @@ class TestGateComplianceHaltTail(unittest.TestCase):
             self._gate("phase3_exit"),
             self._gate("workflow_exit", "pass"),
         ])
-        self.assertEqual(result["score"], 1.0)
+        self.assertEqual(result["score"], GATE_FULL_CREDIT[2])
         self.assertIn("expected-fail", result["evidence"])
 
 

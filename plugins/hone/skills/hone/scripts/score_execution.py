@@ -195,6 +195,55 @@ STEP_PATTERNS = [
 # keyword-counting cap.
 ECHOED_GATE_CAP = 0.7
 
+# Minimum number of structured gate events gate_compliance will divide by.
+# A run that emits fewer has its missing evidence counted as neutral
+# (NEUTRAL_GATE_CREDIT each) in both halves of the ratio, so the dimension's
+# range narrows to what the run actually demonstrated.
+#
+# Why a floor at all: the denominator is the number of gate events the
+# executor chose to emit, so without one it is self-selected. One pass event
+# scored 1.0; five events with one malformed scored 0.8. Emitting less bought
+# a better score, and the whole 0..1 range was reachable from a single
+# judgment on a single event -- on a dimension Phase 3 auto-reverts on when it
+# moves more than 0.1 (references/phase3-reevaluation.md step 5).
+#
+# Why 4, measured over 289 scored gate_compliance records in ~/skill-eval
+# (144 deterministic_scores.json files, 124 of them on the structured path):
+#
+#   gates in test |  1     2     3   |  4    5    6    7   8   9  10  12  14
+#   tests         | 38    28    27   |  7    7    8    1   3   1   2   1   1
+#   share         | 30.6% 22.6% 21.8%| 5.6% 5.6% 6.5% ...
+#
+#   - Every one of the 21 records where halt adjudication actually fires
+#     (an expected-fail gate, the most delicate predicate in this file) sits
+#     at 1, 2 or 3 gates: {1: 9, 2: 9, 3: 3}. 4 is the smallest floor that
+#     reaches all of them.
+#   - 4 is the first bucket past the distribution's elbow: the per-bucket
+#     share falls 21.8% -> 5.6%, a factor of ~3.9, between 3 and 4.
+#   - 4 is the length of the mandatory gate sequence a complete run owes
+#     (phase1_to_phase2, phase2_to_phase3, phase3_exit, workflow_exit; see
+#     SKILL.md > Gate Events). So the floor asks for the events the artifact
+#     already declares mandatory, and 1.0 means "emitted what it owed, all
+#     compliant" rather than "emitted one event, and it was fine".
+#   - 4 is the first integer above the measured mean of 3.00 gates per test,
+#     so for a test of typical size the real evidence still outweighs the
+#     padding. A larger floor (10 is where one event's move first falls under
+#     the 0.1 revert threshold on the raw ratio) would invert that for 96.8%
+#     of tests: the prior, not the observation, would set the score.
+#
+# The floor bounds, it does not eliminate: one gate event can still move the
+# dimension by up to 1/4 = 0.25, which is above the 0.1 threshold. Getting
+# under 0.1 is not reachable from this data without the padding dominating
+# every real observation. What it removes is the case where one judgment
+# moves the dimension across its entire range, which was 30.6% of tests.
+GATE_EVIDENCE_FLOOR = 4
+
+# What an un-emitted gate event is worth when padding to the floor: neither
+# credit nor penalty. Symmetric by construction, so the floor cannot be used
+# in either direction -- it lowers a thin all-compliant run and lifts a thin
+# all-non-compliant one by exactly the same amount.
+NEUTRAL_GATE_CREDIT = 0.5
+
 # Gate/validation keywords
 # Inflected forms must match: a response discussing "gates[]", "validation",
 # or "validate_handoff.py" is discussing gates, and the bare-stem \b anchors
@@ -848,6 +897,55 @@ def _is_well_formed_gate(gate: object) -> bool:
     return gate.get("result") in ("pass", "fail")
 
 
+def _gate_evidence_ceiling(total: int) -> float:
+    """The most gate_compliance a run that emitted `total` events can score.
+
+    1.0 at or above the floor; below it, unanimous compliance still leaves the
+    padded events at NEUTRAL_GATE_CREDIT. It is what the two evidence-quality
+    rules are composed through: the prose-quoted cap is ECHOED_GATE_CAP *of
+    what this volume of evidence could have proved*, not a flat 0.7. Flat, the
+    two rules stopped composing exactly where both apply hardest -- at one
+    event the padded ceiling (0.625) is already under 0.7, so a gate merely
+    quoted in a response scored identically to one written to a state file.
+    """
+    if total >= GATE_EVIDENCE_FLOOR:
+        return 1.0
+    padded = total + NEUTRAL_GATE_CREDIT * (GATE_EVIDENCE_FLOOR - total)
+    return padded / GATE_EVIDENCE_FLOOR
+
+
+def _gate_score_with_evidence_floor(compliant: int, total: int) -> tuple[float, str]:
+    """The compliant fraction, over a denominator of at least GATE_EVIDENCE_FLOOR.
+
+    Below the floor the missing events are counted as NEUTRAL_GATE_CREDIT in
+    both halves of the ratio, so a run that emitted one gate event cannot
+    express a full-range opinion off that one event. Returns (score, note),
+    where note is the padding to append to the evidence string ("" at or above
+    the floor, where this is the plain ratio and nothing changed).
+
+    The invariant this buys: flipping one gate event between compliant and
+    non-compliant moves the score by at most 1 / GATE_EVIDENCE_FLOOR, whatever
+    the run emitted. On the raw ratio that move was 1 / total, which reached
+    the dimension's whole range on the 30.6% of measured tests carrying a
+    single gate. See GATE_EVIDENCE_FLOOR for the distribution the floor is
+    read off, and for what the floor deliberately does not fix.
+
+    This is padding *against* the artifact's interest at the top, which is the
+    opposite of the denominator-dilution class this file has had to close four
+    times: the padding is a fixed neutral prior the executor cannot supply,
+    write, or vary, and it is symmetric, so it can never convert a real
+    non-compliant event into credit.
+    """
+    if total >= GATE_EVIDENCE_FLOOR:
+        return compliant / total, ""
+    padding = GATE_EVIDENCE_FLOOR - total
+    score = (compliant + NEUTRAL_GATE_CREDIT * padding) / GATE_EVIDENCE_FLOOR
+    return score, (
+        f"; {total} of the {GATE_EVIDENCE_FLOOR}-event evidence floor, "
+        f"{padding} counted neutral"
+    )
+
+
 def score_gate_compliance(
     timeline: list[dict], agent_response: str, artifact_content: str = ""
 ) -> dict[str, float | str]:
@@ -866,6 +964,16 @@ def score_gate_compliance(
 
     Fallback (legacy): keyword counting when no structured gate events are found.
     Legacy score is capped at 0.7 to incentivize migration to structured events.
+
+    Minimum evidence: the structured ratio is taken over a denominator of at
+    least GATE_EVIDENCE_FLOOR events (see _gate_score_with_evidence_floor).
+    A perfect 1.0 therefore requires the run to have emitted at least that
+    many compliant events, which is the same rule this dimension already
+    applies to evidence *class* -- prose-quoted gates and keyword matches are
+    capped at ECHOED_GATE_CAP no matter how many there are -- applied to
+    evidence *volume*. The legacy branch is deliberately outside it: its
+    denominator is a keyword count, not gate events, and the 0.7 cap is
+    already its minimum-evidence answer.
     """
     # Primary path: structured gate events (timeline writes or inline in agent_response)
     gates, gate_source = _extract_gate_events(timeline, agent_response)
@@ -915,22 +1023,26 @@ def score_gate_compliance(
                 expected_fail += 1
 
         if compliant == total and well_formed == total:
+            score, floor_note = _gate_score_with_evidence_floor(compliant, total)
             evidence = f"All {total} gate(s) compliant with structured events"
             if expected_fail:
                 evidence += f" ({expected_fail} expected-fail)"
+            evidence += floor_note
             if gate_source == "response_text":
                 # A gate blob quoted in prose is not proof the gate ran: an
                 # executor that echoed the state-file template from the skill
                 # it was asked to describe produces byte-identical evidence.
                 # Same rationale, and same ceiling, as the legacy keyword path.
                 return {
-                    "score": ECHOED_GATE_CAP,
+                    "score": round(
+                        min(score, ECHOED_GATE_CAP * _gate_evidence_ceiling(total)), 4
+                    ),
                     "evidence": (
                         f"{evidence} (quoted in response, not written to a state "
                         "file; capped pending a real write)"
                     ),
                 }
-            return {"score": 1.0, "evidence": evidence}
+            return {"score": round(score, 4), "evidence": evidence}
 
         malformed = total - well_formed
         noncompliant = total - compliant
@@ -938,9 +1050,9 @@ def score_gate_compliance(
         # they already count against the score via the denominator. A second
         # well_formed/total factor squared the penalty: 1 good + 1 malformed
         # scored 0.25 instead of 0.5.
-        score = compliant / total
+        score, floor_note = _gate_score_with_evidence_floor(compliant, total)
         if gate_source == "response_text":
-            score = min(score, ECHOED_GATE_CAP)
+            score = min(score, ECHOED_GATE_CAP * _gate_evidence_ceiling(total))
         evidence = f"{compliant}/{total} gate(s) compliant"
         if expected_fail:
             evidence += f" ({expected_fail} expected-fail)"
@@ -948,6 +1060,7 @@ def score_gate_compliance(
             evidence += f", {malformed} malformed"
         if noncompliant:
             evidence += f", {noncompliant} non-compliant"
+        evidence += floor_note
         return {"score": round(score, 4), "evidence": evidence}
 
     # Legacy fallback: keyword counting, capped at 0.7
@@ -2245,6 +2358,12 @@ def score_from_results(
             "critical_floor_applied": critical_floor_applied,
             "scoring_formula": "weighted_geometric_mean",
             "epsilon": EPSILON,
+            # Recorded so a round can tell which evidence floor its
+            # gate_compliance numbers were produced under. Phase 3 re-scores
+            # the previous round whenever the scorer changed; this is the
+            # field that makes that change visible in the artifact itself
+            # rather than only in the git history.
+            "gate_evidence_floor": GATE_EVIDENCE_FLOOR,
             "partial_scoring": any_partial,
             "inconclusive_tests": inconclusive_count,
             "schema_version": 2,
