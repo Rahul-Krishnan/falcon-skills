@@ -37,7 +37,18 @@ Two phases, both read-only with respect to the artifact:
               change outside the declared scope, plus untracked files that
               appeared inside scope without being registered.
 
-Exit codes: 0 clean, 1 scope violation, 2 usage error.
+A verify has three possible answers, not two. "I could not see" is the third,
+and collapsing it into `clean` is the one failure mode a safety check must not
+have: the caller records a passing `scope_verify` gate and the run proceeds as
+though the tree had been checked. Every path that cannot answer therefore
+reports `not_measurable` and exits 3, following the vocabulary
+`check_overfit.py` and `check_eval_power.py` already use for the same
+distinction. Three cases reach it: git stops answering between snapshot and
+verify, a nested repository or submodule the guard could not hash, and an
+out-of-scope change git alone cannot attribute to this run (see `verify`).
+
+Exit codes: 0 clean, 1 scope violation, 2 usage error (the check never ran),
+3 not_measurable (the check ran and could not answer). Only 0 is a pass.
 
 Stdlib only. Never modifies tracked content; the manifest is the only file it
 writes, and only under --snapshot.
@@ -55,13 +66,32 @@ from pathlib import Path
 
 # Files that change as a side effect of normal tool use and would otherwise
 # produce a violation on every run.
-IGNORED_NAMES = {".DS_Store"}
-IGNORED_PARTS = {"__pycache__", ".git", ".pytest_cache"}
+IGNORED_NAMES = {".DS_Store", "Thumbs.db", ".coverage"}
+
+# Directories holding tool output rather than source. A lint, type-check, or
+# coverage run *during* a round writes into these, and `--ignored=traditional`
+# lists such a file individually whenever the `.gitignore` entry names it one
+# by one instead of collapsing the whole directory. Without this list an
+# incidental `ruff` invocation halts the round with a scope violation the run
+# had no way to avoid. Only caches and dependency trees belong here: a
+# directory that can hold hand-written source does not.
+IGNORED_PARTS = {
+    "__pycache__", ".git", ".pytest_cache", ".ruff_cache", ".mypy_cache",
+    ".pytype", ".tox", ".nox", ".hypothesis", "htmlcov", ".ipynb_checkpoints",
+    "node_modules", ".venv", "venv", ".cache", ".gradle", ".terraform",
+    ".next", ".nuxt", ".turbo", ".parcel-cache",
+}
 
 # Backup and working files hone and workout create by design.
 IGNORED_SUFFIXES = (".pyc", ".pre-hone", ".pre-workout", ".pre-audit", ".pre-enrich")
 
 ARTIFACT_TYPES = ("skill", "command", "hook", "script")
+
+# One place the caller's branch table is defined. `not_measurable` gets its own
+# code rather than sharing 1 with `scope_violation`, because the two demand
+# opposite responses: a violation says revert the listed paths, and
+# not_measurable says revert nothing because nothing here knows what to revert.
+VERDICT_EXITS = {"clean": 0, "scope_violation": 1, "not_measurable": 3}
 
 DEFAULT_MAX_FILES = 20000
 
@@ -195,6 +225,27 @@ def _git_tracked(root: Path) -> set[str] | None:
     return set(_nul_list(out))
 
 
+def _git_gitlinks(root: Path) -> list[str] | None:
+    """Registered submodules under `root`, as root-relative paths.
+
+    A submodule is a gitlink: one index entry with mode 160000 whose content
+    lives in another repository. `git status` reports it as a single path with
+    no trailing slash, and `Path.is_file()` calls it absent, so the classifier
+    used to bucket a content change inside a submodule as `removed` and tell
+    the caller to revert a directory the manifest holds no content for.
+    """
+    out = _git(root, "ls-files", "--stage", "-z")
+    if out is None:
+        return None
+    links: list[str] = []
+    for record in _nul_list(out):
+        # `<mode> <sha> <stage>\t<path>`
+        head, _, path = record.partition("\t")
+        if head.startswith("160000") and path:
+            links.append(_unquote_git_path(path))
+    return links
+
+
 def _git_file_count(root: Path) -> int | None:
     """How many files git would enumerate under `root` (tracked + untracked).
 
@@ -208,8 +259,10 @@ def _git_file_count(root: Path) -> int | None:
     return len(_nul_list(tracked)) + len(_nul_list(others))
 
 
-def _git_status_entries(root: Path) -> list[tuple[str, str]] | None:
-    """(status code, root-relative path) for everything git reports dirty.
+def _git_status(root: Path) -> tuple[list[tuple[str, str]], list[str]] | None:
+    """`((status code, root-relative path), ...)` plus the paths git cannot see into.
+
+    The second list is the one that stops this from being a fail-open check.
 
     `git status --porcelain` prints paths relative to the *repository* root,
     never to `--root`. The manifest, `--scope`, and `_in_scope` all speak
@@ -236,6 +289,14 @@ def _git_status_entries(root: Path) -> list[tuple[str, str]] | None:
     hides entirely. Wholly-ignored *directories* still collapse to one entry
     and are skipped -- that is the point, since they are the `node_modules`
     and `.venv` trees this rewrite exists to stop walking.
+
+    A collapsed entry that is NOT ignored is a different animal and used to be
+    dropped by the same branch. `--untracked-files=all` expands every ordinary
+    untracked directory, so the only thing left collapsing is a directory git
+    declines to look inside: a nested repository. Dropping it made every edit
+    within that repository invisible and the verdict `clean`. Those paths come
+    back as the second return value, and the caller hashes them itself or says
+    it could not.
     """
     stdout = _git(root, "status", "--porcelain", "--untracked-files=all",
                   "--ignored=traditional")
@@ -251,35 +312,53 @@ def _git_status_entries(root: Path) -> list[tuple[str, str]] | None:
     toplevel_resolved = Path(_real(toplevel))
 
     entries: list[tuple[str, str]] = []
+    opaque: list[str] = []
     for line in stdout.splitlines():
         if len(line) <= 3:
             continue
         code = line[:2]
         entry = _porcelain_path(line)
-        if entry.endswith("/"):
-            # A collapsed directory (an ignored tree). Not a file path.
-            continue
+        collapsed = entry.endswith("/")
         try:
             relative = (toplevel_resolved / entry).relative_to(root_resolved)
         except ValueError:
             # Dirty, but outside the guarded tree entirely. Not this run's
             # business either way, and reporting it would be noise.
             continue
+        if collapsed:
+            # An ignored tree is collapsed on purpose and stays skipped. Any
+            # other collapsed directory is a nested repository git will not
+            # look inside, and dropping it is how edits in there went unseen.
+            if code != "!!" and not _is_ignored(relative):
+                opaque.append(str(relative))
+            continue
         entries.append((code, str(relative)))
-    return entries
+
+    gitlinks = _git_gitlinks(root)
+    if gitlinks is None:
+        return None
+    # `ls-files` prints paths relative to its working directory, so these are
+    # already root-relative and already scoped to root. Rebasing them onto the
+    # repository toplevel the way the status lines above are rebased would
+    # double the prefix whenever root sits below the toplevel.
+    opaque.extend(link for link in gitlinks if not _is_ignored(Path(link)))
+    # A submodule can also appear as a dirty entry; the opaque handling owns it.
+    opaque_set = set(opaque)
+    entries = [(code, rel) for code, rel in entries if rel not in opaque_set]
+    return entries, sorted(opaque_set)
 
 
 def _git_changed(root: Path) -> list[str] | None:
     """Root-relative paths git reports as dirty, or None outside a repo.
 
     `.gitignore`d entries are excluded: they are tracked for *attribution*
-    (see `_git_status_entries`) but calling them "dirty" would flood
+    (see `_git_status`) but calling them "dirty" would flood
     `preexisting_dirty_out_of_scope` with build output.
     """
-    entries = _git_status_entries(root)
-    if entries is None:
+    status = _git_status(root)
+    if status is None:
         return None
-    return [path for code, path in entries if code != "!!"]
+    return [path for code, path in status[0] if code != "!!"]
 
 
 _C_ESCAPES = {
@@ -435,17 +514,25 @@ def snapshot_state(root: Path, exclude: set[Path] | None = None,
 
     Both sets are small. The clean-tracked majority, which is the whole cost
     of the old rglob-everything manifest, is stored as nothing at all.
+
+    The exception is a nested repository or a registered submodule. The outer
+    git knows nothing about their contents, so neither "clean in git" nor
+    "dirty in git" means anything there and the cheap accounting above cannot
+    be applied. Those subtrees are hashed in full, exactly as walk mode hashes
+    an install directory, and a subtree too large or unreadable to hash is
+    recorded under `unmeasurable` rather than dropped.
     """
     excluded = {_real(p) for p in (exclude or set())}
-    entries = _git_status_entries(root)
+    status = _git_status(root)
     tracked = _git_tracked(root)
-    if entries is None or tracked is None:
+    if status is None or tracked is None:
         # Not a repository (or git is unavailable): walk it. These roots are
         # install directories, which are small.
         return {
             "mode": "walk",
             "files": build_manifest(root, exclude, max_files),
         }
+    entries, opaque = status
 
     dirty_tracked: dict[str, str | None] = {}
     untracked: dict[str, str | None] = {}
@@ -460,16 +547,46 @@ def snapshot_state(root: Path, exclude: set[Path] | None = None,
             dirty_tracked[rel] = digest
         else:
             untracked[rel] = digest
+
+    nested, unmeasurable = _hash_opaque(root, opaque, exclude, max_files)
     return {
         "mode": "git",
         "dirty_tracked": dirty_tracked,
         "untracked": untracked,
+        "nested": nested,
+        "unmeasurable": unmeasurable,
     }
+
+
+def _hash_opaque(root: Path, opaque: list[str], exclude: set[Path] | None,
+                 max_files: int) -> tuple[dict[str, dict], list[str]]:
+    """Hash each subtree git cannot see into; name the ones that could not be.
+
+    Returns `({subtree: {path relative to the subtree: digest}}, unmeasurable)`.
+    A subtree over `--max-files` or unreadable goes in the second list, which
+    is what makes the verify report `not_measurable` instead of `clean`.
+    """
+    nested: dict[str, dict] = {}
+    unmeasurable: list[str] = []
+    for rel in opaque:
+        subtree = root / rel
+        if not subtree.is_dir():
+            unmeasurable.append(rel)
+            continue
+        try:
+            nested[rel] = build_manifest(subtree, exclude, max_files)
+        except (TooManyFiles, OSError):
+            unmeasurable.append(rel)
+    return nested, sorted(unmeasurable)
 
 
 def state_size(state: dict) -> int:
     if state.get("mode") == "git":
-        return len(state.get("dirty_tracked", {})) + len(state.get("untracked", {}))
+        return (
+            len(state.get("dirty_tracked", {}))
+            + len(state.get("untracked", {}))
+            + sum(len(files) for files in state.get("nested", {}).values())
+        )
     return len(state.get("files", {}))
 
 
@@ -478,18 +595,47 @@ def state_size(state: dict) -> int:
 # --------------------------------------------------------------------------
 
 
+class Blind(Exception):
+    """Nothing about the tree could be read, so there is no report to build."""
+
+    def __init__(self, reasons: list[str]):
+        super().__init__("; ".join(reasons))
+        self.reasons = reasons
+
+
 def _classify_git(root: Path, state: dict,
                   exclude: set[Path] | None) -> tuple[list[str], list[str],
-                                                      list[str], list[str] | None]:
-    """(modified, added, removed, git_changed) for a git-mode manifest."""
+                                                      list[str], list[str],
+                                                      set[str], list[str]]:
+    """(modified, added, removed, git_changed, unattributable, blind) for git mode.
+
+    `unattributable` names the changes the manifest holds no pre-image for.
+    They are real changes, but nothing here can say whether this run made them
+    or a concurrent writer did, which is exactly the distinction the caller's
+    revert instruction depends on.
+
+    `blind` names the subtrees that could not be read. It is returned rather
+    than raised because a partly-readable tree still has findings worth
+    reporting: an unhashable submodule must not swallow the out-of-scope edit
+    the rest of the walk did see.
+
+    `Blind` IS raised for the one case where nothing at all was observed, git
+    itself going quiet. The old code returned an empty change list there, which
+    `verify` rendered as `verdict: "clean"` and the caller recorded as a
+    passing `scope_verify` gate: a guard reporting a clean tree it never read.
+    """
     excluded = {_real(p) for p in (exclude or set())}
     dirty_snapshot = state.get("dirty_tracked", {})
     untracked_snapshot = state.get("untracked", {})
 
-    entries = _git_status_entries(root)
+    status = _git_status(root)
     tracked_now = _git_tracked(root)
-    if entries is None or tracked_now is None:
-        return [], [], [], None
+    if status is None or tracked_now is None:
+        raise Blind([
+            "git could not report the state of the watched tree at verify "
+            "time, so no change inside it could be seen"
+        ])
+    entries, opaque_now = status
 
     dirty_now = {rel for _code, rel in entries if not _is_ignored(Path(rel))}
     # A file recorded at snapshot that git no longer reports still needs
@@ -501,6 +647,7 @@ def _classify_git(root: Path, state: dict,
     modified: list[str] = []
     added: list[str] = []
     removed: list[str] = []
+    unattributable: set[str] = set()
     for rel in sorted(candidates):
         if _is_ignored(Path(rel)):
             continue
@@ -515,32 +662,125 @@ def _classify_git(root: Path, state: dict,
             existed = before is not None
         elif rel in tracked_now:
             # Tracked now and absent from the dirty snapshot means it was
-            # clean when we started. Git says it is dirty now, so this run is
-            # the only thing that can have changed it -- no stored hash needed.
+            # clean when we started, so git can say the file changed during
+            # the round. What git CANNOT say is who changed it: the user's
+            # editor and a second session in the same checkout produce this
+            # shape too. No pre-image was stored, so the change is real and
+            # unattributable, and the caller must not revert it blind.
             before, existed = CLEAN_TRACKED, True
         else:
             before, existed = None, False
 
         exists_now = path.is_file()
+        changed = False
         if existed and not exists_now:
             removed.append(rel)
+            changed = True
         elif not existed and exists_now:
             added.append(rel)
+            changed = True
         elif existed and exists_now:
-            if before is CLEAN_TRACKED:
+            if before is CLEAN_TRACKED or _hash_file(path) != before:
                 modified.append(rel)
-            elif _hash_file(path) != before:
-                modified.append(rel)
+                changed = True
+        if changed and before is CLEAN_TRACKED:
+            unattributable.add(rel)
+
+    nested_modified, nested_added, nested_removed, nested_blind = _classify_nested(
+        root, state, opaque_now, exclude)
+    modified.extend(nested_modified)
+    added.extend(nested_added)
+    removed.extend(nested_removed)
 
     git_changed = [path for code, path in entries if code != "!!"]
-    return modified, added, removed, git_changed
+    return modified, added, removed, git_changed, unattributable, nested_blind
+
+
+def _classify_nested(root: Path, state: dict, opaque_now: list[str],
+                     exclude: set[Path] | None) -> tuple[list[str], list[str],
+                                                         list[str], list[str]]:
+    """Compare the subtrees git cannot see into, from their stored hashes.
+
+    Every path the snapshot hashed is re-hashed, plus every path that became
+    opaque during the round. A subtree the snapshot could not hash, or one
+    that cannot be hashed now, produces a blind reason rather than silence:
+    `~/.claude/skills` and `~/.claude/scripts` are separate repositories inside
+    `~/.claude`, which is the exact tree a run on a hook or a script watches,
+    so this is the ordinary case here rather than an exotic one.
+    """
+    stored: dict[str, dict] = state.get("nested", {}) or {}
+    unmeasurable = list(state.get("unmeasurable", []) or [])
+    # The snapshot's own budget, so a subtree that fitted then and has since
+    # grown past it is reported rather than walked without limit.
+    limit = state.get("max_files")
+    if not isinstance(limit, int):
+        limit = DEFAULT_MAX_FILES
+    blind = [
+        f"subtree {rel!r} is a nested repository or submodule the snapshot "
+        f"could not hash, so changes inside it were not checked"
+        for rel in unmeasurable
+    ]
+
+    modified: list[str] = []
+    added: list[str] = []
+    removed: list[str] = []
+    for rel in sorted((set(stored) | set(opaque_now)) - set(unmeasurable)):
+        before = stored.get(rel)
+        subtree = root / rel
+        if subtree.is_dir():
+            try:
+                now = build_manifest(subtree, exclude, limit)
+            except (TooManyFiles, OSError):
+                blind.append(
+                    f"subtree {rel!r} could not be hashed at verify time, so "
+                    f"changes inside it were not checked")
+                continue
+        elif before is None:
+            continue
+        else:
+            now = {}
+        if before is None:
+            # Opaque now, absent from the snapshot: the whole subtree arrived
+            # during the round.
+            added.extend(str(Path(rel) / inner) for inner in sorted(now))
+            continue
+        modified.extend(
+            str(Path(rel) / inner) for inner in sorted(set(before) & set(now))
+            if before[inner] != now[inner]
+        )
+        added.extend(str(Path(rel) / inner) for inner in sorted(set(now) - set(before)))
+        removed.extend(
+            str(Path(rel) / inner) for inner in sorted(set(before) - set(now)))
+    return modified, added, removed, blind
 
 
 def verify(root: Path, state: dict, scope: list[str],
            exclude: set[Path] | None = None) -> dict:
-    """Compare the live tree against a snapshot and bucket every change."""
-    if state.get("mode") == "git":
-        modified, added, removed, git_changed = _classify_git(root, state, exclude)
+    """Compare the live tree against a snapshot and bucket every change.
+
+    Three verdicts, and the third one is the point. `clean` means the tree was
+    read and held no out-of-scope change. `scope_violation` means it held one
+    the manifest can attribute to this run, which is the only kind the caller
+    may revert. `not_measurable` means the question was not answered: git went
+    quiet, a nested repository could not be hashed, or an out-of-scope file
+    changed with no stored pre-image to say who changed it. That last case is
+    the whole reason `unattributed_out_of_scope` exists as a bucket separate
+    from `violations`. A tracked file that was clean at snapshot and is dirty
+    now looks identical whether this run wrote it or the user's editor did,
+    and the documented response to a violation is `git checkout` of the listed
+    paths, so putting it in `violations` turns someone else's uncommitted work
+    into a deletion. Reporting it and halting loses a round; reverting it
+    loses the work.
+    """
+    unattributable: set[str] = set()
+    blind: list[str] = []
+    mode = state.get("mode")
+    if mode == "git":
+        try:
+            (modified, added, removed, git_changed,
+             unattributable, blind) = _classify_git(root, state, exclude)
+        except Blind as exc:
+            return _blind_report(root, scope, state, exc.reasons)
     else:
         manifest = state.get("files", {})
         current = build_manifest(root, exclude)
@@ -549,11 +789,21 @@ def verify(root: Path, state: dict, scope: list[str],
         )
         added = sorted(set(current) - set(manifest))
         removed = sorted(set(manifest) - set(current))
+        # In walk mode the hash manifest IS the check, so git having nothing to
+        # say costs no visibility. It only feeds the informational
+        # `preexisting_dirty_out_of_scope` list.
         git_changed = _git_changed(root)
 
     changed = sorted(set(modified) | set(added) | set(removed))
-    violations = sorted(p for p in changed if not _in_scope(p, scope))
+    out_of_scope = [p for p in changed if not _in_scope(p, scope)]
+    violations = sorted(p for p in out_of_scope if p not in unattributable)
+    unattributed = sorted(p for p in out_of_scope if p in unattributable)
     in_scope_new = sorted(p for p in added if _in_scope(p, scope))
+    blind.extend(
+        f"{path!r} changed outside scope during the round and the manifest "
+        f"holds no pre-image for it, so this run cannot be shown to be what "
+        f"changed it" for path in unattributed
+    )
 
     preexisting = []
     if git_changed is not None:
@@ -574,24 +824,63 @@ def verify(root: Path, state: dict, scope: list[str],
             and not _in_scope(p, scope)
         )
 
-    clean = not violations
+    if violations:
+        verdict = "scope_violation"
+    elif blind:
+        verdict = "not_measurable"
+    else:
+        verdict = "clean"
     report = {
-        "verdict": "clean" if clean else "scope_violation",
+        "verdict": verdict,
         "root": str(root),
         "scope": scope,
+        "mode": mode,
         "modified_in_scope": sorted(p for p in modified if _in_scope(p, scope)),
         "new_files_in_scope": in_scope_new,
         "violations": violations,
+        # Changed out of scope, attributable to nobody. Report, never revert.
+        "unattributed_out_of_scope": unattributed,
         # Dirty in git before this run started. Informational: never revert these.
         "preexisting_dirty_out_of_scope": preexisting,
+        "not_measurable_reasons": blind,
         "git_available": git_changed is not None,
         "counts": {
             "modified": len(modified),
             "added": len(added),
             "removed": len(removed),
             "violations": len(violations),
+            "unattributed": len(unattributed),
             "preexisting_dirty": len(preexisting),
         },
+    }
+    fallback = state.get("root_fallback")
+    if fallback:
+        report["root_fallback"] = fallback
+    return report
+
+
+def _blind_report(root: Path, scope: list[str], state: dict,
+                  reasons: list[str]) -> dict:
+    """The report for a verify that could not read the tree it was asked about.
+
+    Same shape as a normal report so the caller parses one thing, with empty
+    change lists and a verdict that is not a pass. The empty lists used to be
+    the whole report, under `verdict: "clean"`.
+    """
+    report = {
+        "verdict": "not_measurable",
+        "root": str(root),
+        "scope": scope,
+        "mode": state.get("mode"),
+        "modified_in_scope": [],
+        "new_files_in_scope": [],
+        "violations": [],
+        "unattributed_out_of_scope": [],
+        "preexisting_dirty_out_of_scope": [],
+        "not_measurable_reasons": reasons,
+        "git_available": False,
+        "counts": {"modified": 0, "added": 0, "removed": 0, "violations": 0,
+                   "unattributed": 0, "preexisting_dirty": 0},
     }
     fallback = state.get("root_fallback")
     if fallback:
@@ -735,6 +1024,7 @@ def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
         _fail(f"cannot write manifest {args.manifest}: {exc}")
 
     recorded = state_size(state)
+    unmeasurable = list(state.get("unmeasurable", []) or [])
     report = {
         "verdict": "snapshot",
         "files_recorded": recorded,
@@ -742,6 +1032,8 @@ def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
         "root": str(root),
         "scope": scope,
         "mode": state.get("mode"),
+        "nested_repos": sorted(state.get("nested", {}) or {}),
+        "unmeasurable": unmeasurable,
     }
     if fallback:
         report["root_fallback"] = fallback
@@ -753,6 +1045,11 @@ def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
         print(f"SNAPSHOT: {recorded} file(s) recorded to {args.manifest}")
         print(f"  root:  {root}")
         print(f"  scope: {', '.join(scope) if scope else '(none declared)'}")
+        for rel in report["nested_repos"]:
+            print(f"  nested repository hashed in full: {rel}")
+        for rel in unmeasurable:
+            print(f"  WARNING: {rel} could not be hashed; --verify will report "
+                  f"not_measurable rather than clean")
         if fallback:
             print("  " + _fallback_note(fallback))
     sys.exit(0)
@@ -817,6 +1114,14 @@ def _run_verify(args, artifact: Path | None, manifest_path: Path,
               f"{counts['removed']} removed, {counts['violations']} out of scope")
         for path in report["violations"]:
             print(f"  VIOLATION: {path}")
+        unattributed = report["unattributed_out_of_scope"]
+        if unattributed:
+            print(f"  NOTE: {len(unattributed)} file(s) changed out of scope "
+                  "during the round with no recorded pre-image, so nothing can "
+                  "say whether this run or another writer changed them. Do NOT "
+                  "revert them; inspect them:")
+            for path in unattributed:
+                print(f"    unattributed: {path}")
         preexisting = report["preexisting_dirty_out_of_scope"]
         if preexisting:
             print(f"  NOTE: {len(preexisting)} file(s) were already uncommitted "
@@ -825,10 +1130,16 @@ def _run_verify(args, artifact: Path | None, manifest_path: Path,
                 print(f"    pre-existing: {path}")
         if report.get("root_fallback"):
             print("  " + _fallback_note(report["root_fallback"]))
-        if not report["git_available"]:
+        for reason in report["not_measurable_reasons"]:
+            print(f"  UNCHECKED: {reason}")
+        if not report["git_available"] and report.get("mode") != "git":
+            # Only true of a walk-mode manifest, which hashes the whole tree.
+            # A git-mode manifest stores no whole-tree hashes, so when git goes
+            # quiet there nothing was checked at all -- and the verdict above
+            # is `not_measurable`, not `clean`.
             print("  NOTE: git unavailable here; hash manifest was the only check")
 
-    sys.exit(0 if report["verdict"] == "clean" else 1)
+    sys.exit(VERDICT_EXITS.get(report["verdict"], 1))
 
 
 if __name__ == "__main__":

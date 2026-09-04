@@ -272,13 +272,15 @@ improvement_plan: {
 
 ### Step 5a: Scope Snapshot (before any edit)
 
-Preference 11 stops hone clobbering someone else's change; nothing stops hone changing a file nobody asked it to touch. Hand the script the artifact path Step 1 discovered and its type, and it derives the guarded tree itself:
+Preference 11 stops hone clobbering someone else's change; nothing stops hone changing a file nobody asked it to touch. Hand the script `{edit_path}` and its type, and it derives the guarded tree itself:
 
 ```bash
 python3 <skill-dir>/scripts/check_scope.py \
-  --artifact "{artifact_path}" --type <skill|command|hook|script> \
+  --artifact "{edit_path}" --type <skill|command|hook|script> \
   --manifest /tmp/scope-${RUN_ID}.json --snapshot --json
 ```
+
+**`{edit_path}`, not `{artifact_path}`.** Phase 1 Step 1 sets both, and for a marketplace or plugin skill they name different files: `{artifact_path}` is the installed copy under `~/.claude/skills/` that hone reads, `{edit_path}` is the repo source that Step 6 below actually writes. Both root and scope derive from whichever path is passed, so snapshotting the read path watches a tree nothing writes to and `--verify` returns `clean` no matter what the checkout did, sibling-artifact edits included. When the two paths are the same file the argument is the same either way, so there is no case where `{artifact_path}` is the better one to pass here.
 
 The watch root and the permitted scope are separate knobs and pull in opposite directions, so neither is a `dirname` of the other. A skill at `plugins/p/skills/s/` gets a watch root of the whole repository -- otherwise an edit to `plugins/p/commands/`, a sibling plugin, or a repo-root `scripts/` is invisible and `--verify` reports `clean` however much was changed -- and a scope of just its own directory. A single-file artifact (command, hook, or script) gets the narrower pair: the install directory as the watch root, and that one file as the scope, so the sibling hooks in `~/.claude/hooks/` are neither ignored nor editable. Hone discovers artifacts under `~/.claude/skills/`, `$CLAUDE_PLUGIN_ROOT/skills/`, `~/.claude/plugins/*/skills/`, and the other roots in `references/artifact-profiles.md`; the derivation covers all of them.
 
@@ -351,17 +353,36 @@ python3 <skill-dir>/scripts/check_scope.py \
 
 Nothing from Step 5a needs reproducing: the manifest records the root and the scope, and `--verify` reads them back out. That is deliberate. Step 5a and Step 6a are separate Bash tool calls, shell state does not persist between them, and a re-derived `$SCOPE_ROOT` that disagrees with the snapshotted one compares two unrelated trees.
 
-**Emit the `scope_verify` gate event on both paths.** The clean path is the one that gets forgotten, and a check that only records itself when it fails is indistinguishable from a check that never ran:
+**Emit the `scope_verify` gate event on every path.** The clean path is the one that gets forgotten, and a check that only records itself when it fails is indistinguishable from a check that never ran:
 
 ```json
 {"step": "scope_verify", "judge": "automated", "result": "pass", "ts": "<ISO timestamp>"}
 ```
 
-On `clean`: emit that event with `result: "pass"` and continue.
+**Branch on the exit code.** The verdict prose follows it, but the exit code is what a Bash call gives you without parsing anything, and there are four of them:
 
-On `scope_violation`: revert **only** the paths listed under `violations`, emit the same event with `result: "fail"`, and halt the round.
+| exit | `verdict` | what happened | what to do |
+|---|---|---|---|
+| 0 | `clean` | the tree was read and holds no out-of-scope change | emit `result: "pass"` and continue |
+| 1 | `scope_violation` | an out-of-scope change with a recorded pre-image, so the manifest attributes it to this round | revert **only** the paths under `violations`, then halt |
+| 2 | (none; the report is on stderr) | the check never ran: the manifest is missing or unreadable. `/tmp` cleared between rounds, a `${RUN_ID}` unrecoverable after compaction, or Step 5a skipped | revert nothing, then halt |
+| 3 | `not_measurable` | the check ran and could not answer. `not_measurable_reasons` says which of the three: git stopped answering, a nested repository or submodule could not be hashed, or an out-of-scope file changed with no recorded pre-image | revert nothing, then halt |
 
-**Revert nothing listed under `preexisting_dirty_out_of_scope`.** Those files were already uncommitted when the run started and are byte-identical to the snapshot, so this run did not touch them. Reverting them destroys whatever uncommitted work was sitting there. Git reports a file dirty relative to HEAD; the manifest reports it relative to this run's start, and only the manifest can attribute a change to you.
+**Only exit 0 is a `pass`.** Exit 2 and exit 3 are the cases this table exists for. Neither is a clean tree; both are the guard saying it does not know, and emitting `result: "pass"` on either records a scope check over a tree nothing looked at. That is strictly worse than having no guard, because the run's gate log then carries positive evidence for a claim nobody verified.
+
+**Halting has a gate shape, and this is it.** `scope_verify` is not in `hone_common.VALIDATION_FAIL_PREFIXES`, so `fail_orders_halt` reads its `fail` as an order to stop the run, and nothing a later round emits can settle it. "Halt the round" therefore means halt the run: emit the failing `scope_verify`, then `workflow_exit`, and stop.
+
+```json
+{"step": "scope_verify", "judge": "automated", "result": "fail", "ts": "<ISO timestamp>"}
+{"step": "workflow_exit", "judge": "self-check", "result": "fail", "ts": "<ISO timestamp>"}
+```
+
+That pair is a valid halt tail (`hone_common.is_halt_tail`), so a run that halts as instructed scores as compliant. Emitting `phase2_to_phase3` after the failing `scope_verify` is the shape that draws the `validate_gates.py` warning and the `score_gate_compliance` penalty, and it describes a run that carried on past its own halt order. Put the paths from `violations`, `unattributed_out_of_scope`, and `not_measurable_reasons` in the run summary so the human has something to act on.
+
+**Revert nothing listed under `preexisting_dirty_out_of_scope` or `unattributed_out_of_scope`.** Only the manifest can attribute a change to this run, and it holds no pre-image for either list.
+
+- `preexisting_dirty_out_of_scope` was already uncommitted when the run started and is byte-identical to the snapshot, so this run did not touch it. Git reports a file dirty relative to HEAD; the manifest reports it relative to this run's start.
+- `unattributed_out_of_scope` did change during the round, but it was clean in git at snapshot so nothing was hashed, and git alone cannot tell your edit from one the user's editor or a concurrent session made in the same checkout. Reverting it destroys uncommitted work this run never created, which is the one outcome a safety check must not cause. It is a separate list from `violations` for exactly that reason, and its presence is what makes the verdict `not_measurable` rather than `clean` -- the change is reported and the round halts, but no destructive instruction rides on a guess.
 
 ### Step 7: Description Trigger Testing (skills and commands only)
 
@@ -446,7 +467,7 @@ After writing the handoff, set `steps.phase2_trigger_test` to `"done"` in the wo
 - `id` is unique **within the artifact's whole ledger**, not within this run. `F1` above is round 1 of the first run; a later run's first finding is the next unused number, not `F1` again. The reopen counter is cross-run by design, and reusing ids makes two unrelated findings look like one that keeps coming back. `check_convergence.py` defends itself by pairing the id with the finding's summary wording, so a reused id is safe rather than fatal — but the pairing depends on summaries staying verbatim across restatements, and unique ids are what make it exact.
 - Each round **appends a new entry** and restates every finding still live, carried-over ones included. That repetition is what lets the check see a finding stay open across rounds; it is also why those signals are scoped to the current run rather than the whole file.
 - Findings go **inside** the round entry. A bare array, or findings at the top level, is rejected with exit 2.
-- Record each constraint ablation (SKILL.md Phase 2 Step 6a) and its outcome here too, as a finding whose `status` is `fixed` (constraint removed, nothing regressed) or `rejected` (restored because a test regressed).
+- Record each constraint ablation (SKILL.md Phase 2 Step 6b) and its outcome here too, as a finding whose `status` is `fixed` (constraint removed, nothing regressed) or `rejected` (restored because a test regressed).
 
 **When `check_convergence.py` exits 2.** Exit 2 means the ledger is missing or unparseable, and it is the one exit code that is a real failure rather than a verdict. It is repairable, and the repair belongs to this step:
 

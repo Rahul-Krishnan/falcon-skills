@@ -468,28 +468,32 @@ class TestSkillInsideARepository(unittest.TestCase):
                          os.path.realpath(self.repo))
         self.assertEqual(payload["scope"], ["plugins/p/skills/s"])
 
-    def test_sibling_command_and_repo_root_script_are_both_violations(self):
+    def test_sibling_command_and_repo_root_script_are_reported_unattributed(self):
         self.assertEqual(self._snapshot().returncode, 0)
         (self.skill / "SKILL.md").write_text("skill v2\n")
         (self.repo / "plugins" / "p" / "commands" / "c.md").write_text("cmd v2\n")
         (self.repo / "scripts" / "x.py").write_text("print(2)\n")
         (self.repo / "plugins" / "q" / "SKILL.md").write_text("sibling v2\n")
         run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
-        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         report = json.loads(run.stdout)
-        self.assertEqual(report["violations"], [
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["unattributed_out_of_scope"], [
             "plugins/p/commands/c.md",
             "plugins/q/SKILL.md",
             "scripts/x.py",
         ])
+        # Nothing here may be reverted: the caller's revert list stays empty.
+        self.assertEqual(report["violations"], [])
         self.assertEqual(report["modified_in_scope"], ["plugins/p/skills/s/SKILL.md"])
 
-    def test_a_clean_tracked_file_is_attributed_without_being_hashed(self):
-        """Acceptance 5: no pre-image stored, and the edit is still caught.
+    def test_a_clean_tracked_file_change_is_seen_but_not_attributed(self):
+        """Acceptance 5: no pre-image stored, so the change is seen, not blamed.
 
-        A file git calls clean at snapshot time needs no hash: if git calls it
-        dirty at verify time, this run is the only thing that can have done it.
-        That is what makes watching a whole repository affordable.
+        Git calling a file clean at snapshot and dirty at verify proves it
+        changed during the round. It does not prove this run changed it -- the
+        user's editor and a second session in the same checkout look identical
+        -- so the change reaches the report without reaching the revert list.
         """
         self.assertEqual(self._snapshot().returncode, 0)
         payload = json.loads(self.manifest.read_text())
@@ -500,8 +504,12 @@ class TestSkillInsideARepository(unittest.TestCase):
 
         (self.repo / "lib" / "shared.md").write_text("clean v2\n")
         run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
-        self.assertEqual(run.returncode, 1, run.stdout)
-        self.assertEqual(json.loads(run.stdout)["violations"], ["lib/shared.md"])
+        self.assertEqual(run.returncode, 3, run.stdout)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["unattributed_out_of_scope"], ["lib/shared.md"])
+        self.assertEqual(report["violations"], [])
+        self.assertTrue(report["not_measurable_reasons"])
 
     def test_untracked_file_created_out_of_scope_is_a_violation(self):
         """Acceptance 8: the case a git diff cannot see at all."""
@@ -526,14 +534,28 @@ class TestSkillInsideARepository(unittest.TestCase):
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("scripts/ignored-out.py", json.loads(run.stdout)["violations"])
 
-    def test_a_file_deleted_out_of_scope_is_a_violation(self):
+    def test_a_clean_tracked_file_deleted_out_of_scope_is_unattributed(self):
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.repo / "lib" / "shared.md").unlink()
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 3, run.stdout)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["unattributed_out_of_scope"], ["lib/shared.md"])
+        self.assertEqual(report["violations"], [])
+        self.assertEqual(report["counts"]["removed"], 1)
+
+    def test_a_dirty_file_deleted_out_of_scope_is_a_violation(self):
+        """The manifest holds a pre-image here, so the change is attributable."""
+        (self.repo / "lib" / "shared.md").write_text("dirty before the run\n")
         self.assertEqual(self._snapshot().returncode, 0)
         (self.repo / "lib" / "shared.md").unlink()
         run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
         self.assertEqual(run.returncode, 1, run.stdout)
         report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "scope_violation")
         self.assertEqual(report["violations"], ["lib/shared.md"])
-        self.assertEqual(report["counts"]["removed"], 1)
+        self.assertEqual(report["unattributed_out_of_scope"], [])
 
     def test_preexisting_dirty_is_reported_and_not_violated(self):
         """Acceptance 4: dirty before the run, untouched by it."""
@@ -682,6 +704,215 @@ class TestCliUsageErrors(unittest.TestCase):
         run = run_cli("--manifest", str(self.manifest), "--verify")
         self.assertEqual(run.returncode, 2, run.stdout)
         self.assertIn("no scope", run.stderr)
+
+    def test_verify_with_a_missing_manifest_is_a_usage_error(self):
+        """Exit 2 is "the check never ran", and the caller has a branch for it."""
+        run = run_cli("--manifest", str(self.tmp / "gone.json"), "--verify")
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("manifest not found", run.stderr)
+
+
+class TestGitGoesQuietAtVerify(unittest.TestCase):
+    """r1-B1: a guard that cannot see must never report `clean`.
+
+    Snapshot a repo, change two files out of scope, then make git unanswerable
+    before verifying. The old code turned that into zero observed changes, a
+    `clean` verdict and exit 0, which the caller records as a passing
+    `scope_verify` gate on a tree nothing looked at.
+    """
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        self.skill = self.repo / "skills" / "s"
+        self.skill.mkdir(parents=True)
+        (self.skill / "SKILL.md").write_text("skill v1\n")
+        (self.repo / "lib").mkdir()
+        (self.repo / "lib" / "shared.md").write_text("clean v1\n")
+        if not init_repo(self.repo):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+        run = run_cli("--artifact", str(self.skill / "SKILL.md"), "--type", "skill",
+                      "--manifest", str(self.manifest), "--snapshot", "--json")
+        self.assertEqual(run.returncode, 0, run.stderr)
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def test_an_unanswerable_git_reports_not_measurable(self):
+        (self.repo / "lib" / "shared.md").write_text("clobbered\n")
+        (self.repo / "lib" / "new.md").write_text("also clobbered\n")
+        shutil.rmtree(self.repo / ".git")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertFalse(report["git_available"])
+        self.assertTrue(report["not_measurable_reasons"])
+
+    def test_the_hash_manifest_note_is_not_printed_for_a_git_manifest(self):
+        """r1-B1: a git-mode manifest stores no whole-tree hashes.
+
+        The old text claimed the hash manifest had been the only check, on a
+        manifest that holds no such hashes: nothing at all had been checked.
+        """
+        shutil.rmtree(self.repo / ".git")
+        run = run_cli("--manifest", str(self.manifest), "--verify")
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        self.assertNotIn("hash manifest was the only check", run.stdout)
+        self.assertIn("UNCHECKED", run.stdout)
+
+
+class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
+    """r1-B4: `git status` collapses a nested repo, and a gitlink is not a file.
+
+    `~/.claude/skills` and `~/.claude/scripts` are separate repositories inside
+    the `~/.claude` repo, which is exactly the tree a run on a hook or a script
+    watches, so this is the ordinary shape here rather than an exotic one.
+    """
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        self.skill = self.repo / "skills" / "s"
+        self.skill.mkdir(parents=True)
+        (self.skill / "SKILL.md").write_text("skill v1\n")
+        if not init_repo(self.repo):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.nested = self.repo / "nested"
+        self.nested.mkdir()
+        (self.nested / "other.md").write_text("nested v1\n")
+        if not init_repo(self.nested):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _snapshot(self):
+        return run_cli("--artifact", str(self.skill / "SKILL.md"), "--type", "skill",
+                       "--manifest", str(self.manifest), "--snapshot", "--json")
+
+    def test_the_snapshot_hashes_the_nested_repository(self):
+        snap = self._snapshot()
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        self.assertIn("nested", json.loads(snap.stdout)["nested_repos"])
+        payload = json.loads(self.manifest.read_text())
+        self.assertIn("other.md", payload["nested"]["nested"])
+
+    def test_an_edit_inside_a_nested_repository_is_a_violation(self):
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.nested / "other.md").write_text("clobbered by the run\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "scope_violation")
+        self.assertIn("nested/other.md", report["violations"])
+
+    def test_a_new_file_in_a_nested_repository_is_a_violation(self):
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.nested / "added.md").write_text("brand new\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("nested/added.md", json.loads(run.stdout)["violations"])
+
+    def test_an_untouched_nested_repository_verifies_clean(self):
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.skill / "SKILL.md").write_text("skill v2\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(json.loads(run.stdout)["verdict"], "clean")
+
+    def test_a_registered_submodule_is_hashed_not_called_removed(self):
+        add = subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "protocol.file.allow=always",
+             "submodule", "add", "-q", str(self.nested), "sub"],
+            capture_output=True, text=True)
+        if add.returncode != 0:  # pragma: no cover - old git
+            self.skipTest("git submodule add unavailable")
+        self.assertEqual(self._snapshot().returncode, 0)
+        payload = json.loads(self.manifest.read_text())
+        self.assertIn("sub", payload["nested"])
+
+        (self.repo / "sub" / "other.md").write_text("clobbered inside a submodule\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertIn("sub/other.md", report["violations"])
+        # The gitlink path itself is never reported as a removed file.
+        self.assertNotIn("sub", report["violations"])
+
+    def test_a_submodule_is_seen_when_the_root_sits_below_the_toplevel(self):
+        """The two path namespaces again: `ls-files` is root-relative already.
+
+        `git status` prints repository-toplevel-relative paths and has to be
+        rebased onto the watch root; `git ls-files` prints root-relative ones
+        and must not be. Rebasing both doubles the prefix whenever the watch
+        root sits below the repository root, which is the documented hook and
+        script invocation, and the submodule falls back out of the report.
+        """
+        add = subprocess.run(
+            ["git", "-C", str(self.repo), "-c", "protocol.file.allow=always",
+             "submodule", "add", "-q", str(self.nested), "skills/sub"],
+            capture_output=True, text=True)
+        if add.returncode != 0:  # pragma: no cover - old git
+            self.skipTest("git submodule add unavailable")
+        run = run_cli("--root", str(self.repo / "skills"), "--scope", "s",
+                      "--manifest", str(self.manifest), "--snapshot", "--json")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout)["nested_repos"], ["sub"])
+
+        (self.repo / "skills" / "sub" / "other.md").write_text("clobbered\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertIn("sub/other.md", json.loads(run.stdout)["violations"])
+
+    def test_an_unhashable_subtree_reports_not_measurable(self):
+        snap = run_cli("--root", str(self.repo), "--scope", "skills/s",
+                       "--manifest", str(self.manifest), "--snapshot", "--json",
+                       "--max-files", "0")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        self.assertIn("nested", json.loads(snap.stdout)["unmeasurable"])
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(report["not_measurable_reasons"])
+
+    def test_an_unhashable_subtree_does_not_swallow_a_real_violation(self):
+        """A partly-readable tree still reports what it did read.
+
+        The subtree nobody could hash must not take the actionable revert list
+        down with it: the caller needs both the halt and the paths.
+        """
+        snap = run_cli("--root", str(self.repo), "--scope", "skills/s",
+                       "--manifest", str(self.manifest), "--snapshot", "--json",
+                       "--max-files", "0")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        (self.repo / "outside.md").write_text("untracked and out of scope\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "scope_violation")
+        self.assertIn("outside.md", report["violations"])
+        self.assertTrue(report["not_measurable_reasons"])
+
+
+class TestToolCacheDirectoriesAreIgnored(unittest.TestCase):
+    """r1-S4: a lint run during a round must not halt it."""
+
+    def test_common_caches_are_ignored(self):
+        for rel in (".ruff_cache/x/0.json", ".mypy_cache/3.12/m.data.json",
+                    "node_modules/pkg/index.js", ".venv/lib/site.py",
+                    "htmlcov/index.html", ".tox/py312/log.txt"):
+            self.assertTrue(_is_ignored(Path(rel)), rel)
+
+    def test_source_directories_are_not_ignored(self):
+        for rel in ("scripts/x.py", "src/app/main.py", "dist/bundle.js",
+                    "build/out.txt", "references/notes.md"):
+            self.assertFalse(_is_ignored(Path(rel)), rel)
 
 
 if __name__ == "__main__":
