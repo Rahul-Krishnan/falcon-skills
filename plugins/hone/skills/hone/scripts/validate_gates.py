@@ -44,7 +44,7 @@ import json
 import sys
 from pathlib import Path
 
-from hone_common import derive_gate_mode, is_halt_tail
+from hone_common import derive_gate_mode, fail_is_accounted
 
 VALID_RESULTS = ("pass", "fail")
 
@@ -88,14 +88,26 @@ VALID_JUDGES = _load_valid_judges()
 
 # Events required for each run mode. Handoff events (handoff_<name>) are
 # emitted per validation attempt and are not part of a fixed expected set.
+#
+# `convergence` sits in the two modes that reach Phase 3. SKILL.md's gate
+# table marks it mandatory, and a gate the table calls mandatory that this
+# script does not check is prose: nothing stops a run from omitting it.
+#
+# These are MEMBERSHIP sets, not sequences -- the check below is "was this
+# step emitted at all". They are nonetheless listed in the documented emission
+# order (`phase3_exit` at Phase 3 step 6, then `convergence` at step 7),
+# because a reader who takes the tuple order for the emission order gets the
+# halt shape backwards. That misreading is exactly how `hone_common`'s halt
+# tail came to reject the documented auto-revert halt. The one authoritative
+# statement of the order is `hone_common.PHASE3_HALT_SEQUENCE`.
 REQUIRED_STEPS = {
     "normal": (
-        "phase1_to_phase2", "phase2_to_phase3",
-        "phase3_exit", "workflow_exit",
+        "phase1_to_phase2", "phase2_to_phase3", "phase3_exit",
+        "convergence", "workflow_exit",
     ),
     "fix-only": (
-        "fixonly_entry", "phase2_to_phase3",
-        "phase3_exit", "workflow_exit",
+        "fixonly_entry", "phase2_to_phase3", "phase3_exit",
+        "convergence", "workflow_exit",
     ),
     "error-halt": ("workflow_exit",),
     # Phase 1 found nothing to improve, so Phase 2 and Phase 3 never ran.
@@ -255,8 +267,8 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
         if "rubric" in gate:
             errors.extend(_rubric_errors(index, gate["rubric"]))
 
-    # Fail semantics: terminal, or repaired by a later pass for the same
-    # step. "Terminal" means the pipeline halted at that fail: SKILL.md
+    # Fail semantics: terminal, repaired by a later pass for the same step,
+    # or superseded by a later attempt at it. "Terminal" means the pipeline halted at that fail: SKILL.md
     # mandates a final workflow_exit event before ANY exit, so a legitimate
     # halt (error halt, regression auto-revert) is followed by the rest of
     # the halt sequence, never by unrelated forward progress. Requiring the
@@ -265,22 +277,24 @@ def validate_gates(gates: list, mode: str, resumed: bool = False) -> dict:
     # `workflow_exit` is the whole of that tail: it is the only event SKILL.md
     # mandates after the failure that stopped the run, so the failing step
     # goes to the helper along with the tail. Both files call
-    # hone_common.is_halt_tail, so "the same shape" is now one function rather
-    # than two hand-copied conditions that had already drifted apart.
+    # hone_common.fail_is_accounted, so "the same shape" is now one function
+    # rather than two hand-copied conditions that had already drifted apart.
+    # It carries two cases the hand-copies missed. An authorized restart: the
+    # run halted, recorded `workflow_exit`, and a `resume` records the human
+    # granting more rounds. And a documented in-place retry: the exit-2 ledger
+    # repair emits `convergence:fail` and then a second `convergence` that may
+    # fail too, so a correct repair has no later `pass` and is not its own
+    # halt tail. What it deliberately does NOT accept is a later `pass` for a
+    # gate whose `fail` was a halt order, which is how a run that ignored an
+    # `escalate` and did another round used to score clean.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
-        terminal = is_halt_tail(gates[index + 1 :], gate.get("step"))
-        repaired = any(
-            isinstance(later, dict)
-            and later.get("step") == gate.get("step")
-            and later.get("result") == "pass"
-            for later in gates[index + 1 :]
-        )
-        if not (terminal or repaired):
+        if not fail_is_accounted(gates[index + 1 :], gate.get("step")):
             warnings.append(
                 f"gates[{index}] step '{gate.get('step')}' failed but the run "
-                "continued and no later 'pass' for that step was recorded"
+                "continued: no halt tail behind it, no recorded 'resume' after "
+                "a halt, and no in-place retry of that step"
             )
 
     # Non-string steps already drew a schema error above; keep them out of

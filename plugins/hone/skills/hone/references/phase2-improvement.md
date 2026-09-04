@@ -311,13 +311,13 @@ If this hone pass added or modified handoff interface blocks in the artifact, an
 - The artifact is a hook or script (tested via direct Bash invocation, not state files)
 - The artifact already has a validator (check for existing `validate_handoffs.py` in the directory)
 
-**Gate: P2 Step 6 → Phase 3 (checklist)**
+**Gate: P2 Step 6 → Step 7 (checklist)**
 - [ ] All planned edits were applied (re-read from disk confirms changes present)
 - [ ] No syntax errors introduced (for scripts/hooks: `bash -n` check; for skills/commands: markdown structure intact)
 - [ ] Edit count matches improvement plan count (no silently skipped edits)
 - [ ] If handoff schemas were added to a multi-phase artifact: companion validator script was generated and syntax-checked
 
-**Handoff interface (P2 Step 6 → Phase 3):**
+**Handoff interface (P2 Step 6 → Step 7):**
 ```
 applied_edits: {
   edit_count: number,                    // number of edits applied
@@ -362,19 +362,15 @@ Write `artifact_before_snapshot` (pre-edit file content) to the workflow state f
 
 6. **Store queries.** Write to `{artifact_dir}/{name}-evals/trigger_queries.json` for reuse on subsequent hone rounds.
 
-**Gate: P2 Step 7 → Phase 3 (checklist)**
+**Gate: P2 Step 7 → Step 8 (checklist)**
 - [ ] Trigger queries were generated (or reused from prior round)
 - [ ] Trigger test completed with accuracy score
 - [ ] If accuracy < 0.8: description was improved and re-tested
 - [ ] Queries saved to `trigger_queries.json`
 
-**Gate event (write to `gates[]` in workflow state before entering Phase 3):**
-```json
-{"step": "phase2_to_phase3", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
-```
-Append to `state["gates"]` (do not replace). Set `result` to `"fail"` only if the trigger test failed and description could not be improved.
+**No gate event here.** Phase 2 does not end at this step. Go to Step 8 next — including when this step was skipped — and emit `phase2_to_phase3` there.
 
-**Handoff interface (Step 7 → Phase 3):**
+**Handoff interface (Step 7 → Step 8):**
 ```
 trigger_test: {
   accuracy: number,                      // 0.0-1.0
@@ -386,6 +382,55 @@ trigger_test: {
 ```
 
 After writing the handoff, set `steps.phase2_trigger_test` to `"done"` in the workflow state file (`"skipped"` when `--skip-trigger-test` is set) — the key is seeded as `"pending"` by the SKILL.md state template and the Mechanical Exit Gate checks it.
+
+### Step 8: Ledger Append
+
+**Not optional, and not skippable.** Phase 3 step 7 runs `check_convergence.py` on every round and the `convergence` gate event is mandatory, so a round that ends without a ledger produces an exit-2 failure and a state file `validate_gates.py` rejects. This is the last Phase 2 step, and it owns the `phase2_to_phase3` gate event — no earlier Phase 2 step emits it. When Step 7 is skipped (hooks, scripts, `--skip-trigger-test`), this step still runs and still emits it.
+
+**What to write.** Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`, creating the file on round 1 of the first run. The ledger is the artifact's memory across rounds AND across runs: a resumed run reloads it instead of re-deriving findings, and a rejection recorded here is not re-litigated without new evidence.
+
+```json
+{
+  "artifact": "{name}",
+  "max_rounds": <max_rounds>,
+  "rounds": [
+    {"round": 1,
+     "run": "${RUN_ID}",
+     "findings": [
+       {"id": "F1", "severity": "critical", "file": "SKILL.md",
+        "summary": "Step 4 has no stated exit condition", "status": "open"}
+     ]}
+  ]
+}
+```
+
+- `severity` is `critical`, `major`, or `minor`. `critical` and `major` are the blocking ones the convergence check counts; a `minor` left open never blocks convergence.
+- `status` is `open`, `fixed`, or `rejected`. Only an explicit `fixed` or `rejected` counts as a close: a finding simply absent from a round reads as an unreported round, not a repair, and it stays in `open_blocking` until a close is recorded. This is why Step 8 restates every still-live finding: omitting one does not converge the run, it just makes the round's entry wrong.
+- `max_rounds` is **this run's** `--rounds N` budget, the same value as `iteration.target` in the state file. Do not hardcode it. `check_convergence.py` reads it to decide `capped`, and `capped` is a forced halt, so a stale `3` stops a `--rounds 6` run at round 3. Resolve the placeholder to a number: `"max_rounds": "<max_rounds>"` is valid JSON holding an unparseable int, and `check_convergence.py` exits 2 on it rather than running with `capped` quietly switched off.
+- `run` is the resolved `${RUN_ID}` string, identical on every round of this invocation. It is what tells the check where one invocation's rounds end and the next begins, and it is the **only** thing that does: there is no fallback inference, because the one candidate signal (a repeated round number) already means "compaction re-append" to the same script. Omit it and the whole ledger reads as a single run, so the run-scoped signals (streak, stall window, relocation trail, round budget) read the previous runs' history as this run's and `capped` arrives early. `check_convergence.py` reports `run_scoping: "absent"` when that happens.
+- `id` is unique **within the artifact's whole ledger**, not within this run. `F1` above is round 1 of the first run; a later run's first finding is the next unused number, not `F1` again. The reopen counter is cross-run by design, and reusing ids makes two unrelated findings look like one that keeps coming back. `check_convergence.py` defends itself by pairing the id with the finding's summary wording, so a reused id is safe rather than fatal — but the pairing depends on summaries staying verbatim across restatements, and unique ids are what make it exact.
+- Each round **appends a new entry** and restates every finding still live, carried-over ones included. That repetition is what lets the check see a finding stay open across rounds; it is also why those signals are scoped to the current run rather than the whole file.
+- Findings go **inside** the round entry. A bare array, or findings at the top level, is rejected with exit 2.
+- Record each constraint ablation (SKILL.md Phase 2 Step 6a) and its outcome here too, as a finding whose `status` is `fixed` (constraint removed, nothing regressed) or `rejected` (restored because a test regressed).
+
+**When `check_convergence.py` exits 2.** Exit 2 means the ledger is missing or unparseable, and it is the one exit code that is a real failure rather than a verdict. It is repairable, and the repair belongs to this step:
+
+1. Phase 3 emits `{"step": "convergence", "judge": "self-check", "result": "fail", "reason": "ledger_missing", ...}` so the omission is recorded rather than skipped.
+2. Come back here, write the ledger from this round's findings in the shape above, and re-run the check once.
+3. The re-run's verdict drives Phase 3 step 7 normally, and the `convergence` event it emits closes the failed one. Emit it with **no gate event in between**: this is an in-place retry, and an empty gap is what tells `validate_gates.py` the repair was a re-run rather than another round. The re-run's event may itself be a `fail` (the verdict coming back `escalate` or `capped`), which settles the first one just as a `pass` would; what does not settle it is a `convergence` emitted after another round of work. See SKILL.md's Gate Events section.
+4. A second exit 2 is an error halt, not a third attempt. Report the ledger path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop. Never continue past a convergence check that could not run.
+
+**Gate: P2 Step 8 -> Phase 3 (checklist)**
+- [ ] A round entry for this round was appended (not overwritten)
+- [ ] It carries `run` = `${RUN_ID}` and the ledger carries `max_rounds` = this run's budget
+- [ ] Every still-live finding is restated in this round's entry
+- [ ] `python3 <skill-dir>/scripts/check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json` parses the file (exit 0 or 1, never 2)
+
+**Gate event (write to `gates[]` in workflow state before entering Phase 3):**
+```json
+{"step": "phase2_to_phase3", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
+```
+Append to `state["gates"]` (do not replace). This is the only place Phase 2 emits it. Set `result` to `"fail"` only if Phase 2 could not complete: the trigger test failed and the description could not be improved, or this round's ledger entry could not be written.
 
 ## Context Compaction Protection (Phase 2)
 

@@ -244,6 +244,59 @@ class TestGateCompliance(unittest.TestCase):
         self.assertEqual(result["score"], 0.0)
 
 
+class TestRepeatedGateAttemptsScoreCompliant(unittest.TestCase):
+    """A correct repair scored exactly as an ignored halt did.
+
+    Phase 3's exit-2 branch emits `convergence:fail` (reason ledger_missing),
+    rewrites the ledger, re-runs, and emits a second `convergence` that fails
+    whenever the re-run returns escalate or capped. With `terminal or
+    repaired` as the whole predicate, the first fail was neither -- the halt
+    tail slice is exclusive of the failing step, and there is no later pass --
+    so the run scored 5/6 instead of 1.0.
+    """
+
+    def _score(self, gates):
+        from score_execution import score_gate_compliance
+
+        timeline = [
+            _make_timeline_entry(
+                0, "tool_use", "Write",
+                tool_input={"file_path": "/tmp/workflow-run.json",
+                            "content": json.dumps({"gates": gates})},
+            ),
+        ]
+        return score_gate_compliance(timeline, "")
+
+    @staticmethod
+    def _gate(step, result="pass"):
+        return {"step": step, "judge": "self-check", "result": result,
+                "ts": "2026-08-16T00:00:00Z"}
+
+    def test_the_exit_2_ledger_repair_scores_fully_compliant(self):
+        gates = [
+            self._gate("phase1_to_phase2"),
+            self._gate("phase2_to_phase3"),
+            self._gate("phase3_exit"),
+            self._gate("convergence", "fail"),
+            self._gate("convergence", "fail"),
+            self._gate("workflow_exit", "fail"),
+        ]
+        self.assertEqual(self._score(gates)["score"], 1.0)
+
+    def test_a_run_that_ignored_the_halt_does_not_score_fully_compliant(self):
+        gates = [
+            self._gate("phase1_to_phase2"),
+            self._gate("phase2_to_phase3"),
+            self._gate("phase3_exit"),
+            self._gate("convergence", "fail"),
+            self._gate("phase2_to_phase3"),
+            self._gate("phase3_exit"),
+            self._gate("convergence", "fail"),
+            self._gate("workflow_exit", "fail"),
+        ]
+        self.assertLess(self._score(gates)["score"], 1.0)
+
+
 class TestStatePersistence(unittest.TestCase):
     """Test state file write detection."""
 

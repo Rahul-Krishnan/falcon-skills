@@ -137,8 +137,37 @@ Steps:
    {"step": "phase3_exit", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
    ```
    Set `result` to `"fail"` if a regression was detected and edits were reverted. Append to `state["gates"]` — do not replace.
-7. **Mechanical exit gate** (see Final Output below). The state file decides whether to continue or exit, not the LLM.
-8. If gate says CONTINUE: increment round, loop back to Phase 2.
+7. **Convergence check.** Run the check over this round's ledger and emit its gate event. This is the `convergence` event the gate table marks mandatory; the run does not exit without it.
+
+   ```bash
+   python3 <skill-dir>/scripts/check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json
+   ```
+
+   **Branch on the JSON `verdict`, not the exit code.** Only `converged` exits 0, so `in_progress` — the ordinary "keep going" case — exits 1 alongside the two halt verdicts. Treat exit 1 as "not converged yet" and read the verdict. Only exit 2 (missing or unparseable ledger) is a real failure.
+
+   Append the gate event in every case, including the ordinary one:
+
+   ```json
+   {"step": "convergence", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
+   ```
+
+   Use `result: "pass"` for `converged` and for `in_progress`: the check ran and did not halt the loop. Use `result: "fail"` for `escalate` and for `capped`, then halt.
+
+   - On `escalate` the loop is not converging (a finding open four rounds, a blocking count flat for four, or a finding closed in one file that reopens as a NEW finding in another; each is measured within the current run, not across the ledger's whole history). Two distinct findings that happen to share summary wording in different files are not a relocation: the destination has to be an id that was not already open before the close. Both counting bars sit one above the templated `max_rounds: 3`, so exhausting the budget alone reports `capped` and reaches the human gate below, while `escalate` means the loop is going nowhere with rounds still to spend. `scripts/check_convergence.py` is authoritative for the numbers. Halt and report the finding ids.
+   - On `capped` the round budget ran out with blocking findings still open. Report it as **capped, not converged**, list the open blocking findings, and halt. Never present a capped run as success.
+   - On `converged` or `in_progress`, continue to the mechanical exit gate below.
+   - **On exit 2** the ledger is missing or unparseable, which means Phase 2 Step 8 did not run or wrote a shape the script rejects. This is repairable, not fatal, and the run does not get to skip the gate because of it. Emit the event as a failure first, so the omission is on the record:
+
+     ```json
+     {"step": "convergence", "judge": "self-check", "result": "fail", "reason": "ledger_missing", "ts": "<ISO timestamp>"}
+     ```
+
+     Then write the ledger from this round's findings following Phase 2 Step 8 (`references/phase2-improvement.md`), resolving `max_rounds` to `iteration.target` and `run` to `${RUN_ID}`, and re-run the check ONCE. Its verdict drives the branches above, and the `convergence` event it emits closes the failed one. Emit nothing between the two: `convergence` is scored as a per-attempt gate, and a later attempt settles an earlier failure only across an empty gap or one that opens with `resume` (SKILL.md's Gate Events section states the rule). That is what makes the repair work even when the re-run itself returns `escalate` or `capped`, which produces a second `fail` and so no repair `pass` to close the first. Do not loop: a second exit 2 is an error halt. Report the ledger path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop rather than continuing without the check.
+
+   **`escalate` and `capped` outrank the mechanical exit gate's BLOCKED conditions.** They are a HALT verdict, not an input the gate weighs, and the gate's own precedence rule is written below to say so. Without that, the two decisions contradict each other in the ordinary case: on `escalate` with rounds remaining and score momentum, the gate's first BLOCKED condition (`iteration.current < iteration.target` AND score improved >= 0.02 AND composite < 0.9) is true, meaning "keep going" — the exact opposite of the halt this step just ordered. Momentum is precisely what a non-converging loop looks like from the score's point of view, which is why this check exists at all, so the halt wins and the loop stops.
+
+8. **Mechanical exit gate** (see Final Output below). The state file decides whether to continue or exit, not the LLM.
+9. If gate says CONTINUE: increment round, loop back to Phase 2.
 
 ## Final Output
 
@@ -149,9 +178,21 @@ The prior approach was an LLM-evaluated checklist: the improving agent would ask
 
 The state file decides when to exit. The LLM cannot override these checks. Re-read `/tmp/workflow-${RUN_ID}.json` and evaluate each condition:
 
-**PRECEDENCE: BLOCKED conditions are checked FIRST. If ANY BLOCKED condition is true, do NOT exit, regardless of ALLOWED conditions.** This prevents the failure mode where "all individual test scores >= 0.8" triggers exit while momentum exists and rounds remain. (The 0.8 per-test bar mirrors `ACTIONABLE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative.)
+**PRECEDENCE: HALT is checked first, then BLOCKED, then ALLOWED.**
 
-**Exit BLOCKED (keep going) when ANY are true** (checked FIRST):
+1. **Exit FORCED (halt now)** when the step 7 convergence verdict is `escalate` or `capped`. Nothing below is consulted. "Nothing below" means the BLOCKED and ALLOWED condition lists; the `--confirm` human gate at the end of this section sits OUTSIDE the three-tier precedence and is described there.
+2. **BLOCKED** is checked next. If ANY BLOCKED condition is true, do NOT exit, regardless of ALLOWED conditions. This prevents the failure mode where "all individual test scores >= 0.8" triggers exit while momentum exists and rounds remain. (The 0.8 per-test bar mirrors `ACTIONABLE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative.)
+3. **ALLOWED** is checked only if no BLOCKED condition matched.
+
+`converged` and `in_progress` are NOT halt verdicts and do not enter tier 1. They are inputs the BLOCKED and ALLOWED lists weigh like any other state, so `converged` on round 2 of 3 with momentum still running is BLOCKED: the loop keeps going, because there are rounds left and the score is still moving. Reading `converged` as an exit order would put the verdict above the gate the section opens by calling authoritative. Step 9's "if the gate says CONTINUE, loop back" is the whole loop condition; the verdict is not a second one.
+
+**Exit FORCED (halt, do not loop back) when ANY are true** (checked FIRST):
+- [ ] Step 7's convergence verdict is `escalate` — the loop is spending rounds without converging. Report the finding ids. **Report the run as escalated, not as complete.**
+- [ ] Step 7's convergence verdict is `capped` — the round budget ran out with blocking findings still open. **Report the run as capped, never as success.**
+
+A halt verdict is not weighed against momentum; it overrides it. A non-converging loop looks exactly like momentum from the score's point of view — a rising composite while the same findings churn — so letting the momentum condition win would disable the convergence check in precisely the case it exists to catch. The `convergence` gate event carries `result: "fail"` in both cases, and `workflow_exit` still follows it (see SKILL.md's Gate Events table for the order).
+
+**Exit BLOCKED (keep going) when ANY are true** (checked only if no FORCED condition matched):
 - [ ] Any step is `"pending"` or `"in_progress"` in the state file
 - [ ] `open_questions` is non-empty
 - [ ] `iteration.current < iteration.target` AND score improved this round by >= 0.02 AND composite < 0.9 AND (`{target_score}` is unset OR composite < `{target_score}`) (momentum, not plateau — but grade A artifacts or target-met artifacts are allowed to exit early)
@@ -169,6 +210,14 @@ The state file decides when to exit. The LLM cannot override these checks. Re-re
 
 **Forced exit with human gate (--confirm mode only):**
 - If rounds exhausted but tests with score < 0.5 remain (0.5 mirrors `CRITERIA_BUG_THRESHOLD` in `scripts/hone_common.py`, which is authoritative): present the failures to the user and ask whether to add more rounds or accept the current state. In `--auto` mode: log `"exit_with_low_scores": true` and the test IDs in the state file, but do exit (the round budget is a hard cap in --auto to prevent infinite overnight loops).
+
+**Where this gate sits relative to the FORCED halt.** Outside it, and after it. The FORCED halt ends the automatic loop: the run stops, the `convergence` event carries `result: "fail"`, and the outcome is reported as escalated or capped. Asking the human is not the loop continuing, it is what happens once the loop has stopped, so the two do not contradict each other and the halt is never weighed against the answer.
+
+Which halt reaches the gate depends on what the halt says:
+
+- `capped` **does** reach it, in `--confirm` mode. `capped` means the budget ran out with work outstanding, which is the exact situation this gate exists for; without this the gate would be unreachable in every case where it mattered. If the human grants more rounds, raise BOTH `iteration.target` in the state file AND `max_rounds` in the ledger before resuming, then emit a `resume` gate event and re-enter Phase 2. Raising only `iteration.target` re-caps the run on its very next convergence check, because `capped` is read off the ledger's `max_rounds`. The `resume` event is not bookkeeping: the gate stream cannot otherwise tell an authorized restart from a run that ignored the `capped` halt and looped anyway, and without it the `convergence:fail` that halted the loop scores as an ignored halt (SKILL.md's Gate Events section). The order is `convergence:fail`, then the halt's own `workflow_exit`, then `resume` -- the halt has already happened by the time the human is asked, so its exit event is already on the record. That exit PASSES: `capped` is a clean stop carrying a bad verdict, and `workflow_exit: fail` is reserved for an error halt.
+- `escalate` does **not** reach it. More rounds is the wrong remedy for a loop that is not converging: the finding is stuck, the count is flat, or the problem is moving between files, and another round spends budget on the same shape. Report the finding ids and stop. If the human wants to continue anyway, that is a fresh `/hone` invocation with the findings triaged by hand, not an extension of this one.
+- In `--auto` mode neither reaches it, unchanged: the round budget is a hard cap.
 
 **Anti-gaming note:** `open_questions` is auto-populated from structural data (eval scores in 0.4-0.7, failed structural pillars, fresh-eyes disagreements) BEFORE the main thread touches the array. Auto-generated questions are tagged `"source": "auto"` and cannot be removed by the LLM. The main thread can add `"source": "manual"` questions but cannot delete auto-generated ones. The remaining trust surface is limited to: the LLM choosing not to add manual questions it should have. This is a narrower gap than the original (LLM populating the entire array), and is partially covered by fresh-eyes reconciliation surfacing findings the main thread missed.
 

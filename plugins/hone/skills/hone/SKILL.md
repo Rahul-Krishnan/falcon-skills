@@ -307,7 +307,7 @@ Name tiers, never specific models. Model names go stale within a release or two,
 
 Effort tiers and their token cost are worth measuring on your own suite rather than assumed. Escalating effort on uncertainty buys accuracy at *extra* token cost rather than saving any, so escalate deliberately.
 
-**Python dependency note:** Every bundled script is stdlib-only and works with system Python, including `structural_audit.py`, `score_execution.py`, `analyze_results.py`, `validate_eval_criteria.py` (no PyYAML required since criteria are JSON), and the two criteria checks `check_eval_power.py` and `check_overfit.py`. Each has a `test_*.py` beside it; run `python3 -m unittest discover -s <skill-dir>/scripts` after changing any of them.
+**Python dependency note:** Every bundled script is stdlib-only and works with system Python, including `structural_audit.py`, `score_execution.py`, `analyze_results.py`, `validate_eval_criteria.py` (no PyYAML required since criteria are JSON), and the eval checks `check_eval_power.py`, `check_overfit.py`, and `check_convergence.py`. Each has a `test_*.py` beside it; run `python3 -m unittest discover -s <skill-dir>/scripts` after changing any of them.
 
 ## Execution Efficiency Rules
 
@@ -329,26 +329,45 @@ Emit these flat, with keys in this order, and `result` set to `"pass"` or `"fail
 
 | `step` | When emitted | Typical `result` | Mandatory |
 |---|---|---|---|
-| `resume` | resuming a run from an existing state file (after compaction, or across sessions) | `pass` | yes, on any resume |
+| `resume` | resuming a run from an existing state file (after compaction, across sessions, or after a `--confirm` grant of more rounds) | `pass` | yes, on any resume |
 | `phase1_to_phase2` | entering Phase 2 after evaluation | `pass` | yes, unless `--fix-only` |
 | `fixonly_entry` | `--fix-only` run, in place of `phase1_to_phase2` | `pass` | yes, on `--fix-only` |
 | `handoff_<name>` | each handoff validation attempt | `fail` then `pass` on repair | yes, when validation runs |
 | `phase2_to_phase3` | entering Phase 3 after edits | `pass` | yes |
-| `phase3_exit` | leaving Phase 3 | `pass`, or **`fail` on regression auto-revert** | yes |
+| `phase3_exit` | leaving Phase 3 (reference step 6) | `pass`, or **`fail` on regression auto-revert** | yes |
+| `convergence` | after each Phase 3 convergence check (reference step 7), including the exit-2 ledger-repair re-run | `pass`, or **`fail` on escalate or capped** | yes |
 | `workflow_exit` | before any exit | `pass`, or **`fail` on error halt** | yes |
+
+**Two kinds of `fail`, and which kind it is decides what can settle it.** `hone_common.fail_is_accounted` is the one statement of this; the rest of this section is what it enforces.
+
+- A **validation verdict** rejects an INPUT and orders nothing about the run. `handoff_<name>` is the whole family: repair the document, re-run the same validator. A later `pass` for that step is affirmative evidence the input was fixed, whatever happened in between, because nothing in between was forbidden.
+- A **halt order** IS the instruction to stop, and every other row is one: `convergence:fail` is `escalate` or `capped`, `phase3_exit:fail` is the regression auto-revert, a failed phase transition is a run that could not enter the next phase, `workflow_exit:fail` is the error halt. Doing another round is exactly what such a `fail` forbade, so nothing a later round emits is evidence about it -- a passing `convergence` on the next round does not settle an `escalate` on this one, it demonstrates the halt was ignored.
+
+A halt order is settled in one of three ways, and only these:
+
+- **The halt itself** -- `workflow_exit`, plus whatever the documented order places strictly after the failing gate. This is the ordinary case.
+- **Nothing in between, then the same gate again, and the halt after it** -- the in-place retry both repair loops perform. The exit-2 ledger repair writes a file and re-runs the check, emitting no gate event in between; the second `convergence` may itself `fail` when the re-run returns `escalate` or `capped`, so a correct repair produces no later `pass` at all. The retry then has to account for itself, which is what stops a chain of fails from laundering each other. **The retry has to sit INSIDE the halt, not just at its front edge:** what follows the retry must be that halt's tail too, because an empty gap in front of the retry says nothing about what comes after it and the extra round simply moved there. This is deliberately blunt and errs toward "not accounted" -- a repair whose re-run returns `in_progress` and continues into more rounds is not credited, and the fix for that is to declare the repair on the event itself (`"reason": "ledger_missing"`), which a later change will read.
+- **The halt, then a passing `resume`** -- an authorized restart, and only for `convergence`. `capped` in `--confirm` mode is the one path in the whole workflow where a human legitimately restarts the loop, and the reference puts that gate outside and after the FORCED halt: the loop stops and emits `workflow_exit` first, and only then is the human asked. So emit the halt's `workflow_exit`, then `resume` when more rounds are granted, then re-enter Phase 2. A `resume` with no exit event in front of it describes a run that never stopped, and reads as an ignored halt. A `resume` carrying `result: "fail"` is a restart that did not happen and settles nothing. No other gate has a documented restart, so appending an exit and a `resume` behind a failed phase transition or a failed `phase3_exit` does not settle it either.
+
+**`handoff_<name>` and `convergence` are emitted once per ATTEMPT; every other row is emitted once per occasion.** That distinction is scored, not decorative: it is what says a retry of that gate exists at all. A gate the docs never re-attempt -- `phase3_exit`, the phase transitions -- has no retry to be settled by, so its `fail` is accounted for by the halt or the authorized restart, and by nothing else.
+
+**The rows are in emission order, and Phase 3 emits `phase3_exit` BEFORE `convergence`** (references/phase3-reevaluation.md steps 6 and 7). The order is load-bearing, not cosmetic: `hone_common.is_halt_tail` decides whether the tail behind a failed gate is a halt or forward progress, and it reads that order. So the documented regression auto-revert halt is `[phase3_exit:fail, convergence, workflow_exit]`.
+
+The template below is the clean five-event run. `validate_gates.py` hard-errors on a missing `convergence` in `normal` and `fix-only` runs, so a state file that omits it is invalid, not merely under-scored.
 
 ```json
 {"step": "phase1_to_phase2", "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
 {"step": "phase2_to_phase3", "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
 {"step": "phase3_exit",      "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
+{"step": "convergence",      "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
 {"step": "workflow_exit",    "judge": "self-check", "result": "pass", "ts": "<ISO8601>"}
 ```
 
 Use `"fail"` for a gate that did not clear (entering Phase 2 with nothing to improve, a Phase 3 regression that triggered auto-revert, an error halt).
 
-**Failure-path events are mandatory, not optional.** A documented recovery path that emits no event caps `gate_compliance` at 0.7, exactly as a skipped transition does. A `fail` event is scored as compliant when it is terminal (the pipeline halted there) or when a later `pass` for the same step records the repair. Emitting the correct `fail` never costs you score: reporting a failure honestly is the behavior being measured.
+**Failure-path events are mandatory, not optional.** A documented recovery path that emits no event caps `gate_compliance` at 0.7, exactly as a skipped transition does. A `fail` event is scored as compliant when it is settled the way its kind of `fail` allows (see the two kinds above). Emitting the correct `fail` never costs you score: reporting a failure honestly is the behavior being measured. What does cost score is emitting a `fail` and then carrying on as though it had not happened.
 
-**A perfect `gate_compliance` needs at least four compliant events.** The scorer divides the compliant count by the number of events emitted or by four, whichever is larger, and counts the shortfall as neutral (`GATE_EVIDENCE_FLOOR` in `scripts/score_execution.py`, which carries the measured distribution the four is read off). Four is the mandatory sequence above, so a run that emits every event it owes is unaffected; a run that emits one event and stops cannot score 1.0 off it. This cuts both ways by construction — a single malformed or unrepaired event no longer scores 0.0 either — and it is why emitting more truthful events is never worse than emitting fewer.
+**A perfect `gate_compliance` needs at least four compliant events.** The scorer divides the compliant count by the number of events emitted or by four, whichever is larger, and counts the shortfall as neutral (`GATE_EVIDENCE_FLOOR` in `scripts/score_execution.py`, which carries the measured distribution the four is read off). The mandatory sequence above is five events, one more than the floor, so a run that emits every event it owes is never padded; a run that emits one event and stops cannot score 1.0 off it. This cuts both ways by construction — a single malformed or unrepaired event no longer scores 0.0 either — and it is why emitting more truthful events is never worse than emitting fewer.
 
 ## Phase 1: Evaluate
 
@@ -404,16 +423,17 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 6. **Step 6: Apply Edits** -- Stale-write guard, apply edits, generate companion validators if needed.
 6a. **Step 6a: Constraint Ablation** -- For each constraint flagged as possible dead weight (preference 21), remove it, re-run the existing criteria, and restore it only if a test regresses. Record each ablation and its outcome in the ledger. Skip constraints guarding irreversible actions.
 7. **Step 7: Description Trigger Testing** -- Test whether the description triggers correctly on realistic prompts.
-8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`. The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence.
+8. **Step 8: Ledger Append** -- Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`. The ledger is the run's memory across rounds and across runs: a resumed run reloads it instead of re-deriving findings, and rejections are not re-litigated without new evidence. **Give the round entry a `"run"` field carrying `${RUN_ID}`, the same value for every round of this invocation.** The file is per artifact and permanent while `round` restarts at 1 and `max_rounds` is a per-run budget, so `run` is what tells `check_convergence.py` where one invocation's rounds end and the next begins. Without it the boundary is inferred from repeated round numbers, which cannot see a run that never restarts its numbering. Findings go inside the round entry; a ledger with no `rounds` array, or with findings at the top level, is rejected with exit 2.
 
-   Findings are nested under the round that produced them. Write exactly this shape:
+   Findings are nested under the round that produced them, and `check_convergence.py` reads that wrapper. A bare array of findings, or findings appended at the top level, parses as zero rounds: the verdict is `in_progress` with `rounds_run: 0` on every round, forever, and the script reports no error. Write exactly this shape:
 
    ```json
    {
      "artifact": "{name}",
-     "max_rounds": 3,
+     "max_rounds": <max_rounds>,
      "rounds": [
        {"round": 1,
+        "run": "${RUN_ID}",
         "findings": [
           {"id": "F1", "severity": "critical", "file": "SKILL.md",
            "summary": "Step 4 has no stated exit condition", "status": "open"}
@@ -422,7 +442,9 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
    }
    ```
 
-   `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones); `status` is `open`, `fixed`, or `rejected`. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged.
+   Both `max_rounds` and `run` are per-run values; everything else in the file accumulates. Resolve them before writing: `<max_rounds>` is this run's `--rounds N` budget, the same value the state-file template binds to `iteration.target`, and `run` is the resolved `${RUN_ID}` string, not the literal `${RUN_ID}`. A hardcoded `3` is the one that bites silently, because `check_convergence.py` reads `max_rounds` to decide `capped` and `capped` is a FORCED halt: a `--rounds 6` run stops at round 3 and reports itself capped. Leaving `<max_rounds>` unresolved is the other way to get it wrong -- valid JSON, an unparseable int -- and `check_convergence.py` exits 2 on it rather than running with `capped` disabled.
+
+   `severity` is `critical`, `major`, or `minor` (`critical` and `major` are the blocking ones the convergence check counts); `status` is `open`, `fixed`, or `rejected`. Both are closed vocabularies and the check exits 2 on a value outside them, rather than reading an unknown `severity` as non-blocking or an unknown `status` as not-open -- either of which turns a ledger with blocking work outstanding into `verdict: converged`. Case is folded, so `Open` is accepted. Each round appends a new entry to `rounds` and restates every finding still live, including ones carried over unchanged -- that repetition is what lets the check see a finding stay open across rounds.
 
 ## Phase 3: Re-Evaluate
 
@@ -434,8 +456,16 @@ Before entering Phase 2, write a gate event to `gates[]` in the workflow state f
 2. Run deterministic scoring on re-eval results, then the Step 9a power comparison (`check_eval_power.py --artifact-type <type> --before <prior round> --after <this round>`) and record `power_verdict` beside the composite. `underpowered` and `not_measurable` are never reported as an improvement, and neither justifies an auto-revert either: Phase 3 step 5 withholds the restore on both and hands the suspected regression to the human. On the first round of a `--fix-only` run there is no prior round: run the sizing half alone and record `powered`/`underpowered`; the comparison starts on round 2.
 3. Compare before/after per-dimension. A drop > 0.1 in any dimension flags a regression, but resample first: re-run the tests feeding that dimension twice more and take the median. Auto-revert only if the median still shows the drop. If the prior round's `deterministic_scores.json` records a different `metadata.scorer_fingerprint` than this round's -- or records none, which means an unidentified scorer, not an unchanged one -- re-score the prior round's results with the current scorer before comparing, so a measurement change is not read as an artifact change. The trigger is the recorded fingerprint, not whether this run edited `score_execution.py`: a scorer change that lands through a merged PR touches no run at all. `check_eval_power.py` returns `not_measurable` on a mismatch or an absence, which is already a verdict Phase 3 must not revert on.
 4. Write scores to state file. Append a gate event to `gates[]` — use `result: "pass"` for a successful round (no regression), `result: "fail"` only if regression triggered auto-revert. Never use `"exit"`, `"continue"`, or descriptive values — only `"pass"` or `"fail"` are valid.
-5. Check the mechanical exit gate. It emits `workflow_exit` as the last event before any exit.
-6. If rounds remain and the score is improving: loop back to Phase 2.
+5. Run `check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json`. It returns `converged`, `capped`, `escalate`, or `in_progress`. **Branch on the JSON `verdict`, not the exit code:** only `converged` exits 0, so `in_progress` -- the ordinary continue case in step 7 below -- exits 1 alongside the two halt verdicts. Treat exit 1 as "not converged yet" and read the verdict; only exit 2 (missing or unparseable ledger) is a real failure.
+
+   **Emit the `convergence` gate event on every verdict, not only the halting ones.** `result: "pass"` for `converged` and `in_progress` (the check ran and did not stop the loop), `result: "fail"` for `escalate` and `capped`. `validate_gates.py` hard-errors on a missing `convergence` in normal and fix-only runs, so an omitted event on the ordinary round invalidates the state file.
+
+   - `escalate`: the loop is not converging (a finding open four rounds, a blocking count flat for four, or a finding closed in one file that reopens as a NEW finding in another, each measured within this run). The two counting bars sit one above the templated `max_rounds: 3` on purpose, so a run that merely spends its budget reports `capped` -- which reaches the `--confirm` human gate -- and `escalate` is reserved for a loop still going nowhere with rounds to spare. `scripts/check_convergence.py` is authoritative for both numbers. Emit `fail`, report the finding ids, then halt.
+   - `capped`: the round budget ran out with blocking findings still open. Emit `fail`, report it as **capped, not converged**, list the open blocking findings, then halt. Never present a capped run as success.
+   - `converged` / `in_progress`: emit `pass` and continue to step 6.
+   - **Exit 2** (no ledger, or one the script cannot parse) is a Phase 2 Step 8 omission, and it is repairable rather than fatal. Emit `convergence` with `result: "fail"` and `"reason": "ledger_missing"`, write the ledger from this round's findings per Phase 2 Step 8, and re-run the check once. The re-run's verdict then drives the branches above, and its `pass` closes the failed event as the repair loop the Handoff Validation Protocol already describes. If the second run still exits 2, that is an error halt: report the path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop.
+6. Check the mechanical exit gate. It runs **after** the convergence check, never before it: the gate emits `workflow_exit`, and a `convergence` event recorded after that exit reads as forward progress past the halt rather than as the halt itself. Same order as the Phase 3 reference (steps 7 then 8).
+7. The mechanical exit gate decides whether to loop, not the convergence verdict. Exit only when the gate FORCES an exit or ALLOWS one; in every other case increment the round and loop back to Phase 2 (reference step 9). Only `escalate` and `capped` halt on the verdict alone. `converged` and `in_progress` are inputs the gate weighs, not loop conditions of their own, so `converged` on round 2 of 3 with the score still moving is BLOCKED and keeps looping -- treating the verdict as the loop condition left that case with no defined action.
 
 **Mechanical exit gate** decides when to stop (state file, not LLM judgment). See Phase 3 reference for full BLOCKED/ALLOWED conditions.
 

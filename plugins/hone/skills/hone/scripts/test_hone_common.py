@@ -25,13 +25,21 @@ from hone_common import (
     FS_MUTATING_BASH_PATTERNS,
     PHASE1_STEPS,
     PHASE23_STEPS,
+    PHASE3_HALT_SEQUENCE,
+    REPEATABLE_STEPS,
     RUN_SHAPE_ACTIVE_STEPS,
     derive_gate_mode,
     derive_run_shape,
+    fail_is_accounted,
+    fail_orders_halt,
     find_slash_invocations,
     frontmatter_field,
     get,
+    halt_tail_vocabulary,
     is_halt_tail,
+    is_authorized_restart,
+    is_repeatable_step,
+    is_settled_by_retry,
     load_deterministic_scores,
     load_inconclusive_ids,
     match_frontmatter,
@@ -452,10 +460,6 @@ class TestFrontmatterExtraction(unittest.TestCase):
         self.assertEqual(frontmatter_field(fm, "allowed-tools"), "[Read]")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestHaltTail(unittest.TestCase):
     """One definition of a halt tail, shared by validate_gates and the scorer.
 
@@ -489,17 +493,20 @@ class TestHaltTail(unittest.TestCase):
             [self._gate("workflow_exit", "pass")], "phase3_exit"
         ))
 
-    def test_an_unemitted_step_before_the_exit_is_not_a_halt(self):
-        """Regression: an invented `convergence` event laundered any fail.
+    def test_an_unreached_step_before_the_exit_is_not_a_halt(self):
+        """Regression (#14): an invented event must not launder a fail.
 
-        `convergence` was in HALT_SEQUENCE_STEPS but hone emits no such gate
-        -- it is in no row of SKILL.md's Gate Events table and in no Phase 3
-        step. An executor that appended one turned every failed gate into a
-        compliant halt, so the eval paid for emitting a step that does not
-        exist. No unemitted step belongs in the tail, whatever its result and
-        whatever failed.
+        `convergence` sat in HALT_SEQUENCE_STEPS while hone emitted no such
+        gate, so an executor that appended one turned every failed gate into a
+        compliant halt and the eval paid for a step that never ran.
+
+        Phase 3 now really does emit `convergence` -- but only Phase 3 does. A
+        gate that failed BEFORE Phase 3 ran is still proof the run never
+        reached it, so a `convergence` behind such a fail is still invented.
+        This is the half of #14's fix that must survive; the halt the same
+        emission order makes legitimate is asserted in TestHaltTailVocabulary.
         """
-        for failed_step in ("phase2_to_phase3", "phase3_exit", "handoff_x"):
+        for failed_step in ("phase1_to_phase2", "phase2_to_phase3", "handoff_x"):
             for result in ("pass", "fail"):
                 for invented in ("convergence", "made_up_step"):
                     with self.subTest(step=failed_step, result=result,
@@ -511,6 +518,17 @@ class TestHaltTail(unittest.TestCase):
                             ],
                             failed_step,
                         ))
+        # A step outside the Phase 3 sequence stays inadmissible even behind a
+        # fail that demonstrably DID reach Phase 3.
+        for failed_step in ("phase3_exit", "convergence"):
+            with self.subTest(step=failed_step):
+                self.assertFalse(is_halt_tail(
+                    [
+                        self._gate("made_up_step", "pass"),
+                        self._gate("workflow_exit", "pass"),
+                    ],
+                    failed_step,
+                ))
 
     def test_passing_workflow_exit_is_still_a_halt(self):
         self.assertTrue(is_halt_tail([self._gate("workflow_exit", "pass")]))
@@ -528,3 +546,418 @@ class TestHaltTail(unittest.TestCase):
     def test_non_dict_entries_do_not_read_as_a_halt(self):
         self.assertFalse(is_halt_tail(["workflow_exit"]))
         self.assertFalse(is_halt_tail(None))
+
+
+class TestHaltTailVocabulary(unittest.TestCase):
+    """The tail vocabulary depends on which gate failed, not on a flat set.
+
+    Two properties have to hold at the same time, and a flat set can only ever
+    hold one of them. Phase 3 emits `phase3_exit` (reference step 6) and THEN
+    `convergence` (step 7), so:
+
+      * behind a failed `phase3_exit` -- the documented regression auto-revert
+        halt -- a `convergence` in the tail is an event the run really did
+        emit, and the tail is a halt;
+      * behind a gate that failed before Phase 3 ran, the same `convergence`
+        was invented, and the tail is not a halt (#14's bypass).
+
+    An earlier revision put `convergence` back in the flat HALT_SEQUENCE_STEPS
+    to get the first property and silently reopened the second.
+    """
+
+    def _gate(self, step, result="pass"):
+        return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
+
+    def test_convergence_in_the_tail_is_a_halt_after_a_failed_phase3_exit(self):
+        """The documented auto-revert halt, in the order the docs emit it."""
+        for result in ("pass", "fail"):
+            with self.subTest(convergence_result=result):
+                self.assertTrue(is_halt_tail(
+                    [
+                        self._gate("convergence", result),
+                        self._gate("workflow_exit", "pass"),
+                    ],
+                    "phase3_exit",
+                ))
+
+    def test_convergence_in_the_tail_is_invented_before_phase3_runs(self):
+        """#14's bypass: the laundering tail must still be rejected."""
+        for failed_step in ("phase1_to_phase2", "phase2_to_phase3",
+                            "fixonly_entry"):
+            with self.subTest(step=failed_step):
+                self.assertFalse(is_halt_tail(
+                    [
+                        self._gate("convergence", "pass"),
+                        self._gate("workflow_exit", "pass"),
+                    ],
+                    failed_step,
+                ))
+
+    def test_the_exit_alone_is_still_a_halt_after_phase3_exit(self):
+        """The vocabulary says what MAY follow, not what must."""
+        self.assertTrue(is_halt_tail(
+            [self._gate("workflow_exit", "pass")], "phase3_exit"
+        ))
+
+    def test_a_convergence_tail_without_the_exit_is_not_a_halt(self):
+        """`workflow_exit` is mandated before ANY exit, so it is required."""
+        self.assertFalse(is_halt_tail(
+            [self._gate("convergence", "pass")], "phase3_exit"
+        ))
+
+    def test_the_failing_step_is_not_admitted_into_its_own_tail(self):
+        """Phase 3 re-emits both events every round.
+
+        Admitting the failing step back into its own tail would score a run
+        that failed `phase3_exit`, ignored the mandated immediate halt, and
+        looped through another whole round as though it had stopped.
+        """
+        self.assertFalse(is_halt_tail(
+            [
+                self._gate("phase3_exit", "fail"),
+                self._gate("convergence", "pass"),
+                self._gate("workflow_exit", "pass"),
+            ],
+            "phase3_exit",
+        ))
+
+    def test_a_failed_convergence_admits_only_the_exit(self):
+        """A failed `convergence` IS the failing gate, not a tail behind one."""
+        self.assertTrue(is_halt_tail(
+            [self._gate("workflow_exit", "pass")], "convergence"
+        ))
+        self.assertEqual(halt_tail_vocabulary("convergence"),
+                         frozenset({"workflow_exit"}))
+
+    def test_the_vocabulary_matches_the_documented_emission_order(self):
+        self.assertEqual(
+            PHASE3_HALT_SEQUENCE, ("phase3_exit", "convergence", "workflow_exit")
+        )
+        self.assertEqual(
+            halt_tail_vocabulary("phase3_exit"),
+            frozenset({"convergence", "workflow_exit"}),
+        )
+        for unrelated in ("phase2_to_phase3", "phase1_to_phase2", None):
+            with self.subTest(step=unrelated):
+                self.assertEqual(halt_tail_vocabulary(unrelated),
+                                 frozenset({"workflow_exit"}))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+def _g(step, result="pass"):
+    return {"step": step, "judge": "self-check", "result": result}
+
+
+class TestRepeatableSteps(unittest.TestCase):
+    """Membership is documented retry semantics, not mere recurrence."""
+
+    def test_convergence_and_handoffs_are_repeatable(self):
+        self.assertTrue(is_repeatable_step("convergence"))
+        self.assertTrue(is_repeatable_step("handoff_round_1_scores"))
+
+    def test_per_round_steps_without_retry_semantics_are_not(self):
+        for step in ("phase3_exit", "phase2_to_phase3", "phase1_to_phase2",
+                     "fixonly_entry", "resume", "workflow_exit"):
+            with self.subTest(step=step):
+                self.assertFalse(is_repeatable_step(step))
+
+    def test_a_non_string_step_is_not_repeatable(self):
+        for step in (None, 3, ["convergence"]):
+            with self.subTest(step=step):
+                self.assertFalse(is_repeatable_step(step))
+
+    def test_phase3_exit_is_not_in_the_set(self):
+        """A phase3_exit fail is a mandated halt, so a later one is a violation."""
+        self.assertNotIn("phase3_exit", REPEATABLE_STEPS)
+
+
+class TestFailKinds(unittest.TestCase):
+    """What a `fail` MEANS is the axis every settlement rule turns on."""
+
+    def test_a_handoff_fail_is_a_validation_verdict(self):
+        self.assertFalse(fail_orders_halt("handoff_round_1_scores"))
+
+    def test_every_other_gate_fail_is_a_halt_order(self):
+        for step in ("convergence", "phase3_exit", "phase2_to_phase3",
+                     "phase1_to_phase2", "fixonly_entry", "resume",
+                     "workflow_exit"):
+            with self.subTest(step=step):
+                self.assertTrue(fail_orders_halt(step))
+
+    def test_an_unrecognised_step_reads_as_a_halt_order(self):
+        """The strict default: a new gate must not be settleable by running on."""
+        for step in ("some_future_gate", None, 3):
+            with self.subTest(step=step):
+                self.assertTrue(fail_orders_halt(step))
+
+
+class TestSettledByRetry(unittest.TestCase):
+    """A documented retry settles a fail, on terms set by what the fail meant.
+
+    The exit-2 ledger repair emits `convergence:fail`, rewrites the ledger,
+    re-runs, and emits a second `convergence` that fails whenever the re-run
+    returns escalate or capped. The first fail is then neither terminal (the
+    halt tail slice is exclusive of the failing step) nor followed by a pass,
+    so a correct repair scored exactly as an ignored halt did.
+    """
+
+    def test_an_adjacent_retry_settles_a_halt_order(self):
+        """The exit-2 repair: re-run adjacent, then the halt it reported."""
+        self.assertTrue(is_settled_by_retry(
+            [_g("convergence", "fail"), _g("workflow_exit")], "convergence"))
+
+    def test_a_retry_with_no_halt_behind_it_settles_nothing(self):
+        """A run that stopped emitting before its mandated exit is not a halt.
+
+        The adjacent retry alone used to be enough. It is not: the halt has
+        to be recorded, and `workflow_exit` is what records it.
+        """
+        self.assertFalse(is_settled_by_retry([_g("convergence", "fail")],
+                                             "convergence"))
+
+    def test_a_halt_orders_retry_is_fail_closed_on_whatever_follows_it(self):
+        """The property, not one ordering of it.
+
+        For a halt order, an adjacent retry settles the fail ONLY when
+        everything after the retry is that halt's own tail. Any step the halt
+        vocabulary does not admit -- whatever it is, wherever the reviewer
+        finds the next one -- makes the fail unaccounted. This is the
+        asymmetry the restriction is for: over-strict is a lost quarter-point
+        on `gate_compliance`, permissive is a run credited for ignoring a
+        halt.
+        """
+        vocabulary = halt_tail_vocabulary("convergence")
+        intruders = [
+            step for step in (
+                "phase1_to_phase2", "phase2_to_phase3", "phase3_exit",
+                "fixonly_entry", "handoff_input", "resume",
+            ) if step not in vocabulary
+        ]
+        self.assertTrue(intruders, "the test needs steps outside the tail")
+        for intruder in intruders:
+            for result in ("pass", "fail"):
+                with self.subTest(step=intruder, result=result):
+                    self.assertFalse(is_settled_by_retry(
+                        [_g("convergence", "pass"), _g(intruder, result),
+                         _g("workflow_exit")],
+                        "convergence"))
+
+    def test_the_reported_post_retry_laundering_shape(self):
+        """The exact sequence round 6 found: the extra round moved AFTER the
+        retry instead of before it."""
+        self.assertFalse(fail_is_accounted(
+            [_g("convergence", "pass"), _g("phase2_to_phase3"),
+             _g("phase3_exit"), _g("convergence"), _g("workflow_exit")],
+            "convergence"))
+
+    def test_a_validation_verdict_retry_is_not_constrained_from_behind(self):
+        """The restriction is scoped to halt orders.
+
+        A `handoff_<name>` fail ordered nothing about the run, so work after
+        its retry was never forbidden and must not be read as laundering.
+        """
+        self.assertTrue(is_settled_by_retry(
+            [_g("handoff_input", "fail"), _g("phase2_to_phase3"),
+             _g("workflow_exit")],
+            "handoff_input"))
+
+    def test_a_non_repeatable_step_is_never_settled_by_retry(self):
+        self.assertFalse(is_settled_by_retry([_g("phase3_exit", "fail")],
+                                             "phase3_exit"))
+
+    def test_forward_progress_between_the_attempts_does_not_settle(self):
+        """The bypass: ignore the halt, do another round, fail again."""
+        tail = [_g("phase2_to_phase3"), _g("phase3_exit"),
+                _g("convergence", "fail"), _g("workflow_exit", "fail")]
+        self.assertFalse(is_settled_by_retry(tail, "convergence"))
+
+    def test_a_later_pass_does_not_settle_a_halt_order_across_a_gap(self):
+        """The same bypass, reached through the repaired path.
+
+        `convergence` is emitted every round, so the next round's `pass` was
+        affirmative evidence for a halt order it had no business excusing.
+        """
+        tail = [_g("phase2_to_phase3"), _g("phase3_exit"),
+                _g("convergence", "pass"), _g("workflow_exit")]
+        self.assertFalse(is_settled_by_retry(tail, "convergence"))
+
+    def test_a_later_pass_settles_a_validation_verdict_across_any_gap(self):
+        """The handoff repair loop: nothing in between was forbidden."""
+        tail = [_g("phase2_to_phase3"), _g("handoff_interfaces", "pass")]
+        self.assertTrue(is_settled_by_retry(tail, "handoff_interfaces"))
+
+    def test_no_later_attempt_does_not_settle(self):
+        self.assertFalse(is_settled_by_retry([_g("workflow_exit")],
+                                             "convergence"))
+
+    def test_a_non_list_tail_is_not_settled(self):
+        self.assertFalse(is_settled_by_retry("gates", "convergence"))
+
+
+class TestAuthorizedRestart(unittest.TestCase):
+    """A recorded halt plus a recorded `resume` is the one way past a halt order."""
+
+    def test_a_recorded_halt_then_resume_authorizes_the_restart(self):
+        """`capped` in --confirm mode: the loop stops, the human restarts it.
+
+        `workflow_exit` comes BEFORE the `resume`, because the reference puts
+        the human gate outside and after the FORCED halt: asking is what
+        happens once the loop has stopped.
+        """
+        tail = [_g("workflow_exit"), _g("resume"),
+                _g("phase2_to_phase3"), _g("phase3_exit"),
+                _g("convergence", "fail"), _g("workflow_exit")]
+        self.assertTrue(is_authorized_restart(tail, "convergence"))
+
+    def test_a_resume_with_no_halt_in_front_of_it_does_not(self):
+        """A restart with no recorded exit is a run that never stopped."""
+        tail = [_g("resume"), _g("phase2_to_phase3"), _g("phase3_exit"),
+                _g("convergence", "fail"), _g("workflow_exit", "fail")]
+        self.assertFalse(is_authorized_restart(tail, "convergence"))
+
+    def test_forward_progress_before_the_resume_does_not(self):
+        """The gap before the restart has to be a halt, not another round."""
+        tail = [_g("phase2_to_phase3"), _g("workflow_exit"),
+                _g("resume"), _g("phase3_exit"),
+                _g("convergence", "fail"), _g("workflow_exit", "fail")]
+        self.assertFalse(is_authorized_restart(tail, "convergence"))
+
+    def test_a_failed_exit_may_be_resumed_immediately(self):
+        """`workflow_exit:fail` IS the stop, so nothing need precede the resume."""
+        tail = [_g("resume"), _g("phase2_to_phase3"), _g("phase3_exit"),
+                _g("convergence"), _g("workflow_exit")]
+        self.assertTrue(is_authorized_restart(tail, "workflow_exit"))
+
+    def test_no_resume_at_all_does_not(self):
+        self.assertFalse(is_authorized_restart([_g("workflow_exit")],
+                                               "convergence"))
+
+    def test_a_non_list_tail_is_not_a_restart(self):
+        self.assertFalse(is_authorized_restart("gates", "convergence"))
+
+    def test_a_failed_resume_authorizes_nothing(self):
+        """`resume:fail` is a restart that did not happen.
+
+        The predicate read the event's presence and never its `result`, so a
+        failed restart settled the halt exactly as a granted one did.
+        """
+        tail = [_g("workflow_exit"), _g("resume", "fail"),
+                _g("phase2_to_phase3"), _g("phase3_exit"),
+                _g("convergence"), _g("workflow_exit")]
+        self.assertFalse(is_authorized_restart(tail, "convergence"))
+
+    def test_only_documented_restarts_are_authorized(self):
+        """A `resume` is not a universal laundering suffix.
+
+        `convergence` has the `capped` human gate and `workflow_exit` has the
+        cross-session resume; no other gate has a documented way back from
+        its own halt, so appending an exit and a `resume` behind one settles
+        nothing.
+        """
+        for step in ("phase3_exit", "phase1_to_phase2", "phase2_to_phase3"):
+            with self.subTest(step=step):
+                tail = [_g("workflow_exit"), _g("resume"),
+                        _g("phase2_to_phase3"), _g("phase3_exit"),
+                        _g("convergence"), _g("workflow_exit")]
+                self.assertFalse(is_authorized_restart(tail, step))
+                self.assertFalse(fail_is_accounted(tail, step))
+
+
+class TestFailIsAccounted(unittest.TestCase):
+    """The one predicate both callers now share."""
+
+    def test_the_documented_exit_2_repair_is_accounted(self):
+        """convergence:fail (ledger_missing) -> re-run -> convergence:fail."""
+        gates = [
+            _g("phase1_to_phase2"), _g("phase2_to_phase3"), _g("phase3_exit"),
+            _g("convergence", "fail"), _g("convergence", "fail"),
+            _g("workflow_exit", "fail"),
+        ]
+        for index, gate in enumerate(gates):
+            if gate["result"] != "fail":
+                continue
+            with self.subTest(index=index):
+                self.assertTrue(
+                    fail_is_accounted(gates[index + 1:], gate["step"]))
+
+    def test_the_repaired_handoff_chain_is_accounted(self):
+        gates = [
+            _g("handoff_interfaces", "fail"), _g("handoff_interfaces", "fail"),
+            _g("handoff_interfaces", "pass"),
+        ]
+        for index in (0, 1):
+            with self.subTest(index=index):
+                self.assertTrue(
+                    fail_is_accounted(gates[index + 1:], "handoff_interfaces"))
+
+    def test_a_handoff_that_never_repairs_and_never_halts_is_not(self):
+        """The same hole as convergence, on the step the docs already retry."""
+        gates = [
+            _g("handoff_interfaces", "fail"), _g("handoff_interfaces", "fail"),
+            _g("phase2_to_phase3"), _g("workflow_exit"),
+        ]
+        self.assertFalse(fail_is_accounted(gates[2:], "handoff_interfaces"))
+
+    def test_a_run_that_ignored_the_convergence_halt_is_not_accounted(self):
+        gates = [
+            _g("convergence", "fail"), _g("phase2_to_phase3"),
+            _g("phase3_exit"), _g("convergence", "fail"),
+            _g("workflow_exit", "fail"),
+        ]
+        self.assertFalse(fail_is_accounted(gates[1:], "convergence"))
+
+    def test_the_documented_regression_halt_is_still_accounted(self):
+        tail = [_g("convergence"), _g("workflow_exit")]
+        self.assertTrue(fail_is_accounted(tail, "phase3_exit"))
+
+    def test_a_later_phase3_exit_does_not_launder_the_auto_revert_halt(self):
+        tail = [_g("phase2_to_phase3"), _g("phase3_exit", "fail"),
+                _g("workflow_exit", "fail")]
+        self.assertFalse(fail_is_accounted(tail, "phase3_exit"))
+
+    def test_a_later_convergence_pass_does_not_launder_the_escalate_halt(self):
+        """`convergence:fail` is escalate, a mandated immediate halt.
+
+        The run did another whole round and emitted a passing `convergence`,
+        which the unconstrained repaired path read as affirmative evidence.
+        """
+        gates = [
+            _g("phase1_to_phase2"), _g("phase2_to_phase3"), _g("phase3_exit"),
+            _g("convergence", "fail"), _g("phase2_to_phase3"),
+            _g("phase3_exit"), _g("convergence", "pass"), _g("workflow_exit"),
+        ]
+        self.assertFalse(fail_is_accounted(gates[4:], "convergence"))
+
+    def test_a_later_phase3_exit_pass_does_not_launder_the_auto_revert_halt(self):
+        """The same class one door along: the auto-revert halt, then a pass."""
+        gates = [
+            _g("phase3_exit", "fail"), _g("phase2_to_phase3"),
+            _g("phase3_exit", "pass"), _g("convergence"), _g("workflow_exit"),
+        ]
+        self.assertFalse(fail_is_accounted(gates[1:], "phase3_exit"))
+
+    def test_a_later_pass_does_not_launder_any_halt_ordering_gate(self):
+        """Stated once, so every gate whose fail is a halt order is covered."""
+        for step in ("phase1_to_phase2", "phase2_to_phase3", "fixonly_entry",
+                     "phase3_exit", "convergence"):
+            with self.subTest(step=step):
+                tail = [_g("phase2_to_phase3"), _g(step, "pass"),
+                        _g("workflow_exit")]
+                self.assertFalse(fail_is_accounted(tail, step))
+
+    def test_the_authorized_restart_is_still_accounted(self):
+        """The documented capped -> --confirm -> resume sequence, end to end."""
+        gates = [
+            _g("convergence", "fail"), _g("workflow_exit", "fail"),
+            _g("resume"), _g("phase2_to_phase3"), _g("phase3_exit"),
+            _g("convergence", "fail"), _g("workflow_exit", "fail"),
+        ]
+        for index, gate in enumerate(gates):
+            if gate["result"] != "fail":
+                continue
+            with self.subTest(index=index):
+                self.assertTrue(
+                    fail_is_accounted(gates[index + 1:], gate["step"]))

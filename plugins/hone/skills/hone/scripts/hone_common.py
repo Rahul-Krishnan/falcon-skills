@@ -122,23 +122,366 @@ RUN_SHAPE_ACTIVE_STEPS: dict[str, frozenset[str]] = {
 }
 
 
-# Steps that may legitimately follow a failing gate without contradicting the
-# claim that the run halted there. Only `workflow_exit` qualifies: it is the
-# stop itself, and SKILL.md mandates it before ANY exit. Anything else after a
-# fail is forward progress, and a fail followed by forward progress is not a
-# halt. Shared so validate_gates.py's warning and score_execution.py's score
-# read the same halt shape.
-#
-# `convergence` used to sit in this set as "the check the failure capped".
-# hone never emits it. It has no row in SKILL.md's Gate Events table, which is
-# the closed vocabulary of emitted events, and no Phase 3 step appends it --
-# the phase goes straight from the `phase3_exit` append (step 4) to the
-# mechanical exit gate (step 5), which emits `workflow_exit`. The word appears
-# in references/phase3-reevaluation.md only for the user-specified score
-# target, which is not a gate event. Keeping it here meant an executor that
-# invented the event turned ANY failed gate into a compliant halt: a scoring
-# bypass that paid for emitting a step that does not exist.
+# Steps that may follow ANY failing gate without contradicting the claim that
+# the run halted there. Only `workflow_exit` qualifies unconditionally: it is
+# the stop itself, and SKILL.md mandates it before ANY exit. Anything else
+# after a fail is forward progress, and a fail followed by forward progress is
+# not a halt. Shared so validate_gates.py's warning and score_execution.py's
+# score read the same halt shape.
 HALT_SEQUENCE_STEPS: frozenset[str] = frozenset({"workflow_exit"})
+
+# Phase 3's terminal event sequence, in the order the docs actually emit it:
+# `phase3_exit` at references/phase3-reevaluation.md step 6, `convergence` at
+# step 7, then the mandated exit. SKILL.md's gate table lists the same order.
+#
+# This tuple exists because the order is the whole argument. An earlier
+# revision of this comment asserted `... phase2_to_phase3, convergence,
+# phase3_exit, workflow_exit`, reasoning from the order of the names in
+# validate_gates.REQUIRED_STEPS -- which is a membership check, not a
+# sequence. Under the real order the documented regression auto-revert halt is
+# `[phase3_exit:fail, convergence:pass, workflow_exit]`, and a flat
+# `HALT_SEQUENCE_STEPS` rejected it: `validate_gates` warned on a correct halt
+# and `score_gate_compliance` scored it non-compliant. Worse, it was a
+# catch-22, because `convergence` is now a REQUIRED step, so a run cannot drop
+# it to restore the halt shape.
+PHASE3_HALT_SEQUENCE: tuple[str, ...] = (
+    "phase3_exit", "convergence", "workflow_exit",
+)
+
+# WHAT A `fail` MEANS, which is the axis every settlement rule below turns on.
+# There are exactly two kinds in the gate table, and telling them apart is the
+# whole of this section:
+#
+#   VALIDATION VERDICT -- the gate rejected an INPUT and ordered nothing about
+#     the run. `handoff_<name>` is the entire family: SKILL.md's gate table
+#     gives it "fail then pass on repair", and the Handoff Validation Protocol
+#     repairs the document and re-runs the SAME validator. Nothing that
+#     happens between the two attempts was forbidden, so a later `pass` is
+#     affirmative evidence the input was fixed, whatever route reached it.
+#
+#   HALT ORDER -- the `fail` IS the instruction to stop. `convergence:fail` is
+#     `escalate` or `capped`, both FORCED halts; `phase3_exit:fail` is the
+#     regression auto-revert halt; a failed phase transition is a run that
+#     could not enter the next phase; `workflow_exit:fail` is the error halt.
+#     Nothing a later round does is evidence about a fail of this kind,
+#     because RUNNING a later round is precisely what the fail forbade.
+#     Emitting more events past a halt order is the violation, not the excuse
+#     for it.
+#
+# This distinction is the invariant, and stating it once here is what closes
+# the laundering class rather than one more door in it. Every previous fix in
+# this area restated the same fact for a single step and left the next step
+# open: pulling `convergence` out of the flat halt set, then making the halt
+# tail slice exclusive of the failing step, then constraining the gap on a
+# later `fail`. Each was correct and none generalized, because each keyed on
+# the STEP or on the later event's RESULT instead of on what the earlier
+# `fail` meant. Keyed on meaning, all three are corollaries: a halt order is
+# accounted for by the halt, never by work done after it.
+#
+# Unrecognized steps read as halt orders. That is the strict default on
+# purpose -- a gate added later, whose `fail` nobody has classified, must not
+# be settleable by simply running on.
+VALIDATION_FAIL_PREFIXES: tuple[str, ...] = ("handoff_",)
+
+# Steps the workflow emits ONCE PER ATTEMPT, where a later attempt at the same
+# step can settle an earlier attempt's failure. This is orthogonal to the
+# distinction above: it says a retry EXISTS, while `fail_orders_halt` says
+# what that retry has to look like to count.
+#
+# Membership is documented retry semantics, not mere recurrence. Both members
+# earn it the same way -- the docs describe a failure, a repair of the failing
+# input, and a re-run of the SAME check:
+#
+#   handoff_<name>  SKILL.md's gate table: "each handoff validation attempt",
+#                   result "fail then pass on repair". The retry loop is the
+#                   Handoff Validation Protocol.
+#   convergence     references/phase3-reevaluation.md step 7's exit-2 branch:
+#                   emit `convergence:fail` with `reason: ledger_missing`,
+#                   write the ledger, re-run the check ONCE, emit the second
+#                   `convergence`. That second event may itself be a `fail`
+#                   (the re-run returning escalate or capped), which is the
+#                   case a later-`pass`-only test cannot see.
+#
+# `phase3_exit` is deliberately NOT a member even though Phase 3 re-emits it
+# every round. A `phase3_exit:fail` is the regression auto-revert, and the
+# reference pairs it with an immediate halt; a later `phase3_exit` is
+# therefore a run that ignored the halt. Same for `phase1_to_phase2`,
+# `phase2_to_phase3`, `fixonly_entry` and `resume`: they recur, but no doc
+# gives any of them a fail-then-retry shape, so admitting them would open a
+# settlement path for no legitimate sequence.
+#
+# This prefix tuple holds the same value as `VALIDATION_FAIL_PREFIXES` today
+# and is deliberately not the same constant: one says the docs re-attempt the
+# step, the other says its `fail` ordered nothing. `convergence` already
+# separates them (documented retry, halt-ordering fail), and a future gate can
+# land in either set alone.
+REPEATABLE_STEPS: frozenset[str] = frozenset({"convergence"})
+REPEATABLE_STEP_PREFIXES: tuple[str, ...] = ("handoff_",)
+
+# The gate event that marks an authorized restart of a halted loop. It is the
+# one thing that lets a run legitimately emit events after a halt order (see
+# `is_authorized_restart`).
+RESUMPTION_STEP = "resume"
+
+# Steps whose `fail` a `resume` may restart. Membership is documented restart
+# semantics, not plausibility, on the same principle as `REPEATABLE_STEPS`.
+#
+# Two gates earn it, and the docs name both.
+#
+#   convergence    references/phase3-reevaluation.md's "Forced exit with human
+#                  gate (--confirm mode only)": a `capped` verdict reaches the
+#                  human gate, the human grants more rounds, the run raises
+#                  `iteration.target` and the ledger's `max_rounds`, emits
+#                  `resume`, and re-enters Phase 2.
+#   workflow_exit  SKILL.md's gate table gives `resume` for "resuming a run
+#                  from an existing state file (after compaction, across
+#                  sessions)". The last event before such a break is the exit,
+#                  so a `resume` directly behind one is that documented
+#                  restart. `is_halt_tail`'s empty-prefix clause already
+#                  treats `workflow_exit:fail` as its own stop.
+#
+# Every other gate is out, and that is the restriction. `phase3_exit:fail` is
+# the regression auto-revert, a failed phase transition is a run that could
+# not enter the next phase: no doc follows either with a grant of anything, so
+# a `resume` behind one is the executor's own authority, which is what the
+# halt rules exist to refuse. Before this set, `is_authorized_restart` applied
+# to EVERY failing step, so appending `[<any gate>:fail, workflow_exit,
+# resume, ...another whole round...]` laundered any halt at all.
+#
+# A halted run that really is resumed later still records the resume behind
+# its own `workflow_exit`, and that exit is resumable; what is refused is
+# reading the resume back onto the earlier gate whose fail ordered the halt.
+RESUMABLE_STEPS: frozenset[str] = frozenset({"convergence", "workflow_exit"})
+
+
+def fail_orders_halt(step: object) -> bool:
+    """True when a `fail` on this step is itself an order to stop the run."""
+    return not (
+        isinstance(step, str) and step.startswith(VALIDATION_FAIL_PREFIXES)
+    )
+
+
+def is_repeatable_step(step: object) -> bool:
+    """True for a step the workflow emits once per attempt (see above)."""
+    if not isinstance(step, str):
+        return False
+    return step in REPEATABLE_STEPS or step.startswith(REPEATABLE_STEP_PREFIXES)
+
+
+def is_authorized_restart(later_gates: object, failed_step: object) -> bool:
+    """True when the run halted on this fail and a recorded `resume` restarted it.
+
+    The one legitimate way a run emits events after a halt order, and it is
+    the shape references/phase3-reevaluation.md documents for the `capped`
+    human gate:
+
+        convergence:fail          <- capped
+        workflow_exit:fail        <- the loop stopped; the human is asked here
+        resume:pass               <- more rounds granted, restart on record
+        phase2_to_phase3:pass
+        ...
+
+    Three conditions, and the second and third are restrictions this predicate
+    did not always carry:
+
+    1. everything before the `resume` is a valid halt tail for the failing
+       step, so the run really did stop before it restarted;
+    2. the failing step has a documented restart at all (`RESUMABLE_STEPS`).
+       The predicate used to apply to every step, which turned "append an
+       exit and a `resume`" into a universal laundering suffix for any halt;
+    3. the `resume` itself PASSED. A `resume` carrying `result: "fail"` is a
+       restart that did not happen, and reading it as authorization credited
+       the run for the event rather than for what the event said.
+
+    KNOWN GAP, deliberately left: `convergence:fail` is `escalate` OR
+    `capped`, and only `capped` reaches the human gate -- the reference is
+    explicit that continuing after `escalate` "is a fresh `/hone` invocation
+    with the findings triaged by hand, not an extension of this one". Telling
+    the two apart needs the event's own `reason` field, which the docs already
+    mandate; the declare-and-verify change that reads it is a follow-up PR
+    (see the note on `is_settled_by_retry`). Until then a `resume` after an
+    `escalate` is still accepted here.
+
+    references/phase3-reevaluation.md puts the `--confirm` gate outside and
+    after the FORCED halt: asking the human is what happens once the loop has
+    STOPPED. So everything before the `resume` must be a valid halt tail for
+    the failing step, and everything after it belongs to the restarted run,
+    which is legitimate forward progress because the restart is on record.
+
+    A bare `resume` with no halt in front of it is not enough, deliberately:
+    that describes a run that skipped its own exit event and carried straight
+    on, which is the shape the halt tail exists to catch. And forward progress
+    with no `resume` at all -- the attack this whole section is about -- has no
+    restart to point at:
+
+        convergence:fail          <- escalate, a mandated immediate halt
+        phase2_to_phase3:pass     <- the run ignored it and did another round
+        phase3_exit:pass
+        convergence:pass          <- and this used to launder the halt
+        workflow_exit:pass
+
+    The empty prefix is a halt tail only for `workflow_exit` itself (see
+    `is_halt_tail`), which is exactly right: `workflow_exit:fail` IS the stop,
+    so a `resume` may follow it immediately, while any other fail needs its
+    exit event recorded first.
+    """
+    if failed_step not in RESUMABLE_STEPS:
+        return False
+    if not isinstance(later_gates, (list, tuple)):
+        return False
+    for index, event in enumerate(later_gates):
+        if isinstance(event, dict) and event.get("step") == RESUMPTION_STEP:
+            if event.get("result") != "pass":
+                return False
+            return is_halt_tail(later_gates[:index], failed_step)
+    return False
+
+
+def is_settled_by_retry(later_gates: object, failed_step: object) -> bool:
+    """True when a documented retry of the same step settled this fail.
+
+    One predicate where there were two, because the pair it replaces
+    (`repaired`: any later `pass`; `superseded`: a later attempt across a
+    constrained gap) split the question along the wrong axis. They keyed on
+    the RESULT of the LATER event, so the unconstrained arm quietly covered
+    every step and every gap, and a `convergence:fail` ordering an escalate
+    halt, a whole extra round, and the next round's `convergence:pass` scored
+    1.0 -- the very bypass the constrained arm had just been built to close.
+
+    Two conditions, and the second is where `fail_orders_halt` does its work:
+
+    1. The step has documented retry semantics (`is_repeatable_step`). A step
+       the docs never re-attempt has no retry to be settled by; its fail is
+       accounted for by the halt (or the authorized restart) or not at all.
+    2. The retry has to fit the kind of fail it is settling:
+
+       * AN IMMEDIATE RETRY settles either kind. An empty gap is the in-place
+         retry both repair loops perform: the exit-2 ledger repair writes a
+         file and re-runs the check, a handoff repair edits the handoff and
+         re-runs the validator, and neither emits a gate event in between. The
+         re-run's own event may itself be a `fail` (the ledger re-run
+         returning escalate or capped), so a correct repair can produce no
+         later `pass` at all -- and that next attempt then has to account for
+         ITSELF, which is what stops a chain of fails from laundering each
+         other. Only the first later attempt is considered, which loses
+         nothing: gaps only grow, so if the first is non-empty every later one
+         is too.
+
+         FOR A HALT ORDER THE RETRY IS ALSO CONSTRAINED FROM BEHIND: what
+         follows it must itself be that halt's tail. An empty gap in front of
+         the retry says nothing about what comes after it, and the laundering
+         this rule closes simply moved there --
+         `[convergence:fail, convergence:pass, phase2_to_phase3, phase3_exit,
+         convergence, workflow_exit]` put the extra round AFTER the retry and
+         scored clean. Requiring the tail makes the whole window a halt, not
+         just its front edge.
+
+         CONSERVATIVE ON PURPOSE, PENDING THE DECLARE-AND-VERIFY FOLLOW-UP.
+         Do not relax this back to an unconstrained immediate retry. It is a
+         deliberately blunt restriction, not an attempt to describe the
+         repair exactly, and it is blunt in one direction only: a repair
+         whose re-run returns `in_progress` and legitimately continues into
+         more rounds now reads as NOT accounted. That is the cost, and it is
+         the cheap error -- a false "not accounted" costs gate score on a
+         correct run, while a false "accounted" credits a run for ignoring a
+         halt, which is a scoring bypass. This predicate infers intent from a
+         flat event list that does not carry intent, and four previous
+         inferences here were each correct and each defeated by a shape they
+         had not been shown. The real fix reads the `reason` field the docs
+         already mandate on the one repairable `convergence:fail`
+         (`ledger_missing`) instead of guessing, and lands in a follow-up PR.
+         Until it does, the blunt version stands.
+       * A LATER `pass` ACROSS ANY GAP settles a VALIDATION VERDICT only.
+         Nothing between the attempts was forbidden, so the `pass` is
+         affirmative evidence the input was repaired whatever route reached
+         it. Extending the same courtesy to a halt order is the bypass:
+         work done past a halt order is the violation, and
+         `is_authorized_restart` owns the single case where such work is
+         legitimate.
+    """
+    if not is_repeatable_step(failed_step):
+        return False
+    if not isinstance(later_gates, (list, tuple)):
+        return False
+    if not fail_orders_halt(failed_step) and any(
+        isinstance(later, dict)
+        and later.get("step") == failed_step
+        and later.get("result") == "pass"
+        for later in later_gates
+    ):
+        return True
+    for offset, later in enumerate(later_gates):
+        if isinstance(later, dict) and later.get("step") == failed_step:
+            if later_gates[:offset]:
+                return False
+            if fail_orders_halt(failed_step):
+                # See "CONSTRAINED FROM BEHIND" above: for a halt order the
+                # retry has to be inside the halt, so everything after it is
+                # the halt's tail. Deliberately conservative; the follow-up
+                # PR replaces the inference rather than loosening this.
+                return is_halt_tail(later_gates[offset + 1:], failed_step)
+            return True
+    return False
+
+
+def fail_is_accounted(later_gates: object, failed_step: object) -> bool:
+    """The one predicate for "this failing gate is not a compliance defect".
+
+    Three ways, all of them corollaries of the invariant above -- the run did
+    not proceed past the fail on its own authority:
+
+      * it stopped there (`is_halt_tail`);
+      * it stopped there and a recorded `resume` restarted it
+        (`is_authorized_restart`);
+      * a documented retry of the same step settled it, in place for a halt
+        order or by a later `pass` for a validation verdict
+        (`is_settled_by_retry`).
+
+    validate_gates.py and score_execution.py each used to hand-copy the first
+    of these and had already drifted once. Both now call nothing but this, so
+    they cannot disagree about what a compliant failure looks like.
+    """
+    return (
+        is_halt_tail(later_gates, failed_step)
+        or is_authorized_restart(later_gates, failed_step)
+        or is_settled_by_retry(later_gates, failed_step)
+    )
+
+
+def halt_tail_vocabulary(failed_step: object) -> frozenset[str]:
+    """Steps admissible in the tail behind a fail on `failed_step`.
+
+    The vocabulary is evidence-based rather than flat, and the evidence is
+    which gate failed. #14 removed `convergence` from the flat halt set for a
+    real reason: at the time nothing emitted it, so an executor that appended
+    one turned ANY failed gate into a compliant halt -- a scoring bypass that
+    paid for claiming a checkpoint the run never reached. Putting it back into
+    the flat set would reopen exactly that bypass. Keying the vocabulary to
+    `failed_step` keeps both properties at once:
+
+    * `phase3_exit` fails (the auto-revert halt) -- the run demonstrably
+      reached Phase 3 step 6, so the `convergence` at step 7 behind it is an
+      event the run really did emit. Admitted.
+    * `convergence` itself fails (escalate or capped) -- it is the FAILING
+      gate. Only the exit may follow. A repair `convergence:pass` is not
+      admitted here and does not need to be: both callers test `repaired`
+      (a later `pass` for the same step) separately, and that is the check
+      that owns the repair shape.
+    * `phase1_to_phase2` or `phase2_to_phase3` fails -- the run halted before
+      Phase 3 ran, so a `convergence` behind it was invented and cannot excuse
+      the failure. Not admitted, which is #14's fix, unchanged.
+
+    The slice is exclusive of `failed_step` itself, which matters. Phase 3
+    re-emits `phase3_exit` and `convergence` on every round, so admitting the
+    failing step back into its own tail would score a run that failed
+    `phase3_exit`, ignored the mandated immediate halt, and looped through
+    another whole round as though it had stopped. Only what the documented
+    order places strictly AFTER the failure counts as its halt.
+    """
+    if failed_step in PHASE3_HALT_SEQUENCE:
+        start = PHASE3_HALT_SEQUENCE.index(failed_step)
+        return HALT_SEQUENCE_STEPS | frozenset(PHASE3_HALT_SEQUENCE[start + 1:])
+    return HALT_SEQUENCE_STEPS
 
 
 def is_halt_tail(later_gates: object, failed_step: object = None) -> bool:
@@ -150,8 +493,8 @@ def is_halt_tail(later_gates: object, failed_step: object = None) -> bool:
     `workflow_exit`, so the two disagreed about whether a run had halted even
     though a comment in each claimed they scored the same shape.
 
-    `failed_step` is the step of the gate that failed, and it decides the
-    empty-tail clause below, so callers pass it.
+    `failed_step` is the step of the gate that failed. It decides the
+    empty-tail clause below AND the tail vocabulary, so callers pass it.
 
     A tail is a halt when:
 
@@ -162,26 +505,28 @@ def is_halt_tail(later_gates: object, failed_step: object = None) -> bool:
       which is the "fewer events score better" hole one level up; or
     * `workflow_exit` is present (SKILL.md mandates it before ANY exit, so a
       tail without one is a run that carried on) and every event in the tail
-      is a halt-sequence step -- which, since `convergence` left that set,
-      means the tail is the exit event and nothing else.
+      is admissible for this `failed_step` per `halt_tail_vocabulary`.
 
-    So the documented regression auto-revert halt is exactly
-    `[phase3_exit:fail, workflow_exit]`. `workflow_exit` itself may pass or
-    fail: a passing exit is the ordinary clean stop, and it is the halt rather
-    than progress past it. An event hone never emits -- `convergence` being
-    the one this used to admit -- is not a halt-sequence step, so appending
-    one cannot turn a failed gate into a compliant halt.
+    So the documented regression auto-revert halt is
+    `[phase3_exit:fail, convergence, workflow_exit]`, and the shorter
+    `[phase3_exit:fail, workflow_exit]` is a halt too: the vocabulary says
+    what MAY follow, not what must. `workflow_exit` itself may pass or fail: a
+    passing exit is the ordinary clean stop, and it is the halt rather than
+    progress past it. A step the failing gate proves the run never reached --
+    `convergence` behind a failed `phase2_to_phase3` -- is not admissible, so
+    appending one still cannot launder that fail into a compliant halt.
     """
     if not isinstance(later_gates, (list, tuple)):
         return False
     if not later_gates:
         return failed_step == "workflow_exit"
+    allowed = halt_tail_vocabulary(failed_step)
     saw_exit = False
     for later in later_gates:
         if not isinstance(later, dict):
             return False
         step = later.get("step")
-        if step not in HALT_SEQUENCE_STEPS:
+        if step not in allowed:
             return False
         if step == "workflow_exit":
             saw_exit = True
