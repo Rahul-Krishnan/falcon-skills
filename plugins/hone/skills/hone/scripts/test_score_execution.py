@@ -268,20 +268,47 @@ class TestRepeatedGateAttemptsScoreCompliant(unittest.TestCase):
         return score_gate_compliance(timeline, "")
 
     @staticmethod
-    def _gate(step, result="pass"):
-        return {"step": step, "judge": "self-check", "result": result,
+    def _gate(step, result="pass", reason=None):
+        gate = {"step": step, "judge": "self-check", "result": result,
                 "ts": "2026-08-16T00:00:00Z"}
+        if reason is not None:
+            gate["reason"] = reason
+        return gate
 
-    def test_the_exit_2_ledger_repair_scores_fully_compliant(self):
-        gates = [
+    def _exit_2_repair(self, first_reason, second_reason):
+        return [
             self._gate("phase1_to_phase2"),
             self._gate("phase2_to_phase3"),
             self._gate("phase3_exit"),
-            self._gate("convergence", "fail"),
-            self._gate("convergence", "fail"),
+            self._gate("convergence", "fail", first_reason),
+            self._gate("convergence", "fail", second_reason),
             self._gate("workflow_exit", "fail"),
         ]
+
+    def test_the_exit_2_ledger_repair_scores_fully_compliant(self):
+        gates = self._exit_2_repair("ledger_missing", "capped")
         self.assertEqual(self._score(gates)["score"], 1.0)
+
+    def test_the_same_repair_undeclared_does_not_score_fully_compliant(self):
+        """The migration cost, priced in the dimension that pays it.
+
+        The identical events with no `reason` lose the retry that settles the
+        first fail, so a correct legacy run drops a sixth of this dimension.
+        That is the cost of the invariant: while an undeclared fail kept the
+        retry, this same run declaring the truthful `escalate` scored 0.8333
+        against 1.0 for saying nothing, which paid an executor not to declare.
+        """
+        self.assertLess(self._score(self._exit_2_repair(None, None))["score"],
+                        1.0)
+
+    def test_no_declaration_scores_below_saying_nothing(self):
+        """The invariant restated where the reviewer measured it."""
+        silent = self._score(self._exit_2_repair(None, None))["score"]
+        for word in ("escalate", "capped", "ledger_missing"):
+            with self.subTest(reason=word):
+                declared = self._score(
+                    self._exit_2_repair(word, word))["score"]
+                self.assertGreaterEqual(declared, silent)
 
     def test_a_run_that_ignored_the_halt_does_not_score_fully_compliant(self):
         gates = [
@@ -3531,3 +3558,95 @@ class TestScorerFingerprint(unittest.TestCase):
             baseline["metadata"]["scorer_fingerprint"],
             variant["metadata"]["scorer_fingerprint"],
         )
+
+
+class TestGateComplianceReadsTheHaltDeclaration(unittest.TestCase):
+    """The scorer and validate_gates.py read the failing event the same way.
+
+    Both call hone_common.fail_is_accounted, and both now hand it the event's
+    own `reason`. If only one did, the two would disagree about the same state
+    file -- the drift this helper was extracted to end.
+    """
+
+    @staticmethod
+    def _gate(step, result="pass", reason=None):
+        event = {"step": step, "judge": "self-check", "result": result,
+                 "ts": "t"}
+        if reason is not None:
+            event["reason"] = reason
+        return event
+
+    def _round_trip(self, reason):
+        """The capped human-gate restart, declared or not, scored end to end."""
+        return _score_written_gates([
+            self._gate("phase1_to_phase2"),
+            self._gate("phase2_to_phase3"),
+            self._gate("phase3_exit"),
+            self._gate("convergence", "fail", reason),
+            self._gate("workflow_exit"),
+            self._gate("resume"),
+            self._gate("phase2_to_phase3"),
+            self._gate("phase3_exit"),
+            self._gate("convergence"),
+            self._gate("workflow_exit"),
+        ])
+
+    def test_a_declared_capped_restart_scores_clean(self):
+        self.assertEqual(self._round_trip("capped")["score"], 1.0)
+
+    def test_the_same_events_after_an_escalate_do_not(self):
+        self.assertLess(self._round_trip("escalate")["score"], 1.0)
+
+    def test_an_undeclared_halt_scores_conservatively(self):
+        """Fail-closed: silence gets the strict reading, not a generous one.
+
+        And "strict" means the strictest: an undeclared halt scores no
+        better than the truthful `escalate` on the same events, which is
+        what keeps the truth from costing anything.
+        """
+        self.assertLess(self._round_trip(None)["score"], 1.0)
+        self.assertLessEqual(self._round_trip(None)["score"],
+                             self._round_trip("escalate")["score"])
+
+    def test_declaring_the_repair_does_not_raise_the_laundering_score(self):
+        """The exploit this dimension paid out on, closed.
+
+        A run that ignored an `escalate` and did another round emits exactly
+        these events. It briefly scored 1.0 by writing `ledger_missing` into
+        the fail, beating both silence and the truth. Every reading of the
+        shape now scores the same, so there is nothing to buy.
+        """
+        gates = [
+            self._gate("phase1_to_phase2"),
+            self._gate("phase2_to_phase3"),
+            self._gate("phase3_exit"),
+            self._gate("convergence", "fail", "ledger_missing"),
+            self._gate("convergence"),
+            self._gate("phase2_to_phase3"),
+            self._gate("phase3_exit"),
+            self._gate("convergence"),
+            self._gate("workflow_exit"),
+        ]
+        declared = _score_written_gates(gates)["score"]
+        self.assertLess(declared, 1.0)
+        undeclared = [dict(g) for g in gates]
+        undeclared[3].pop("reason")
+        self.assertEqual(_score_written_gates(undeclared)["score"], declared)
+        for reason in ("escalate", "capped"):
+            with self.subTest(reason=reason):
+                lied = [dict(g) for g in gates]
+                lied[3]["reason"] = reason
+                self.assertLessEqual(
+                    _score_written_gates(lied)["score"], declared)
+
+    def test_the_halted_ledger_repair_still_scores_clean(self):
+        """The honest repair that reaches its exit loses nothing."""
+        gates = [
+            self._gate("phase1_to_phase2"),
+            self._gate("phase2_to_phase3"),
+            self._gate("phase3_exit"),
+            self._gate("convergence", "fail", "ledger_missing"),
+            self._gate("convergence"),
+            self._gate("workflow_exit"),
+        ]
+        self.assertEqual(_score_written_gates(gates)["score"], 1.0)

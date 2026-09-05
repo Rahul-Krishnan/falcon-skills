@@ -41,6 +41,10 @@
         }
       }
     },
+    "reason": {
+      "type": "string",
+      "description": "Why this gate produced its result. Free-form annotation on most events (e.g. 'corrupt_state_file' on a workflow_exit fail, 'prior evaluation reused' on a fixonly_entry). CLOSED where a settlement predicate reads it: see the allOf branch below. hone_common.HALT_REASONS is authoritative for that vocabulary and this schema mirrors it; test_hone_common asserts the two agree."
+    },
     "findings": {
       "type": "array",
       "items": {"type": "string"},
@@ -51,6 +55,23 @@
       "description": "ISO 8601 timestamp of gate evaluation"
     }
   },
+  "allOf": [
+    {
+      "description": "A failing `convergence` declares WHICH failure it is, because the three have opposite settlement rules and identical event shapes: 'escalate' is a forced halt with no restart and no retry, 'capped' is the forced halt the --confirm human gate may restart with a `resume`, and 'ledger_missing' is the repairable exit-2 omission, the only one an in-place retry may settle at all. hone_common.fail_is_accounted reads this field in one direction only: a declaration rules a settlement out, never in, because the field is written by the run being scored and nothing corroborates it. It is not `required` here only so that state files written before the field existed still validate; an event that omits it, or carries a value outside this enum, is settled at the strictest reading there is (no restart AND no in-place retry, tied with 'escalate' and below the other two), so omitting it never beats declaring a vocabulary value, and no value reaches a settlement the same events did not already reach. On the events an honest run emits, the truth therefore scores at least as well as anything else it could have written. An out-of-enum value on a failing convergence is a deliberate breaking change from the era when `reason` was unvalidated free text on every event: validate_gates.py reports it as an error, while an absent one is only a warning.",
+      "if": {
+        "properties": {
+          "step": {"const": "convergence"},
+          "result": {"const": "fail"}
+        },
+        "required": ["step", "result"]
+      },
+      "then": {
+        "properties": {
+          "reason": {"enum": ["capped", "escalate", "ledger_missing"]}
+        }
+      }
+    }
+  ],
   "examples": [
     {
       "step": "phase1_to_phase2",
@@ -77,6 +98,13 @@
         {"severity": "HIGH", "item": "round_scores_written_to_state", "result": "pass"}
       ],
       "ts": "2026-04-09T13:00:00-07:00"
+    },
+    {
+      "step": "convergence",
+      "judge": "self-check",
+      "result": "fail",
+      "reason": "capped",
+      "ts": "2026-04-09T13:05:00-07:00"
     }
   ]
 }

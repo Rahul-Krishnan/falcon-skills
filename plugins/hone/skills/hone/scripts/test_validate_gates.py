@@ -8,8 +8,12 @@ import unittest
 from validate_gates import derive_edits_applied, validate_gates
 
 
-def gate(step, result="pass", judge="self-check"):
-    return {"step": step, "judge": judge, "result": result, "ts": "2026-08-16T00:00:00Z"}
+def gate(step, result="pass", judge="self-check", reason=None):
+    event = {"step": step, "judge": judge, "result": result,
+             "ts": "2026-08-16T00:00:00Z"}
+    if reason is not None:
+        event["reason"] = reason
+    return event
 
 
 NORMAL_RUN = [
@@ -506,7 +510,9 @@ class TestHaltSequenceTail(unittest.TestCase):
                     gate("phase1_to_phase2"),
                     gate("phase2_to_phase3"),
                     gate("phase3_exit", result="fail"),
-                    gate("convergence", result=convergence_result),
+                    gate("convergence", result=convergence_result,
+                         reason="escalate" if convergence_result == "fail"
+                         else None),
                     gate("workflow_exit", result="pass"),
                 ]
                 report = validate_gates(gates, "normal")
@@ -712,8 +718,8 @@ class TestRepeatedGateAttempts(unittest.TestCase):
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
             gate("phase3_exit"),
-            gate("convergence", result="fail"),
-            gate("convergence", result="fail"),
+            gate("convergence", result="fail", reason="ledger_missing"),
+            gate("convergence", result="fail", reason="escalate"),
             gate("workflow_exit", result="fail"),
         ]
         report = validate_gates(gates, "normal")
@@ -724,7 +730,7 @@ class TestRepeatedGateAttempts(unittest.TestCase):
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
             gate("phase3_exit"),
-            gate("convergence", result="fail"),
+            gate("convergence", result="fail", reason="ledger_missing"),
             gate("convergence"),
             gate("workflow_exit"),
         ]
@@ -745,12 +751,12 @@ class TestRepeatedGateAttempts(unittest.TestCase):
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
             gate("phase3_exit"),
-            gate("convergence", result="fail"),
+            gate("convergence", result="fail", reason="capped"),
             gate("workflow_exit"),
             gate("resume"),
             gate("phase2_to_phase3"),
             gate("phase3_exit"),
-            gate("convergence", result="fail"),
+            gate("convergence", result="fail", reason="capped"),
             gate("workflow_exit", result="fail"),
         ]
         report = validate_gates(gates, "normal")
@@ -762,11 +768,11 @@ class TestRepeatedGateAttempts(unittest.TestCase):
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
             gate("phase3_exit"),
-            gate("convergence", result="fail"),
+            gate("convergence", result="fail", reason="capped"),
             gate("resume"),
             gate("phase2_to_phase3"),
             gate("phase3_exit"),
-            gate("convergence", result="fail"),
+            gate("convergence", result="fail", reason="capped"),
             gate("workflow_exit", result="fail"),
         ]
         report = validate_gates(gates, "normal")
@@ -779,10 +785,10 @@ class TestRepeatedGateAttempts(unittest.TestCase):
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
             gate("phase3_exit"),
-            gate("convergence", result="fail"),
+            gate("convergence", result="fail", reason="capped"),
             gate("phase2_to_phase3"),
             gate("phase3_exit"),
-            gate("convergence", result="fail"),
+            gate("convergence", result="fail", reason="capped"),
             gate("workflow_exit", result="fail"),
         ]
         report = validate_gates(gates, "normal")
@@ -945,3 +951,162 @@ class TestScopeVerifyCannotBeSwitchedOff(unittest.TestCase):
                 scope_verify_exempt(mode, [gate("workflow_exit", result="fail")]),
                 mode,
             )
+
+
+class TestHaltReasonValidation(unittest.TestCase):
+    """`reason` is validated because a settlement predicate keys on it.
+
+    Before this, `reason` was validated nowhere -- not by this script, not by
+    the published schema. That is survivable while nothing reads the field and
+    is not survivable once a declaration buys an outcome: an executor writing
+    an arbitrary string, or the wrong type, or nothing at all, must never do
+    better than one telling the truth.
+    """
+
+    HALT = [
+        gate("phase1_to_phase2"),
+        gate("phase2_to_phase3"),
+        gate("phase3_exit"),
+    ]
+
+    def _report(self, convergence_gate):
+        gates = self.HALT + [convergence_gate, gate("workflow_exit")]
+        return validate_gates(gates, "normal")
+
+    def test_a_declared_verdict_is_accepted(self):
+        for reason in ("escalate", "capped"):
+            with self.subTest(reason=reason):
+                report = self._report(
+                    gate("convergence", result="fail", reason=reason))
+                self.assertTrue(report["valid"])
+                self.assertEqual(
+                    [w for w in report["warnings"] if "reason" in w], [])
+
+    def test_an_undeclared_halt_warns_and_names_the_vocabulary(self):
+        """A warning, not an error, and only for migration.
+
+        State files written before the field existed carry no `reason` and
+        stay valid. What they lose is settlements, not validity: an
+        undeclared halt forfeits both the restart and the in-place retry.
+        """
+        report = self._report(gate("convergence", result="fail"))
+        self.assertTrue(report["valid"])
+        matched = [w for w in report["warnings"]
+                   if "without declaring a reason" in w]
+        self.assertEqual(len(matched), 1)
+        for word in ("capped", "escalate", "ledger_missing"):
+            self.assertIn(word, matched[0])
+
+    def test_an_invented_reason_is_an_error(self):
+        """Junk is never better than silence, and here it is worse.
+
+        At the predicate the two are identical -- both resolve to `None` and
+        lose both settlements. This file is what separates them, and it
+        separates them in the direction a typo should go.
+        """
+        report = self._report(
+            gate("convergence", result="fail", reason="looks_fine_to_me"))
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("is not one of" in e for e in report["errors"]))
+
+    def test_a_legacy_free_form_reason_is_a_documented_breaking_change(self):
+        """A state file that validated before this enum existed now errors.
+
+        `reason` was in no `properties` block and was read by nothing, so a
+        free-form value on a failing `convergence` was legal. It is now an
+        error, which exits this script non-zero at the mechanical exit gate.
+        That is deliberate, not a regression to soften into a warning: the
+        state file is a per-run artifact at /tmp/workflow-${RUN_ID}.json
+        written and validated inside the same run, so there is no corpus to
+        migrate; the only `reason` the docs ever mandated on this step was
+        the literal `ledger_missing`, which is in the vocabulary; and nothing
+        in the state file records a schema version, so a warning added "for a
+        migration window" would have no way to close and would downgrade
+        typos along with legacy values.
+
+        An ABSENT reason stays a warning, because absence is what every
+        pre-`reason` file actually contains. Neither buys anything at the
+        predicate: both resolve to `None` and lose both settlements.
+        """
+        legacy = self._report(
+            gate("convergence", result="fail",
+                 reason="escalate: f1,f2 open 4 rounds"))
+        self.assertFalse(legacy["valid"])
+        self.assertTrue(any("is not one of" in e for e in legacy["errors"]))
+
+        absent = self._report(gate("convergence", result="fail"))
+        self.assertTrue(absent["valid"])
+        self.assertTrue(any("without declaring a reason" in w
+                            for w in absent["warnings"]))
+
+    def test_a_near_miss_is_an_error_rather_than_a_silent_pass(self):
+        """Matching is exact, so a typo is reported instead of normalized."""
+        for reason in ("Capped", " capped ", "CAPPED", "in_progress"):
+            with self.subTest(reason=reason):
+                report = self._report(
+                    gate("convergence", result="fail", reason=reason))
+                self.assertFalse(report["valid"])
+
+    def test_a_non_string_reason_is_a_schema_error(self):
+        """The schema declares `reason` a string for every event."""
+        for value in (7, True, ["capped"], {"reason": "capped"}, None):
+            with self.subTest(value=repr(value)):
+                event = gate("convergence", result="fail")
+                event["reason"] = value
+                report = validate_gates(
+                    self.HALT + [event, gate("workflow_exit")], "normal")
+                self.assertFalse(report["valid"])
+                self.assertTrue(
+                    any("reason must be a string" in e
+                        for e in report["errors"]))
+
+    def test_a_passing_convergence_needs_no_declaration(self):
+        """Only a `fail` is ambiguous; `converged` and `in_progress` both pass."""
+        report = self._report(gate("convergence"))
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["warnings"], [])
+
+    def test_reason_stays_free_form_where_nothing_reads_it(self):
+        """SKILL.md's own examples must keep validating.
+
+        `corrupt_state_file` on a failing `workflow_exit` and "prior
+        evaluation reused" on a `fixonly_entry` are documented values that no
+        predicate reads, so closing the enum over every event would have
+        invalidated the skill's own text.
+        """
+        gates = [
+            gate("fixonly_entry", reason="prior evaluation reused"),
+            gate("phase2_to_phase3"),
+            gate("phase3_exit"),
+            gate("convergence"),
+            gate("workflow_exit", result="fail",
+                 reason="corrupt_state_file"),
+        ]
+        report = validate_gates(gates, "fix-only")
+        self.assertTrue(report["valid"])
+        self.assertEqual(report["warnings"], [])
+
+    def test_the_declaration_reaches_the_fail_semantics_check(self):
+        """The validator and the predicate read the same event.
+
+        Identical sequences, opposite verdicts, and the only difference is the
+        word on the failing event -- which is the whole change.
+        """
+        def run(reason):
+            gates = self.HALT + [
+                gate("convergence", result="fail", reason=reason),
+                gate("workflow_exit"),
+                gate("resume"),
+                gate("phase2_to_phase3"),
+                gate("phase3_exit"),
+                gate("convergence"),
+                gate("workflow_exit"),
+            ]
+            return validate_gates(gates, "normal", resumed=True)
+
+        capped = run("capped")
+        self.assertEqual(
+            [w for w in capped["warnings"] if "the run continued" in w], [])
+        escalate = run("escalate")
+        self.assertTrue(
+            any("the run continued" in w for w in escalate["warnings"]))
