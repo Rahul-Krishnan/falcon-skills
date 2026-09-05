@@ -968,6 +968,7 @@ class TestRunShapeTable(unittest.TestCase):
             "confirmed_on_disk": True,
             "artifact_before_snapshot": "/tmp/snap.md",
             "syntax_check_passed": True,
+            "edited_paths": ["/tmp/skill/SKILL.md"],
         },
     }
 
@@ -1069,6 +1070,7 @@ class TestReadBackIsAGate(unittest.TestCase):
         "confirmed_on_disk": True,
         "artifact_before_snapshot": "/tmp/before.md",
         "syntax_check_passed": True,
+        "edited_paths": ["/tmp/skill/SKILL.md"],
     }
 
     def test_confirmed_read_back_validates(self) -> None:
@@ -1089,6 +1091,29 @@ class TestReadBackIsAGate(unittest.TestCase):
 
     def test_a_missing_key_still_fails(self) -> None:
         handoff = {k: v for k, v in self.HANDOFF.items() if k != "confirmed_on_disk"}
+        result = validate_handoff({"applied_edits": handoff}, "applied_edits")
+        self.assertFalse(result.valid)
+
+    def test_the_declared_paths_are_required(self) -> None:
+        """The scope guard attributes from this list, so an absent one halts.
+
+        `check_scope.py --verify` answers a missing declaration with
+        `not_measurable`, which halts the run anyway. Failing here instead
+        makes the halt say what is actually wrong.
+        """
+        handoff = {k: v for k, v in self.HANDOFF.items() if k != "edited_paths"}
+        result = validate_handoff({"applied_edits": handoff}, "applied_edits")
+        self.assertFalse(result.valid)
+
+    def test_an_empty_declared_path_list_fails(self) -> None:
+        # `edit_count >= 1` is required, so a run that applied edits and can
+        # name no file it wrote is contradicting itself.
+        handoff = dict(self.HANDOFF, edited_paths=[])
+        result = validate_handoff({"applied_edits": handoff}, "applied_edits")
+        self.assertFalse(result.valid)
+
+    def test_a_blank_declared_path_fails(self) -> None:
+        handoff = dict(self.HANDOFF, edited_paths=[""])
         result = validate_handoff({"applied_edits": handoff}, "applied_edits")
         self.assertFalse(result.valid)
 

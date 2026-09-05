@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Tests for check_scope.py."""
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -48,6 +50,20 @@ def init_repo(path: Path) -> bool:
 def run_cli(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, SCRIPT, *args],
                           capture_output=True, text=True)
+
+
+def declaring(root: Path, *paths: str) -> check_scope.Declaration:
+    """The declaration a run makes when it wrote exactly `paths`.
+
+    Root-relative spellings in, resolved paths out, so a test states what its
+    simulated run wrote in the same terms the report uses.
+    """
+    return check_scope.normalize_declared([str(root / p) for p in paths], root)
+
+
+# A run that wrote nothing at all: present, and empty. Not the same value as
+# the absence of a declaration, which is what `verify(...)` defaults to.
+NOTHING = check_scope.Declaration(set())
 
 
 class TestScopeMatching(unittest.TestCase):
@@ -154,7 +170,8 @@ class TestPreexistingDirtyTree(unittest.TestCase):
         # Simulate a repo where workout/ was already uncommitted before we ran.
         check_scope._git_changed = lambda root: ["hone/SKILL.md", "workout/SKILL.md"]
         try:
-            report = verify(self.root, state, ["hone"])
+            report = verify(self.root, state, ["hone"],
+                            declared=declaring(self.root, "hone/SKILL.md"))
         finally:
             check_scope._git_changed = real_git
 
@@ -165,7 +182,8 @@ class TestPreexistingDirtyTree(unittest.TestCase):
     def test_real_out_of_scope_edit_still_violates(self):
         state = walk_state(self.root)
         (self.root / "workout" / "SKILL.md").write_text("WE ACTUALLY CHANGED THIS")
-        report = verify(self.root, state, ["hone"])
+        report = verify(self.root, state, ["hone"],
+                        declared=declaring(self.root, "workout/SKILL.md"))
         self.assertIn("workout/SKILL.md", report["violations"])
         self.assertEqual(report["verdict"], "scope_violation")
 
@@ -184,43 +202,48 @@ class TestVerify(unittest.TestCase):
 
     def test_in_scope_edit_is_clean(self):
         (self.root / "allowed" / "f.md").write_text("changed")
-        report = verify(self.root, self.state, ["allowed"])
+        report = verify(self.root, self.state, ["allowed"],
+                        declared=declaring(self.root, "allowed/f.md"))
         self.assertEqual(report["verdict"], "clean")
         self.assertEqual(report["modified_in_scope"], ["allowed/f.md"])
 
     def test_out_of_scope_edit_is_a_violation(self):
         (self.root / "other" / "g.md").write_text("changed")
-        report = verify(self.root, self.state, ["allowed"])
+        report = verify(self.root, self.state, ["allowed"],
+                        declared=declaring(self.root, "other/g.md"))
         self.assertEqual(report["verdict"], "scope_violation")
         self.assertIn("other/g.md", report["violations"])
 
     def test_untracked_new_file_out_of_scope_is_caught(self):
         # The case a git diff alone would miss entirely.
         (self.root / "other" / "new.md").write_text("surprise")
-        report = verify(self.root, self.state, ["allowed"])
+        report = verify(self.root, self.state, ["allowed"],
+                        declared=declaring(self.root, "other/new.md"))
         self.assertEqual(report["verdict"], "scope_violation")
         self.assertIn("other/new.md", report["violations"])
 
     def test_new_file_in_scope_is_reported_not_violated(self):
         (self.root / "allowed" / "new.md").write_text("expected")
-        report = verify(self.root, self.state, ["allowed"])
+        report = verify(self.root, self.state, ["allowed"],
+                        declared=declaring(self.root, "allowed/new.md"))
         self.assertEqual(report["verdict"], "clean")
         self.assertIn("allowed/new.md", report["new_files_in_scope"])
 
     def test_deletion_out_of_scope_is_a_violation(self):
         (self.root / "other" / "g.md").unlink()
-        report = verify(self.root, self.state, ["allowed"])
+        report = verify(self.root, self.state, ["allowed"],
+                        declared=declaring(self.root, "other/g.md"))
         self.assertEqual(report["verdict"], "scope_violation")
 
     def test_no_change_is_clean(self):
-        report = verify(self.root, self.state, ["allowed"])
+        report = verify(self.root, self.state, ["allowed"], declared=NOTHING)
         self.assertEqual(report["verdict"], "clean")
 
     def test_manifest_exclusion_prevents_self_detection(self):
         manifest_file = self.root / "m.json"
         manifest_file.write_text("{}")
         report = verify(self.root, self.state, ["allowed"],
-                        exclude={manifest_file.resolve()})
+                        exclude={manifest_file.resolve()}, declared=NOTHING)
         self.assertEqual(report["verdict"], "clean")
 
 
@@ -286,7 +309,8 @@ class TestGitPathNamespace(unittest.TestCase):
     def test_edited_in_scope_file_is_not_reported_preexisting(self):
         state = walk_state(self.root)
         (self.root / "hone" / "SKILL.md").write_text("edited by this run\n")
-        report = verify(self.root, state, ["hone"])
+        report = verify(self.root, state, ["hone"],
+                        declared=declaring(self.root, "hone/SKILL.md"))
         self.assertEqual(report["verdict"], "clean")
         self.assertEqual(report["preexisting_dirty_out_of_scope"], ["other/g.md"])
         self.assertNotIn("hone/SKILL.md", report["preexisting_dirty_out_of_scope"])
@@ -317,7 +341,8 @@ class TestUntrackedDirectories(unittest.TestCase):
         state = check_scope.snapshot_state(self.root)
         (self.root / "newdir").mkdir()
         (self.root / "newdir" / "x.txt").write_text("written by this run\n")
-        report = verify(self.root, state, ["hone"])
+        report = verify(self.root, state, ["hone"],
+                        declared=declaring(self.root, "newdir/x.txt"))
         self.assertTrue(report["git_available"])
         self.assertEqual(report["violations"], ["newdir/x.txt"])
         self.assertEqual(report["preexisting_dirty_out_of_scope"], [])
@@ -413,7 +438,8 @@ class TestManifestRootMismatch(unittest.TestCase):
         run_cli("--root", str(self.root), "--manifest", str(self.manifest),
                 "--snapshot")
         verify_run = run_cli("--root", str(self.root), "--manifest",
-                             str(self.manifest), "--scope", "hone", "--verify")
+                             str(self.manifest), "--scope", "hone", "--verify",
+                             "--declared-none")
         self.assertEqual(verify_run.returncode, 0, verify_run.stderr)
 
     def test_a_spelling_difference_for_the_same_directory_is_not_a_mismatch(self):
@@ -421,7 +447,8 @@ class TestManifestRootMismatch(unittest.TestCase):
                 "--snapshot")
         respelled = str(self.root) + "/./hone/.."
         verify_run = run_cli("--root", respelled, "--manifest",
-                             str(self.manifest), "--scope", "hone", "--verify")
+                             str(self.manifest), "--scope", "hone", "--verify",
+                             "--declared-none")
         self.assertEqual(verify_run.returncode, 0, verify_run.stderr)
 
 
@@ -474,7 +501,8 @@ class TestSkillInsideARepository(unittest.TestCase):
         (self.repo / "plugins" / "p" / "commands" / "c.md").write_text("cmd v2\n")
         (self.repo / "scripts" / "x.py").write_text("print(2)\n")
         (self.repo / "plugins" / "q" / "SKILL.md").write_text("sibling v2\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.skill / "SKILL.md"))
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         report = json.loads(run.stdout)
         self.assertEqual(report["verdict"], "not_measurable")
@@ -503,7 +531,7 @@ class TestSkillInsideARepository(unittest.TestCase):
         self.assertNotIn("lib/shared.md", json.dumps(payload))
 
         (self.repo / "lib" / "shared.md").write_text("clean v2\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json", "--declared-none")
         self.assertEqual(run.returncode, 3, run.stdout)
         report = json.loads(run.stdout)
         self.assertEqual(report["verdict"], "not_measurable")
@@ -515,7 +543,8 @@ class TestSkillInsideARepository(unittest.TestCase):
         """Acceptance 8: the case a git diff cannot see at all."""
         self.assertEqual(self._snapshot().returncode, 0)
         (self.repo / "scripts" / "new.py").write_text("brand new\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "scripts" / "new.py"))
         self.assertEqual(run.returncode, 1, run.stdout)
         report = json.loads(run.stdout)
         self.assertEqual(report["violations"], ["scripts/new.py"])
@@ -530,14 +559,15 @@ class TestSkillInsideARepository(unittest.TestCase):
                        capture_output=True)
         self.assertEqual(self._snapshot().returncode, 0)
         (self.repo / "scripts" / "ignored-out.py").write_text("invisible to diff\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "scripts" / "ignored-out.py"))
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertIn("scripts/ignored-out.py", json.loads(run.stdout)["violations"])
 
     def test_a_clean_tracked_file_deleted_out_of_scope_is_unattributed(self):
         self.assertEqual(self._snapshot().returncode, 0)
         (self.repo / "lib" / "shared.md").unlink()
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json", "--declared-none")
         self.assertEqual(run.returncode, 3, run.stdout)
         report = json.loads(run.stdout)
         self.assertEqual(report["verdict"], "not_measurable")
@@ -545,16 +575,24 @@ class TestSkillInsideARepository(unittest.TestCase):
         self.assertEqual(report["violations"], [])
         self.assertEqual(report["counts"]["removed"], 1)
 
-    def test_a_dirty_file_deleted_out_of_scope_is_a_violation(self):
-        """The manifest holds a pre-image here, so the change is attributable."""
+    def test_a_dirty_file_deleted_out_of_scope_is_a_violation_when_declared(self):
+        """Declared, so attributable, and flagged as needing a manual undo.
+
+        The file was already dirty when the run began, so restoring it with
+        `git checkout` would take the earlier uncommitted work with it. The
+        attribution is sound; only the remedy differs, which is what
+        `violations_manual_revert` carries.
+        """
         (self.repo / "lib" / "shared.md").write_text("dirty before the run\n")
         self.assertEqual(self._snapshot().returncode, 0)
         (self.repo / "lib" / "shared.md").unlink()
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "lib" / "shared.md"))
         self.assertEqual(run.returncode, 1, run.stdout)
         report = json.loads(run.stdout)
         self.assertEqual(report["verdict"], "scope_violation")
         self.assertEqual(report["violations"], ["lib/shared.md"])
+        self.assertEqual(report["violations_manual_revert"], ["lib/shared.md"])
         self.assertEqual(report["unattributed_out_of_scope"], [])
 
     def test_preexisting_dirty_is_reported_and_not_violated(self):
@@ -565,18 +603,20 @@ class TestSkillInsideARepository(unittest.TestCase):
         self.assertIn("lib/shared.md", payload["dirty_tracked"])
 
         (self.skill / "SKILL.md").write_text("skill v2\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.skill / "SKILL.md"))
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         report = json.loads(run.stdout)
         self.assertEqual(report["violations"], [])
         self.assertEqual(report["preexisting_dirty_out_of_scope"], ["lib/shared.md"])
 
-    def test_editing_a_preexisting_dirty_file_is_still_a_violation(self):
-        """The hash is the only thing separating "already dirty" from "we did it"."""
+    def test_editing_a_preexisting_dirty_file_is_a_violation_when_declared(self):
+        """Declared, so it is this run's edit however dirty the file already was."""
         (self.repo / "lib" / "shared.md").write_text("someone else's uncommitted\n")
         self.assertEqual(self._snapshot().returncode, 0)
         (self.repo / "lib" / "shared.md").write_text("and then WE changed it\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "lib" / "shared.md"))
         self.assertEqual(run.returncode, 1, run.stdout)
         report = json.loads(run.stdout)
         self.assertEqual(report["violations"], ["lib/shared.md"])
@@ -585,15 +625,46 @@ class TestSkillInsideARepository(unittest.TestCase):
     def test_verify_needs_only_the_manifest(self):
         """Acceptance 6: no --root, no --scope, no re-derivation by the caller."""
         self.assertEqual(self._snapshot().returncode, 0)
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json", "--declared-none")
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         report = json.loads(run.stdout)
         self.assertEqual(report["scope"], ["plugins/p/skills/s"])
         self.assertEqual(os.path.realpath(report["root"]),
                          os.path.realpath(self.repo))
 
+    def test_a_large_but_clean_repository_keeps_the_wide_watch(self):
+        """r2-S3: the budget bounds the hashing, and a clean repo hashes nothing.
+
+        `--max-files` used to be compared against the repository's tracked
+        count, so any monorepo over the limit had its watch narrowed to the
+        install directory. In git mode the snapshot hashes only dirty and
+        untracked files, so narrowing saved no work at all and dropped exactly
+        the coverage the wide root exists for.
+        """
+        snap = self._snapshot("--max-files", "1")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        report = json.loads(snap.stdout)
+        self.assertNotIn("root_fallback", report)
+        self.assertEqual(os.path.realpath(report["root"]),
+                         os.path.realpath(self.repo))
+
+        # And the wide watch still does its job.
+        (self.repo / "plugins" / "p" / "commands" / "c.md").write_text("cmd v2\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared",
+                      str(self.repo / "plugins" / "p" / "commands" / "c.md"))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(json.loads(run.stdout)["violations"],
+                         ["plugins/p/commands/c.md"])
+
     def test_max_files_narrows_the_root_and_says_so(self):
-        """Acceptance 7: a silent narrowing is the failure this PR is about."""
+        """Acceptance 7: a silent narrowing is the failure this PR is about.
+
+        The budget is spent on files that must actually be hashed, so it takes
+        real uncommitted work to exceed it.
+        """
+        for name in ("a", "b", "c", "d"):
+            (self.repo / f"untracked-{name}.md").write_text("uncommitted\n")
         snap = self._snapshot("--max-files", "2")
         self.assertEqual(snap.returncode, 0, snap.stderr)
         fallback = json.loads(snap.stdout)["root_fallback"]
@@ -608,7 +679,8 @@ class TestSkillInsideARepository(unittest.TestCase):
                          os.path.realpath(self.skill.parent))
         self.assertEqual(payload["scope"], ["s"])
 
-        run = run_cli("--manifest", str(self.manifest), "--verify")
+        run = run_cli("--manifest", str(self.manifest), "--verify",
+                      "--declared-none")
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("NARROWER than intended", run.stdout)
 
@@ -652,7 +724,8 @@ class TestHookOutsideARepository(unittest.TestCase):
     def test_editing_the_artifact_itself_is_clean(self):
         self.assertEqual(self._snapshot().returncode, 0)
         (self.hooks / "foo.sh").write_text("#foo v2\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.hooks / "foo.sh"))
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         report = json.loads(run.stdout)
         self.assertEqual(report["violations"], [])
@@ -661,7 +734,8 @@ class TestHookOutsideARepository(unittest.TestCase):
     def test_editing_a_sibling_hook_is_a_violation(self):
         self.assertEqual(self._snapshot().returncode, 0)
         (self.hooks / "bar.sh").write_text("#bar v2\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.hooks / "bar.sh"))
         self.assertEqual(run.returncode, 1, run.stdout)
         self.assertEqual(json.loads(run.stdout)["violations"], ["bar.sh"])
 
@@ -805,7 +879,8 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
     def test_an_edit_inside_a_nested_repository_is_a_violation(self):
         self.assertEqual(self._snapshot().returncode, 0)
         (self.nested / "other.md").write_text("clobbered by the run\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.nested / "other.md"))
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         report = json.loads(run.stdout)
         self.assertEqual(report["verdict"], "scope_violation")
@@ -814,14 +889,16 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
     def test_a_new_file_in_a_nested_repository_is_a_violation(self):
         self.assertEqual(self._snapshot().returncode, 0)
         (self.nested / "added.md").write_text("brand new\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.nested / "added.md"))
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn("nested/added.md", json.loads(run.stdout)["violations"])
 
     def test_an_untouched_nested_repository_verifies_clean(self):
         self.assertEqual(self._snapshot().returncode, 0)
         (self.skill / "SKILL.md").write_text("skill v2\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.skill / "SKILL.md"))
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(json.loads(run.stdout)["verdict"], "clean")
 
@@ -837,7 +914,8 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
         self.assertIn("sub", payload["nested"])
 
         (self.repo / "sub" / "other.md").write_text("clobbered inside a submodule\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "sub" / "other.md"))
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         report = json.loads(run.stdout)
         self.assertIn("sub/other.md", report["violations"])
@@ -865,7 +943,9 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
         self.assertEqual(json.loads(run.stdout)["nested_repos"], ["sub"])
 
         (self.repo / "skills" / "sub" / "other.md").write_text("clobbered\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared",
+                      str(self.repo / "skills" / "sub" / "other.md"))
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn("sub/other.md", json.loads(run.stdout)["violations"])
 
@@ -875,7 +955,7 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
                        "--max-files", "0")
         self.assertEqual(snap.returncode, 0, snap.stderr)
         self.assertIn("nested", json.loads(snap.stdout)["unmeasurable"])
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json", "--declared-none")
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
         report = json.loads(run.stdout)
         self.assertEqual(report["verdict"], "not_measurable")
@@ -892,7 +972,8 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
                        "--max-files", "0")
         self.assertEqual(snap.returncode, 0, snap.stderr)
         (self.repo / "outside.md").write_text("untracked and out of scope\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "outside.md"))
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         report = json.loads(run.stdout)
         self.assertEqual(report["verdict"], "scope_violation")
@@ -938,7 +1019,7 @@ class TestPreImagesSurviveASubtreeChangingShape(unittest.TestCase):
 
         if not init_repo(vendor):  # pragma: no cover
             self.skipTest("git unavailable")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json", "--declared-none")
         report = json.loads(run.stdout)
         self.assertEqual(report["violations"], [], run.stdout)
         self.assertEqual(run.returncode, 0, run.stdout)
@@ -953,7 +1034,7 @@ class TestPreImagesSurviveASubtreeChangingShape(unittest.TestCase):
         self.assertIn("vendor", json.loads(self.manifest.read_text())["nested"])
 
         shutil.rmtree(vendor / ".git")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json", "--declared-none")
         report = json.loads(run.stdout)
         self.assertEqual(report["violations"], [], run.stdout)
         self.assertEqual(run.returncode, 0, run.stdout)
@@ -966,7 +1047,8 @@ class TestPreImagesSurviveASubtreeChangingShape(unittest.TestCase):
             self.skipTest("git unavailable")
         self.assertEqual(self._snapshot().returncode, 0)
         (vendor / "lib.txt").write_text("clobbered\n")
-        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(vendor / "lib.txt"))
         report = json.loads(run.stdout)
         self.assertEqual(report["violations"], ["vendor/lib.txt"], run.stdout)
         self.assertEqual(report["counts"]["modified"], 1)
@@ -1035,3 +1117,512 @@ class TestToolCacheDirectoriesAreIgnored(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAttributionComesFromTheDeclaration(unittest.TestCase):
+    """r2-B2/r2-B3: the revert path used to fire in exactly the wrong case.
+
+    Attribution was inferred from whether the snapshot held a pre-image, and a
+    pre-image only proves a file changed DURING the round. Measured on the tree
+    this replaces:
+
+      hone edits a clean tracked sibling   -> not_measurable, violations []
+      the user's own WIP, edited by them   -> scope_violation, violations [it]
+
+    So the `git checkout` the caller is told to run never fired for the case
+    the guard exists for, and fired only where attribution was unsound. Both
+    directions are pinned here.
+    """
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        self.skill = self.repo / "plugins" / "p" / "skills" / "s"
+        self.skill.mkdir(parents=True)
+        (self.skill / "SKILL.md").write_text("skill v1\n")
+        (self.repo / "plugins" / "p" / "commands").mkdir(parents=True)
+        self.sibling = self.repo / "plugins" / "p" / "commands" / "other.md"
+        self.sibling.write_text("other v1\n")
+        if not init_repo(self.repo):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _snapshot(self):
+        return run_cli("--artifact", str(self.skill / "SKILL.md"), "--type",
+                       "skill", "--manifest", str(self.manifest), "--snapshot")
+
+    def test_the_runs_own_out_of_scope_edit_is_a_real_violation(self):
+        """Direction A: the case the guard exists for, on a CLEAN tracked file."""
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.skill / "SKILL.md").write_text("skill v2\n")
+        self.sibling.write_text("edited by the run, out of scope\n")
+
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.skill / "SKILL.md"),
+                      "--declared", str(self.sibling))
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "scope_violation")
+        self.assertEqual(report["violations"],
+                         ["plugins/p/commands/other.md"])
+        # Clean and tracked at snapshot, so a checkout is the right remedy.
+        self.assertEqual(report["violations_manual_revert"], [])
+        self.assertEqual(report["unattributed_out_of_scope"], [])
+
+    def test_the_users_own_wip_edited_by_the_user_is_never_reverted(self):
+        """Direction B: dirty at snapshot, changed again by the USER."""
+        self.sibling.write_text("the user's uncommitted work\n")
+        self.assertEqual(self._snapshot().returncode, 0)
+        self.assertIn("plugins/p/commands/other.md",
+                      json.loads(self.manifest.read_text())["dirty_tracked"])
+
+        self.sibling.write_text("the user saves again, mid-round\n")
+        (self.skill / "SKILL.md").write_text("skill v2\n")
+
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.skill / "SKILL.md"))
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["violations"], [])
+        self.assertEqual(report["unattributed_out_of_scope"],
+                         ["plugins/p/commands/other.md"])
+
+    def test_an_untracked_file_someone_else_created_is_never_deleted(self):
+        """r2-B3: the same hole for untracked files, where a revert means delete."""
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.skill / "SKILL.md").write_text("skill v2\n")
+        (self.repo / "build-output.txt").write_text("a build step wrote this\n")
+
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.skill / "SKILL.md"))
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], [])
+        self.assertEqual(report["unattributed_out_of_scope"],
+                         ["build-output.txt"])
+
+    def test_an_untracked_file_this_run_created_is_a_violation(self):
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.skill / "SKILL.md").write_text("skill v2\n")
+        (self.repo / "stray.txt").write_text("written by the run\n")
+
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.skill / "SKILL.md"),
+                      "--declared", str(self.repo / "stray.txt"))
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], ["stray.txt"])
+        # Untracked, so `git checkout` cannot restore it either way.
+        self.assertEqual(report["violations_manual_revert"], ["stray.txt"])
+
+    def test_an_edit_the_run_did_not_declare_in_scope_is_not_measurable(self):
+        """An incomplete declaration is the one lie this check can catch."""
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.skill / "SKILL.md").write_text("skill v2\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared-none")
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["undeclared_in_scope"],
+                         ["plugins/p/skills/s/SKILL.md"])
+
+
+class TestTheDeclarationIsMandatory(unittest.TestCase):
+    """r1's subject again: "cannot see" must never render as `clean`.
+
+    A run that will not say what it wrote cannot be told it stayed in scope,
+    so an absent declaration is `not_measurable` on its own -- including on a
+    tree where nothing changed at all, since the guard has no way to know the
+    run did not write somewhere it cannot observe.
+    """
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        self.skill = self.repo / "skills" / "s"
+        self.skill.mkdir(parents=True)
+        (self.skill / "SKILL.md").write_text("v1\n")
+        (self.repo / "other.md").write_text("v1\n")
+        if not init_repo(self.repo):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+        snap = run_cli("--artifact", str(self.skill / "SKILL.md"), "--type",
+                       "skill", "--manifest", str(self.manifest), "--snapshot")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def test_an_absent_declaration_on_an_untouched_tree_is_not_clean(self):
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 3, run.stdout)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertFalse(report["declaration_present"])
+        self.assertTrue(any("declared no edited paths" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+    def test_an_absent_declaration_never_produces_a_revert_list(self):
+        (self.repo / "other.md").write_text("v2\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json")
+        self.assertEqual(run.returncode, 3, run.stdout)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], [])
+        self.assertEqual(report["unattributed_out_of_scope"], ["other.md"])
+
+    def test_an_explicit_empty_declaration_on_an_untouched_tree_is_clean(self):
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared-none")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "clean")
+        self.assertTrue(report["declaration_present"])
+
+
+class TestDeclarationShape(unittest.TestCase):
+    """How a declaration is spelled, and what happens when it is spelled badly."""
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        self.skill = self.repo / "skills" / "s"
+        self.skill.mkdir(parents=True)
+        (self.skill / "SKILL.md").write_text("v1\n")
+        (self.repo / "other.md").write_text("v1\n")
+        (self.repo / "third.md").write_text("v1\n")
+        if not init_repo(self.repo):  # pragma: no cover
+            self.skipTest("git unavailable")
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+        snap = run_cli("--artifact", str(self.skill / "SKILL.md"), "--type",
+                       "skill", "--manifest", str(self.manifest), "--snapshot")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _declared_file(self, payload) -> str:
+        path = self.workdir / "declared.json"
+        path.write_text(json.dumps(payload))
+        return str(path)
+
+    def test_a_declared_directory_is_a_usage_error(self):
+        """A directory would attribute everything under it, the user's work included."""
+        run = run_cli("--manifest", str(self.manifest), "--verify",
+                      "--declared", str(self.repo / "skills"))
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("is a directory", run.stderr)
+
+    def test_declaring_one_file_does_not_attribute_its_sibling(self):
+        (self.repo / "other.md").write_text("v2\n")
+        (self.repo / "third.md").write_text("v2\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "other.md"))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], ["other.md"])
+        self.assertEqual(report["unattributed_out_of_scope"], ["third.md"])
+
+    def test_a_root_relative_spelling_matches(self):
+        (self.repo / "other.md").write_text("v2\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", "other.md")
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(json.loads(run.stdout)["violations"], ["other.md"])
+
+    def test_a_noisy_spelling_of_the_same_path_matches(self):
+        (self.repo / "other.md").write_text("v2\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "skills" / ".." / "other.md"))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(json.loads(run.stdout)["violations"], ["other.md"])
+
+    def test_a_declared_file_holding_a_bare_list_is_read(self):
+        (self.repo / "other.md").write_text("v2\n")
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared-file",
+                      self._declared_file([str(self.repo / "other.md")]))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(json.loads(run.stdout)["violations"], ["other.md"])
+
+    def test_a_workflow_state_file_is_read_directly(self):
+        """The executor already writes applied_edits; point the flag at it."""
+        (self.repo / "other.md").write_text("v2\n")
+        state = {"applied_edits": {"edit_count": 1, "confirmed_on_disk": True,
+                                   "edited_paths": [str(self.repo / "other.md")]}}
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared-file", self._declared_file(state))
+        self.assertEqual(run.returncode, 1, run.stdout)
+        self.assertEqual(json.loads(run.stdout)["violations"], ["other.md"])
+
+    def test_a_declared_file_with_no_declaration_in_it_is_a_usage_error(self):
+        run = run_cli("--manifest", str(self.manifest), "--verify",
+                      "--declared-file", self._declared_file({"unrelated": 1}))
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("holds no declaration", run.stderr)
+
+    def test_an_empty_declared_file_is_a_usage_error_not_an_empty_declaration(self):
+        """`--declared-none` reached by accident is the one inference to refuse."""
+        run = run_cli("--manifest", str(self.manifest), "--verify",
+                      "--declared-file", self._declared_file([]))
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("--declared-none", run.stderr)
+
+    def test_a_missing_declared_file_is_a_usage_error(self):
+        run = run_cli("--manifest", str(self.manifest), "--verify",
+                      "--declared-file", str(self.workdir / "gone.json"))
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("not found", run.stderr)
+
+    def test_declared_none_cannot_be_combined_with_a_declaration(self):
+        run = run_cli("--manifest", str(self.manifest), "--verify",
+                      "--declared-none", "--declared", str(self.repo / "other.md"))
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("two things at once", run.stderr)
+
+    def test_a_declaration_on_snapshot_is_a_usage_error(self):
+        run = run_cli("--artifact", str(self.skill / "SKILL.md"), "--type",
+                      "skill", "--manifest", str(self.workdir / "n.json"),
+                      "--snapshot", "--declared-none")
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("belong to --verify", run.stderr)
+
+    def test_a_path_declared_outside_the_watched_root_is_reported_not_blamed(self):
+        outside = Path(tempfile.mkdtemp()) / "elsewhere.md"
+        outside.write_text("written somewhere the guard never watched\n")
+        try:
+            run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                          "--declared", str(outside))
+            self.assertEqual(run.returncode, 3, run.stdout)
+            report = json.loads(run.stdout)
+            self.assertEqual(report["verdict"], "not_measurable")
+            self.assertEqual(report["violations"], [])
+            self.assertEqual(report["declared_outside_root"], [str(outside)])
+        finally:
+            shutil.rmtree(outside.parent, ignore_errors=True)
+
+    def test_a_declared_out_of_scope_path_that_did_not_change_is_not_reverted(self):
+        """The run admits writing there, so not `clean`; nothing changed, so no revert."""
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared", str(self.repo / "other.md"))
+        self.assertEqual(run.returncode, 3, run.stdout)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["violations"], [])
+        self.assertEqual(report["declared_out_of_scope"], ["other.md"])
+
+
+class TestUnrecognizedManifestMode(unittest.TestCase):
+    """r2-S1: an unreadable manifest mode reported the whole tree as violations.
+
+    `mode` missing or unrecognized fell through to the walk branch, where an
+    absent `files` map made every file under the root `added`. The caller is
+    told to revert what `violations` lists.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "hone").mkdir()
+        (self.root / "hone" / "SKILL.md").write_text("v1\n")
+        (self.root / "elsewhere.md").write_text("v1\n")
+        self.manifest = Path(tempfile.mkdtemp()) / "m.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.manifest.parent, ignore_errors=True)
+
+    def _write(self, payload):
+        self.manifest.write_text(json.dumps(
+            dict({"root": str(self.root), "scope": ["hone"]}, **payload)))
+
+    def test_a_manifest_with_no_mode_is_not_measurable(self):
+        self._write({})
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared-none")
+        self.assertEqual(run.returncode, 3, run.stdout)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["violations"], [])
+
+    def test_an_unrecognized_mode_is_not_measurable(self):
+        self._write({"mode": "quantum", "files": {}})
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared-none")
+        self.assertEqual(run.returncode, 3, run.stdout)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["violations"], [])
+        self.assertTrue(any("quantum" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+    def test_in_process_verify_refuses_the_same_manifest(self):
+        report = verify(self.root, {"scope": ["hone"]}, ["hone"],
+                        declared=NOTHING)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["violations"], [])
+
+
+class TestInternalErrorsNeverExitOne(unittest.TestCase):
+    """r2-S4: exit 1 means `scope_violation`, and a traceback used to exit 1 too.
+
+    The caller's branch table answers exit 1 by reverting the paths under
+    `violations`, and a crash prints no report to read them from.
+    """
+
+    def test_an_unexpected_exception_exits_2(self):
+        real_main = check_scope.main
+
+        def boom():
+            raise RuntimeError("something nobody planned for")
+
+        check_scope.main = boom
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(stderr):
+                with self.assertRaises(SystemExit) as caught:
+                    check_scope._cli()
+        finally:
+            check_scope.main = real_main
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("internal error", stderr.getvalue())
+
+    def test_a_verdict_exit_code_still_reaches_the_shell(self):
+        real_main = check_scope.main
+        check_scope.main = lambda: sys.exit(3)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as caught:
+                    check_scope._cli()
+        finally:
+            check_scope.main = real_main
+        self.assertEqual(caught.exception.code, 3)
+
+    def test_a_non_utf8_filename_does_not_crash_the_guard(self):
+        repo = Path(tempfile.mkdtemp())
+        skill = repo / "skills" / "s"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("v1\n")
+        try:
+            odd = os.path.join(str(repo).encode(), b"odd-\xff-name.md")
+            with open(odd, "wb") as handle:
+                handle.write(b"raw bytes in the name\n")
+        except (OSError, UnicodeError):  # pragma: no cover - APFS refuses these
+            shutil.rmtree(repo, ignore_errors=True)
+            self.skipTest("filesystem rejects non-UTF-8 filenames")
+        try:
+            if not init_repo(repo):  # pragma: no cover
+                self.skipTest("git unavailable")
+            manifest = repo.parent / "odd-manifest.json"
+            snap = run_cli("--artifact", str(skill / "SKILL.md"), "--type",
+                           "skill", "--manifest", str(manifest), "--snapshot")
+            self.assertEqual(snap.returncode, 0, snap.stderr)
+            run = run_cli("--manifest", str(manifest), "--verify",
+                          "--declared-none")
+            self.assertIn(run.returncode, (0, 3), run.stdout + run.stderr)
+            self.assertNotIn("Traceback", run.stderr)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
+
+
+class TestWalkVerifyRespectsTheSnapshotBudget(unittest.TestCase):
+    """r2-N1: walk-mode verify hashed without a limit while every other walk had one."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "hone").mkdir()
+        (self.root / "hone" / "SKILL.md").write_text("v1\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_a_tree_that_grew_past_the_budget_is_not_measurable(self):
+        state = dict(walk_state(self.root), max_files=1)
+        for name in ("a", "b", "c"):
+            (self.root / f"{name}.md").write_text("grown since the snapshot\n")
+        report = verify(self.root, state, ["hone"], declared=NOTHING)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["violations"], [])
+        self.assertTrue(report["not_measurable_reasons"])
+
+    def test_a_tree_inside_the_budget_still_verifies(self):
+        state = dict(walk_state(self.root), max_files=100)
+        report = verify(self.root, state, ["hone"], declared=NOTHING)
+        self.assertEqual(report["verdict"], "clean")
+
+
+class TestASubtreeBecomingOpaqueInventsNothing(unittest.TestCase):
+    """r2-N2: a file swept into an opaque subtree must not be invented as `added`.
+
+    `_classify_nested` builds its pre-image view from the flat map, which holds
+    nothing for a file that was clean and tracked at snapshot -- by design,
+    since git was attributing those on its own. Reading "absent from the
+    pre-images" as `added` manufactures a change for a file nobody touched.
+
+    Two things answer it. The declaration is the load-bearing one: an `added`
+    path the run never declared cannot reach `violations` at all, so no revert
+    instruction rides on the mistake any more. The guard below is the narrower
+    one, and it stops the bogus `added` being reported in the first place.
+
+    Reaching it through real git is hard on purpose: git declines to collapse a
+    directory whose files the outer index still tracks, so the two conditions
+    (tracked at snapshot, opaque at verify) do not co-occur in today's git. The
+    classifier is therefore exercised directly rather than through a scenario
+    that quietly stops reproducing.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.vendor = self.root / "vendor"
+        self.vendor.mkdir()
+        (self.vendor / "committed.md").write_text("clean and tracked\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_a_tracked_file_under_an_opaque_subtree_is_not_called_added(self):
+        modified, added, removed, blind, unreadable = check_scope._classify_nested(
+            self.root, {}, {}, ["vendor"], {"vendor/committed.md"}, None)
+        self.assertEqual(added, [])
+        self.assertEqual(modified, [])
+        self.assertEqual(removed, [])
+        self.assertEqual(unreadable, ["vendor/committed.md"])
+
+    def test_an_untracked_file_under_an_opaque_subtree_is_still_added(self):
+        modified, added, removed, blind, unreadable = check_scope._classify_nested(
+            self.root, {}, {}, ["vendor"], set(), None)
+        self.assertEqual(added, ["vendor/committed.md"])
+        self.assertEqual(unreadable, [])
+
+    def test_an_undeclared_new_file_in_a_nested_repo_is_never_a_violation(self):
+        """The declaration is what stops any such mistake reaching the revert list."""
+        repo = Path(tempfile.mkdtemp())
+        skill = repo / "skills" / "s"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("v1\n")
+        try:
+            if not init_repo(repo):  # pragma: no cover
+                self.skipTest("git unavailable")
+            manifest = repo.parent / f"{repo.name}-m.json"
+            snap = run_cli("--artifact", str(skill / "SKILL.md"), "--type",
+                           "skill", "--manifest", str(manifest), "--snapshot")
+            self.assertEqual(snap.returncode, 0, snap.stderr)
+
+            nested = repo / "vendor"
+            nested.mkdir()
+            (nested / "appeared.md").write_text("a second session's checkout\n")
+            if not init_repo(nested):  # pragma: no cover
+                self.skipTest("git unavailable")
+
+            run = run_cli("--manifest", str(manifest), "--verify", "--json",
+                          "--declared-none")
+            report = json.loads(run.stdout)
+            self.assertEqual(report["violations"], [], run.stdout)
+            self.assertEqual(run.returncode, 3, run.stdout)
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)

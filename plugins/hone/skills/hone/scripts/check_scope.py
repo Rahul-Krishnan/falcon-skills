@@ -37,15 +37,34 @@ Two phases, both read-only with respect to the artifact:
               change outside the declared scope, plus untracked files that
               appeared inside scope without being registered.
 
+Detection and attribution are two different questions, and only the first one
+the tree can answer. Comparing a snapshot against the live tree shows that a
+file changed DURING the round; it can never show that THIS run is what changed
+it, because a second session, the user's own editor, and a build step all
+leave the same marks. Inferring attribution from the diff got it backwards in
+practice: an out-of-scope file the run really did edit came back
+`not_measurable` while a file the user was editing themselves came back
+`scope_violation`, whose documented response is `git checkout` of the listed
+paths.
+
+Attribution therefore comes from the run's own declaration of what it wrote
+(`--declared`, `--declared-file`, `--declared-none`), never from the diff. An
+out-of-scope change the run declared is one this run caused, so it is a
+`violation` and is safe to revert. An out-of-scope change it did not declare
+belongs to somebody else: it is reported under `unattributed_out_of_scope` and
+the round halts, with no destructive instruction riding on a guess.
+
 A verify has three possible answers, not two. "I could not see" is the third,
 and collapsing it into `clean` is the one failure mode a safety check must not
 have: the caller records a passing `scope_verify` gate and the run proceeds as
 though the tree had been checked. Every path that cannot answer therefore
 reports `not_measurable` and exits 3, following the vocabulary
 `check_overfit.py` and `check_eval_power.py` already use for the same
-distinction. Three cases reach it: git stops answering between snapshot and
-verify, a nested repository or submodule the guard could not hash, and an
-out-of-scope change git alone cannot attribute to this run (see `verify`).
+distinction. Four cases reach it: git stops answering between snapshot and
+verify, a nested repository or submodule the guard could not hash, an
+out-of-scope change this run did not declare, and a `--verify` given no
+declaration at all. That last one is deliberately blunt: a run that will not
+say what it wrote cannot be told it stayed in scope.
 
 Exit codes: 0 clean, 1 scope violation, 2 usage error (the check never ran),
 3 not_measurable (the check ran and could not answer). Only 0 is a pass.
@@ -62,6 +81,7 @@ import json
 import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 # Files that change as a side effect of normal tool use and would otherwise
@@ -104,8 +124,9 @@ VERDICT_EXITS = {"clean": 0, "scope_violation": 1, "not_measurable": 3}
 DEFAULT_MAX_FILES = 20000
 
 # Sentinel for "this file existed at snapshot time and was clean in git, so no
-# hash was stored". Git could attribute any later change to this run on its
-# own, which is exactly why hashing it would have been wasted work.
+# hash was stored". Git alone shows such a file changed during the round, which
+# is all a pre-image would have shown too; who changed it comes from the
+# declaration either way.
 CLEAN_TRACKED = object()
 
 
@@ -202,17 +223,28 @@ def build_manifest(root: Path, exclude: set[Path] | None = None,
 
 
 def _git(root: Path, *args: str) -> str | None:
-    """Run git in `root` and return stdout, or None when git cannot answer."""
+    """Run git in `root` and return stdout, or None when git cannot answer.
+
+    Bytes, decoded the way the filesystem decodes them, rather than
+    `text=True`. `text=True` decodes strictly under the locale encoding, and
+    `git ls-files -z` emits raw path bytes (unlike `git status --porcelain`,
+    which C-quotes them). One non-UTF-8 filename anywhere under the root
+    therefore raised `UnicodeDecodeError` out of the middle of the guard and
+    exited 1 -- the code the caller's branch table reads as "scope violation,
+    revert the listed paths", with no report to list any. `surrogateescape` is
+    what `os.fsdecode` uses, so the decoded string round-trips back to the same
+    bytes on disk and `Path` operations on it work.
+    """
     try:
         result = subprocess.run(
             ["git", "-C", str(root), *args],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
-    return result.stdout
+    return os.fsdecode(result.stdout)
 
 
 def _git_toplevel(root: Path) -> Path | None:
@@ -266,17 +298,32 @@ def _git_gitlinks(root: Path) -> list[str] | None:
     return links
 
 
-def _git_file_count(root: Path) -> int | None:
-    """How many files git would enumerate under `root` (tracked + untracked).
+def _git_hash_candidates(root: Path) -> int | None:
+    """How many files a git-mode snapshot would actually hash under `root`.
 
-    This is the cost estimate `--max-files` is compared against. It is two
-    index/dir-walk queries, not a hash of anything.
+    This is the cost estimate `--max-files` is compared against, and it is
+    deliberately not the size of the tree. `snapshot_state` stores nothing for
+    the clean-tracked majority, because git attributes those on its own, so the
+    cost of watching a repository scales with its dirty and untracked files
+    rather than with how many files it tracks.
+
+    Comparing the limit against the tracked count instead narrowed the watch on
+    any repository over 20000 files while saving no work whatsoever, and the
+    coverage it dropped was the whole reason the root is wide: a sibling
+    `commands/` directory, a repo-root `scripts/`, a sibling plugin. A monorepo
+    got a permanently degraded guard in exchange for nothing.
+
+    Opaque subtrees count as one apiece here. They are hashed in full, but
+    `_hash_opaque` passes the same budget down to each one and records the
+    subtrees that blow it under `unmeasurable`, so their cost is already
+    bounded where it is actually incurred.
     """
-    tracked = _git(root, "ls-files", "-z")
-    others = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
-    if tracked is None or others is None:
+    status = _git_status(root)
+    if status is None:
         return None
-    return len(_nul_list(tracked)) + len(_nul_list(others))
+    entries, opaque = status
+    hashed = [rel for _code, rel in entries if not _is_ignored(Path(rel))]
+    return len(hashed) + len(opaque)
 
 
 def _git_status(root: Path) -> tuple[list[tuple[str, str]], list[str]] | None:
@@ -418,7 +465,12 @@ def _unquote_git_path(entry: str) -> str:
             continue
         out.extend(_C_ESCAPES.get(nxt, nxt).encode("utf-8"))
         index += 1
-    return out.decode("utf-8", "replace")
+    # `os.fsdecode`, not `decode(..., "replace")`: replacement characters do
+    # not round-trip, so a path holding a non-UTF-8 byte decoded to a name that
+    # matched nothing on disk and fell out of the report. Surrogate escapes
+    # re-encode to the original bytes, which is what makes `Path(...).is_file()`
+    # and the comparison against `git ls-files -z` output agree.
+    return os.fsdecode(bytes(out))
 
 
 def _porcelain_path(line: str) -> str:
@@ -487,8 +539,12 @@ def derive_root(artifact: Path, artifact_type: str,
     Inside a repository the root is the repository, so a change to a sibling
     plugin, a sibling command directory, or a repo-root `scripts/` is visible.
     That is only affordable because `snapshot_state` hashes just the files git
-    cannot attribute; when even the enumeration is too big, narrow to the
-    install directory and say so out loud.
+    cannot attribute, so the budget is compared against that hashing workload
+    (`_git_hash_candidates`) and not against the size of the checkout. A
+    hundred-thousand-file monorepo with a handful of dirty files keeps the wide
+    watch, because widening it costs nothing there. Only when the work itself
+    is too big does the root narrow to the install directory, and then it says
+    so out loud.
     """
     narrow = install_root(artifact, artifact_type)
     toplevel = _git_toplevel(artifact.parent)
@@ -499,7 +555,7 @@ def derive_root(artifact: Path, artifact_type: str,
     # /private/tmp and silently declines to narrow.
     toplevel = Path(_real(toplevel))
 
-    count = _git_file_count(toplevel)
+    count = _git_hash_candidates(toplevel)
     can_narrow = narrow == toplevel or toplevel in narrow.parents
     if count is not None and count > max_files and can_narrow and narrow != toplevel:
         return narrow, {
@@ -630,13 +686,12 @@ class Blind(Exception):
 def _classify_git(root: Path, state: dict,
                   exclude: set[Path] | None) -> tuple[list[str], list[str],
                                                       list[str], list[str],
-                                                      set[str], list[str]]:
-    """(modified, added, removed, git_changed, unattributable, blind) for git mode.
+                                                      list[str], list[str]]:
+    """(modified, added, removed, git_changed, blind, unreadable) for git mode.
 
-    `unattributable` names the changes the manifest holds no pre-image for.
-    They are real changes, but nothing here can say whether this run made them
-    or a concurrent writer did, which is exactly the distinction the caller's
-    revert instruction depends on.
+    Detection only. Nothing here decides who made a change: that comes from the
+    run's declaration in `verify`, because no comparison of two tree states can
+    tell this run's write from the user's editor saving the same file.
 
     `blind` names the subtrees that could not be read. It is returned rather
     than raised because a partly-readable tree still has findings worth
@@ -672,7 +727,6 @@ def _classify_git(root: Path, state: dict,
     modified: list[str] = []
     added: list[str] = []
     removed: list[str] = []
-    unattributable: set[str] = set()
     unreadable: list[str] = []
     for rel in sorted(candidates):
         if _is_ignored(Path(rel)):
@@ -685,23 +739,18 @@ def _classify_git(root: Path, state: dict,
             existed = before is not None
         elif rel in tracked_now:
             # Tracked now and absent from every pre-image store means it was
-            # clean when we started, so git can say the file changed during
-            # the round. What git CANNOT say is who changed it: the user's
-            # editor and a second session in the same checkout produce this
-            # shape too. No pre-image was stored, so the change is real and
-            # unattributable, and the caller must not revert it blind.
+            # clean when we started, so git reporting it dirty now proves it
+            # changed during the round. Detection, not attribution: who changed
+            # it is the declaration's question, not this one's.
             before, existed = CLEAN_TRACKED, True
         else:
             before, existed = None, False
 
         exists_now = path.is_file()
-        changed = False
         if existed and not exists_now:
             removed.append(rel)
-            changed = True
         elif not existed and exists_now:
             added.append(rel)
-            changed = True
         elif existed and exists_now:
             now = _hash_file(path)
             if before == UNREADABLE or now == UNREADABLE:
@@ -709,19 +758,16 @@ def _classify_git(root: Path, state: dict,
                 continue
             if before is CLEAN_TRACKED or now != before:
                 modified.append(rel)
-                changed = True
-        if changed and before is CLEAN_TRACKED:
-            unattributable.add(rel)
 
-    nested = _classify_nested(root, state, pre_images, opaque_now, exclude)
+    nested = _classify_nested(root, state, pre_images, opaque_now,
+                              tracked_now, exclude)
     modified.extend(nested[0])
     added.extend(nested[1])
     removed.extend(nested[2])
     unreadable.extend(nested[4])
 
     git_changed = [path for code, path in entries if code != "!!"]
-    return (modified, added, removed, git_changed, unattributable,
-            nested[3], unreadable)
+    return (modified, added, removed, git_changed, nested[3], unreadable)
 
 
 def _pre_images(state: dict) -> dict[str, object]:
@@ -747,7 +793,8 @@ def _pre_images(state: dict) -> dict[str, object]:
 
 
 def _classify_nested(root: Path, state: dict, pre_images: dict[str, object],
-                     opaque_now: list[str], exclude: set[Path] | None
+                     opaque_now: list[str], tracked_now: set[str],
+                     exclude: set[Path] | None
                      ) -> tuple[list[str], list[str], list[str],
                                 list[str], list[str]]:
     """Bucket the subtrees git cannot see into: (mod, add, rm, blind, unreadable).
@@ -756,6 +803,17 @@ def _classify_nested(root: Path, state: dict, pre_images: dict[str, object],
     that is no longer opaque needs no special handling: its pre-images are in
     the same flat map the top-level loop reads, and git reports its files
     directly again.
+
+    The reverse movement needs handling, and did not get it. A subtree that
+    becomes opaque *during* the round -- a `git init` in a subdirectory, a
+    submodule initialised by a build step -- takes its clean tracked files with
+    it, and those files have no pre-image by construction: the snapshot stored
+    nothing for them precisely because git was attributing them. Reading
+    "absent from the pre-images" as `added` then manufactured a change for
+    every one of them. They are still in the outer repository's index, which
+    `git init` in a subdirectory does not touch, so `tracked_now` identifies
+    them; their content at snapshot time is genuinely unknown, so they are
+    reported as unreadable rather than invented as new.
 
     A subtree the snapshot could not hash, or one that cannot be hashed now,
     produces a blind reason rather than silence: `~/.claude/skills` and
@@ -809,6 +867,13 @@ def _classify_nested(root: Path, state: dict, pre_images: dict[str, object],
             after = now.get(inner)
             if before == UNREADABLE or after == UNREADABLE:
                 unreadable.append(full)
+            elif inner not in stored_here and full in tracked_now:
+                # Clean and tracked at snapshot, and the outer index still says
+                # so, so the file predates the round and only its snapshot-time
+                # content is unknown. `unreadable` is exactly that state, and
+                # routing it there gets it a not_measurable reason instead of a
+                # fabricated `added` and a revert that would delete it.
+                unreadable.append(full)
             elif inner not in stored_here:
                 added.append(full)
             elif inner not in now:
@@ -818,38 +883,167 @@ def _classify_nested(root: Path, state: dict, pre_images: dict[str, object],
     return modified, added, removed, blind, unreadable
 
 
+class DeclarationError(Exception):
+    """A declaration that cannot be used as one."""
+
+
+def _match_key(rel: str) -> str:
+    """Comparison key for a root-relative path.
+
+    Declared paths and detected paths come from different machinery -- the
+    executor's own tool calls on one side, `git status`, `os.scandir` and
+    `Path` joins on the other -- and two spellings of one file compare unequal.
+    `./b`, `a/../b` and `b` are the same file. So are the NFC and NFD spellings
+    of an accented name: macOS hands back whichever form the writer used while
+    git's index holds NFC, so a path with an accent in it can be spelled two
+    ways within a single run.
+
+    A miss here is not cosmetic. It moves a path the run admits writing out of
+    `violations` and into `unattributed_out_of_scope`, which reads as another
+    writer's change -- the fail-open this whole design closes. It does fail in
+    the safe direction when it happens anyway (the change lands in
+    `unattributed` AND the declared path lands in `declared_out_of_scope` with
+    nothing detected, so both push the verdict to `not_measurable`), but the
+    round is lost either way.
+
+    Keys are for comparison only. Every path in the report keeps the spelling
+    it was found with, so `root / rel` still opens the right file.
+    """
+    return unicodedata.normalize("NFC", os.path.normpath(rel))
+
+
+class Declaration:
+    """What the run says it wrote, or the absence of any such statement.
+
+    Tri-valued, and the third value is the one that matters. `present` with an
+    empty path set is a run stating it wrote nothing, which is a claim the
+    guard can hold it to. Absent is a run that said nothing at all, and reading
+    those two as the same thing is how a guard fails open: every out-of-scope
+    change would land in whichever bucket the empty set implies.
+
+    Membership is exact, never prefix. A declared directory would attribute
+    everything beneath it to this run, including the file the user was editing,
+    and hand the caller a `git checkout` for it -- so `normalize_declared`
+    refuses a directory outright rather than letting one widen attribution.
+    """
+
+    def __init__(self, paths: set[str] | None,
+                 outside_root: list[str] | None = None):
+        self.paths = paths
+        self._keys = None if paths is None else {_match_key(p) for p in paths}
+        self.outside_root = sorted(outside_root or [])
+
+    @property
+    def present(self) -> bool:
+        return self.paths is not None
+
+    def __contains__(self, rel: object) -> bool:
+        return self._keys is not None and _match_key(str(rel)) in self._keys
+
+
+ABSENT = Declaration(None)
+
+
+def normalize_declared(raw: list[str], root: Path) -> Declaration:
+    """Resolve declared paths into the same namespace the detected paths use.
+
+    A declared path arrives however the executor spelled it: absolute,
+    root-relative, `~`-prefixed, or reached through a symlinked temp directory
+    (`/tmp` against `/private/tmp` on macOS). Detected paths are root-relative
+    and built from `os.path.realpath(root)`. A spelling difference between the
+    two is not cosmetic: it drops a path the run admits writing out of
+    `violations` and into `unattributed_out_of_scope`, which reads as another
+    writer's change and is exactly the fail-open this design closes. Resolve
+    both ends the same way, once, here.
+
+    A relative path is resolved against the watch root, not the process's
+    working directory: Step 6a runs in whatever directory the executor happens
+    to be in, and the root is the only namespace both ends of the comparison
+    share. An absolute path is the unambiguous form and is what the docs ask
+    for.
+
+    A declared path that lands outside the watched root is kept separately. It
+    cannot be checked against a snapshot that never covered it, so it is
+    reported rather than silently dropped or blamed.
+    """
+    root_real = Path(_real(root))
+    inside: set[str] = set()
+    outside: list[str] = []
+    for entry in raw:
+        text = str(entry).strip()
+        if not text:
+            continue
+        candidate = Path(text).expanduser()
+        if not candidate.is_absolute():
+            candidate = root_real / candidate
+        resolved = Path(_real(candidate))
+        if resolved.is_dir():
+            raise DeclarationError(
+                f"declared path {text!r} is a directory. Declare the files "
+                f"this run wrote, one per path: a directory attributes "
+                f"everything under it to this run, including whatever the "
+                f"user changed there, and the caller reverts what it is told "
+                f"to revert.")
+        try:
+            rel = resolved.relative_to(root_real)
+        except ValueError:
+            outside.append(text)
+            continue
+        inside.add(str(rel))
+    return Declaration(inside, outside)
+
+
 def verify(root: Path, state: dict, scope: list[str],
-           exclude: set[Path] | None = None) -> dict:
+           exclude: set[Path] | None = None,
+           declared: Declaration | None = None) -> dict:
     """Compare the live tree against a snapshot and bucket every change.
 
     Three verdicts, and the third one is the point. `clean` means the tree was
     read and held no out-of-scope change. `scope_violation` means it held one
-    the manifest can attribute to this run, which is the only kind the caller
-    may revert. `not_measurable` means the question was not answered: git went
-    quiet, a nested repository could not be hashed, or an out-of-scope file
-    changed with no stored pre-image to say who changed it. That last case is
-    the whole reason `unattributed_out_of_scope` exists as a bucket separate
-    from `violations`. A tracked file that was clean at snapshot and is dirty
-    now looks identical whether this run wrote it or the user's editor did,
-    and the documented response to a violation is `git checkout` of the listed
-    paths, so putting it in `violations` turns someone else's uncommitted work
-    into a deletion. Reporting it and halting loses a round; reverting it
-    loses the work.
+    THIS RUN DECLARED WRITING, which is the only kind the caller may revert.
+    `not_measurable` means the question was not answered: git went quiet, a
+    nested repository could not be hashed, an out-of-scope file changed that
+    this run did not declare, or no declaration was supplied at all.
+
+    The declaration is what separates the second verdict from the third, and it
+    has to be, because the tree cannot. A file that changed during the round
+    looks identical whether this run wrote it or the user's editor did, and the
+    documented response to a violation is `git checkout` of the listed paths.
+    Attributing from the diff put the user's own uncommitted work in
+    `violations` and the run's real out-of-scope edit in
+    `unattributed_out_of_scope`, firing the destructive branch in precisely the
+    case where attribution was unsound. Reporting an undeclared change and
+    halting loses a round; reverting it loses the work.
     """
-    unattributable: set[str] = set()
     blind: list[str] = []
     unreadable: list[str] = []
     mode = state.get("mode")
+    declaration = declared if declared is not None else ABSENT
     if mode == "git":
         try:
             (modified, added, removed, git_changed,
-             unattributable, blind, unreadable) = _classify_git(
-                root, state, exclude)
+             blind, unreadable) = _classify_git(root, state, exclude)
         except Blind as exc:
-            return _blind_report(root, scope, state, exc.reasons)
-    else:
+            return _blind_report(root, scope, state, exc.reasons, declaration)
+        # Which paths the snapshot holds a pre-image for, which is exactly the
+        # set that was already dirty or untracked when the run began.
+        pre_image_paths = set(_pre_images(state))
+    elif mode == "walk":
         manifest = state.get("files", {})
-        current = build_manifest(root, exclude)
+        # The snapshot's own budget. Without it a walk root that grew past the
+        # limit between snapshot and verify was hashed without bound, while
+        # every other walk in this file -- the snapshot, the nested subtrees --
+        # is bounded.
+        limit = state.get("max_files")
+        if not isinstance(limit, int) or isinstance(limit, bool):
+            limit = DEFAULT_MAX_FILES
+        try:
+            current = build_manifest(root, exclude, limit)
+        except TooManyFiles as exc:
+            return _blind_report(root, scope, state, [
+                f"the watched tree holds more than {exc.limit} file(s) at "
+                f"verify time, over the budget its snapshot was taken under, "
+                f"so it was not hashed"], declaration)
         unreadable = sorted(
             p for p in set(manifest) | set(current)
             if manifest.get(p) == UNREADABLE or current.get(p) == UNREADABLE
@@ -865,16 +1059,73 @@ def verify(root: Path, state: dict, scope: list[str],
         # say costs no visibility. It only feeds the informational
         # `preexisting_dirty_out_of_scope` list.
         git_changed = _git_changed(root)
+        # Walk mode is what runs outside a repository, so every path has a
+        # pre-image and none of them has a HEAD to be checked out back to.
+        pre_image_paths = set(manifest)
+    else:
+        # A manifest whose mode is missing or unrecognised used to fall through
+        # to the walk branch, where an absent `files` map made every file under
+        # the root `added` and the caller was handed the whole tree as a revert
+        # list. `_run_verify` guards the analogous `--root` mismatch for the
+        # same reason. Nothing was compared here, so say that.
+        return _blind_report(root, scope, state, [
+            f"the manifest records mode {mode!r}, which this guard cannot "
+            f"read, so nothing in the watched tree was compared"], declaration)
 
     changed = sorted(set(modified) | set(added) | set(removed))
     out_of_scope = [p for p in changed if not _in_scope(p, scope)]
-    violations = sorted(p for p in out_of_scope if p not in unattributable)
-    unattributed = sorted(p for p in out_of_scope if p in unattributable)
+    # Attribution, and the only place it happens. A change this run declared
+    # writing is one it caused and may revert; anything else out of scope
+    # belongs to another writer and is reported, never reverted.
+    violations = sorted(p for p in out_of_scope if p in declaration)
+    unattributed = sorted(p for p in out_of_scope if p not in declaration)
+    # Violations `git checkout` cannot correctly undo. It works on one shape
+    # only, a file clean and tracked when the run began, where HEAD still holds
+    # what the run overwrote. A file already dirty at snapshot loses the user's
+    # earlier edits too; a file the run created has no HEAD content to return
+    # to. Attribution is sound either way -- the run declared these -- so they
+    # stay violations and only the instruction differs.
+    added_set = set(added)
+    violations_manual = sorted(
+        p for p in violations if p in pre_image_paths or p in added_set)
+    declared_out_of_scope = sorted(
+        p for p in (declaration.paths or set()) if not _in_scope(p, scope))
     in_scope_new = sorted(p for p in added if _in_scope(p, scope))
+    # The one check that can catch a declaration that is simply wrong: an
+    # honest run declares its in-scope edits, so an undeclared one proves the
+    # declaration incomplete -- and an incomplete declaration is what would let
+    # a real out-of-scope write pass as another writer's.
+    undeclared_in_scope = sorted(
+        p for p in changed if _in_scope(p, scope) and p not in declaration
+    ) if declaration.present else []
+    if not declaration.present:
+        blind.append(
+            "this run declared no edited paths, so nothing found in the tree "
+            "can be attributed to it. Re-run --verify with --declared, "
+            "--declared-file, or --declared-none")
     blind.extend(
-        f"{path!r} changed outside scope during the round and the manifest "
-        f"holds no pre-image for it, so this run cannot be shown to be what "
-        f"changed it" for path in unattributed
+        f"{path!r} changed inside the permitted scope but this run did not "
+        f"declare writing it, so the declaration is incomplete and what it "
+        f"omits elsewhere is unknown" for path in undeclared_in_scope
+    )
+    blind.extend(
+        f"{path!r} changed outside scope during the round and this run did "
+        f"not declare writing it, so another writer changed it and it must "
+        f"not be reverted" for path in unattributed
+    )
+    # Declared out of scope, yet nothing there changed. The run's own admission
+    # is enough to refuse a `clean`, and not enough to order a revert: the path
+    # may be an untracked file that predates the round, and reverting one means
+    # deleting it.
+    blind.extend(
+        f"this run declared it wrote {path!r}, which is outside the permitted "
+        f"scope, but no change was detected there"
+        for path in declared_out_of_scope if path not in set(violations)
+    )
+    blind.extend(
+        f"this run declared it wrote {path!r}, which lies outside the watched "
+        f"root, so whether it changed could not be checked"
+        for path in declaration.outside_root
     )
     # An unreadable file is the plainest form of "could not see": it exists and
     # its content is unknown at one or both ends of the comparison. Reported
@@ -925,10 +1176,21 @@ def verify(root: Path, state: dict, scope: list[str],
         "modified_in_scope": sorted(p for p in modified if _in_scope(p, scope)),
         "new_files_in_scope": in_scope_new,
         "violations": violations,
-        # Changed out of scope, attributable to nobody. Report, never revert.
+        # The subset of `violations` a `git checkout` would damage: the file
+        # was already dirty or untracked at snapshot, so restore this run's
+        # edit by hand instead.
+        "violations_manual_revert": violations_manual,
+        # Changed out of scope and undeclared, so somebody else's. Report, never revert.
         "unattributed_out_of_scope": unattributed,
+        # Changed in scope without being declared. The declaration is incomplete.
+        "undeclared_in_scope": undeclared_in_scope,
         # Dirty in git before this run started. Informational: never revert these.
         "preexisting_dirty_out_of_scope": preexisting,
+        # Everything the run admitted writing outside its permitted scope,
+        # whether or not a change was detected there.
+        "declared_out_of_scope": declared_out_of_scope,
+        "declared_outside_root": declaration.outside_root,
+        "declaration_present": declaration.present,
         "not_measurable_reasons": blind,
         "git_available": git_changed is not None,
         "counts": {
@@ -938,6 +1200,7 @@ def verify(root: Path, state: dict, scope: list[str],
             "violations": len(violations),
             "unattributed": len(unattributed),
             "preexisting_dirty": len(preexisting),
+            "declared": len(declaration.paths or ()),
         },
     }
     fallback = state.get("root_fallback")
@@ -947,13 +1210,15 @@ def verify(root: Path, state: dict, scope: list[str],
 
 
 def _blind_report(root: Path, scope: list[str], state: dict,
-                  reasons: list[str]) -> dict:
+                  reasons: list[str],
+                  declaration: Declaration | None = None) -> dict:
     """The report for a verify that could not read the tree it was asked about.
 
     Same shape as a normal report so the caller parses one thing, with empty
     change lists and a verdict that is not a pass. The empty lists used to be
     the whole report, under `verdict: "clean"`.
     """
+    declaration = declaration if declaration is not None else ABSENT
     report = {
         "verdict": "not_measurable",
         "root": str(root),
@@ -962,12 +1227,19 @@ def _blind_report(root: Path, scope: list[str], state: dict,
         "modified_in_scope": [],
         "new_files_in_scope": [],
         "violations": [],
+        "violations_manual_revert": [],
         "unattributed_out_of_scope": [],
+        "undeclared_in_scope": [],
         "preexisting_dirty_out_of_scope": [],
+        "declared_out_of_scope": sorted(
+            p for p in (declaration.paths or set()) if not _in_scope(p, scope)),
+        "declared_outside_root": declaration.outside_root,
+        "declaration_present": declaration.present,
         "not_measurable_reasons": reasons,
         "git_available": False,
         "counts": {"modified": 0, "added": 0, "removed": 0, "violations": 0,
-                   "unattributed": 0, "preexisting_dirty": 0},
+                   "unattributed": 0, "preexisting_dirty": 0,
+                   "declared": len(declaration.paths or ())},
     }
     fallback = state.get("root_fallback")
     if fallback:
@@ -992,7 +1264,8 @@ def _same_dir(recorded: str, root: Path) -> bool:
 def _fallback_note(fallback: dict) -> str:
     return (
         f"WARNING: the watch is NARROWER than intended. "
-        f"{fallback.get('intended_root')} holds {fallback.get('candidate_count')} "
+        f"{fallback.get('intended_root')} would hash "
+        f"{fallback.get('candidate_count')} "
         f"file(s), over the --max-files limit of {fallback.get('limit')}, so only "
         f"{fallback.get('actual_root')} was watched. Changes elsewhere in that "
         f"repository were NOT checked."
@@ -1007,6 +1280,17 @@ def _fallback_note(fallback: dict) -> str:
 def _fail(message: str) -> None:
     print(f"ERROR: {message}", file=sys.stderr)
     sys.exit(2)
+
+
+def _display(text: str) -> str:
+    """A form of `text` that is safe to print on any terminal encoding.
+
+    Paths carry surrogate escapes when the filesystem holds non-UTF-8 bytes,
+    and printing one raises `UnicodeEncodeError` out of the reporting code
+    after the check has already succeeded. Only the human-readable output needs
+    this; `--json` escapes surrogates on its own.
+    """
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def main() -> None:
@@ -1028,6 +1312,21 @@ def main() -> None:
                         help=f"Bail out of a watch root larger than N files "
                              f"(default {DEFAULT_MAX_FILES}); inside a repo, fall "
                              f"back to the install directory and say so.")
+    parser.add_argument("--declared", action="append", default=[],
+                        help="Repeatable. A path THIS RUN wrote, absolute or "
+                             "root-relative. Only a declared out-of-scope "
+                             "change is a revertable violation; an undeclared "
+                             "one belongs to another writer. Required on "
+                             "--verify (or --declared-file / --declared-none).")
+    parser.add_argument("--declared-file", dest="declared_file", default=None,
+                        help="JSON holding the declaration: a list of paths, "
+                             "{\"edited_paths\": [...]}, or a workflow state "
+                             "file with applied_edits.edited_paths.")
+    parser.add_argument("--declared-none", action="store_true",
+                        dest="declared_none",
+                        help="This run wrote nothing. The explicit form of an "
+                             "empty declaration, which is NOT the same as "
+                             "omitting the declaration.")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--snapshot", action="store_true", help="Record pre-edit state")
     group.add_argument("--verify", action="store_true", help="Check against manifest")
@@ -1036,6 +1335,14 @@ def main() -> None:
 
     if bool(args.artifact) != bool(args.artifact_type):
         _fail("--artifact and --type must be given together")
+
+    declared_given = bool(args.declared or args.declared_file or args.declared_none)
+    if args.snapshot and declared_given:
+        _fail("--declared/--declared-file/--declared-none belong to --verify: "
+              "a snapshot is taken before the run writes anything")
+    if args.declared_none and (args.declared or args.declared_file):
+        _fail("--declared-none says this run wrote nothing; passing it "
+              "alongside --declared or --declared-file says two things at once")
 
     artifact = None
     if args.artifact:
@@ -1068,6 +1375,64 @@ def _resolve_scope(artifact: Path | None, artifact_type: str | None,
     except ValueError:
         _fail(f"artifact {artifact} is not inside the watch root {root}")
     return []  # unreachable; _fail exits
+
+
+def _declared_paths(args) -> list[str] | None:
+    """The raw declared paths from the CLI, or None when nothing was declared.
+
+    `--declared-file` accepts three shapes so the executor can point it at
+    whatever it already writes: a bare list, `{"edited_paths": [...]}`, or a
+    workflow state file carrying `applied_edits.edited_paths`. A file that
+    holds none of them is a usage error rather than an empty declaration --
+    the caller aimed at a declaration and there is not one there, and reading
+    that as "wrote nothing" would quietly disarm the check.
+    """
+    if args.declared_none:
+        return []
+    if not args.declared and not args.declared_file:
+        return None
+    raw = list(args.declared)
+    if args.declared_file:
+        path = Path(args.declared_file).expanduser()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            _fail(f"--declared-file not found: {args.declared_file}")
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            _fail(f"cannot read --declared-file {args.declared_file}: {exc}")
+            return None
+        found = _extract_edited_paths(payload)
+        if found is None:
+            _fail(f"--declared-file {args.declared_file} holds no declaration: "
+                  f"expected a list of paths, an object with 'edited_paths', "
+                  f"or a state file with applied_edits.edited_paths")
+            return None
+        if not found and not raw:
+            # An empty list here is `--declared-none` arrived at by accident,
+            # which is the one reading of a declaration that must never be
+            # inferred. The handoff schema requires a non-empty `edited_paths`
+            # alongside `edit_count >= 1`, so an empty one means the run failed
+            # to record what it wrote.
+            _fail(f"--declared-file {args.declared_file} declares an empty "
+                  f"list. If this run really wrote nothing, say so with "
+                  f"--declared-none; otherwise record the paths it wrote.")
+            return None
+        raw.extend(found)
+    return raw
+
+
+def _extract_edited_paths(payload: object) -> list[str] | None:
+    """The declared path list inside a `--declared-file` payload, or None."""
+    if isinstance(payload, list):
+        return [str(entry) for entry in payload]
+    if isinstance(payload, dict):
+        for holder in (payload, payload.get("applied_edits")):
+            if isinstance(holder, dict):
+                found = holder.get("edited_paths")
+                if isinstance(found, list):
+                    return [str(entry) for entry in found]
+    return None
 
 
 def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
@@ -1188,7 +1553,15 @@ def _run_verify(args, artifact: Path | None, manifest_path: Path,
         _fail("--verify found no scope: the manifest declares none and no "
               "--scope was passed. Re-run --snapshot with --artifact/--type.")
 
-    report = verify(root, payload, scope, excluded)
+    raw_declared = _declared_paths(args)
+    try:
+        declaration = (ABSENT if raw_declared is None
+                       else normalize_declared(raw_declared, root))
+    except DeclarationError as exc:
+        _fail(str(exc))
+        return
+
+    report = verify(root, payload, scope, excluded, declaration)
 
     if args.json:
         json.dump(report, sys.stdout, indent=2)
@@ -1203,26 +1576,32 @@ def _run_verify(args, artifact: Path | None, manifest_path: Path,
         print(f"  {counts['modified']} modified, {counts['added']} added, "
               f"{counts['removed']} removed, {out_of_scope} out of scope "
               f"({counts['violations']} revertable)")
+        manual = set(report["violations_manual_revert"])
         for path in report["violations"]:
-            print(f"  VIOLATION: {path}")
+            if path in manual:
+                print(f"  VIOLATION: {_display(path)} (was already dirty or "
+                      f"untracked at snapshot: undo this run's edit by hand, "
+                      f"a checkout would take the earlier work too)")
+            else:
+                print(f"  VIOLATION: {_display(path)}")
         unattributed = report["unattributed_out_of_scope"]
         if unattributed:
             print(f"  NOTE: {len(unattributed)} file(s) changed out of scope "
-                  "during the round with no recorded pre-image, so nothing can "
-                  "say whether this run or another writer changed them. Do NOT "
-                  "revert them; inspect them:")
+                  "during the round that this run did not declare writing, so "
+                  "another writer changed them. Do NOT revert them; inspect "
+                  "them:")
             for path in unattributed:
-                print(f"    unattributed: {path}")
+                print(f"    unattributed: {_display(path)}")
         preexisting = report["preexisting_dirty_out_of_scope"]
         if preexisting:
             print(f"  NOTE: {len(preexisting)} file(s) were already uncommitted "
                   "before this run and are unchanged by it. Do not revert them:")
             for path in preexisting:
-                print(f"    pre-existing: {path}")
+                print(f"    pre-existing: {_display(path)}")
         if report.get("root_fallback"):
             print("  " + _fallback_note(report["root_fallback"]))
         for reason in report["not_measurable_reasons"]:
-            print(f"  UNCHECKED: {reason}")
+            print(f"  UNCHECKED: {_display(reason)}")
         if not report["git_available"] and report.get("mode") != "git":
             # Only true of a walk-mode manifest, which hashes the whole tree.
             # A git-mode manifest stores no whole-tree hashes, so when git goes
@@ -1233,5 +1612,26 @@ def _run_verify(args, artifact: Path | None, manifest_path: Path,
     sys.exit(VERDICT_EXITS.get(report["verdict"], 1))
 
 
+def _cli() -> None:
+    """`main()` with every uncaught error routed away from exit 1.
+
+    Exit 1 is `scope_violation`, and the caller's branch table answers it by
+    reverting the paths under `violations`. A traceback exits 1 too, and prints
+    no report at all, so a crash read as an order to revert a list the caller
+    cannot even read. Anything unplanned is exit 2: the check never ran, revert
+    nothing, halt. `SystemExit` passes through untouched so the verdict codes
+    the body sets still reach the shell.
+    """
+    try:
+        main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        _fail("interrupted")
+    except BaseException as exc:  # noqa: BLE001 - deliberate catch-all
+        _fail(f"internal error in check_scope.py ({type(exc).__name__}: {exc}); "
+              f"the scope check did not run, so revert nothing and halt")
+
+
 if __name__ == "__main__":
-    main()
+    _cli()

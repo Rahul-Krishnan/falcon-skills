@@ -684,6 +684,21 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             ),
             "artifact_before_snapshot": _str(non_empty=True),
             "syntax_check_passed": _bool(),
+            # The paths this round wrote, which is what the scope guard
+            # attributes from. No comparison of two tree states can tell this
+            # run's write from the user's editor saving the same file, so
+            # `check_scope.py --verify` reads the run's own declaration
+            # instead: a declared out-of-scope change is a violation it may
+            # revert, an undeclared one belongs to someone else and only gets
+            # reported. Required and non-empty, because `edit_count >= 1` is:
+            # a run that applied edits and cannot name a single file it wrote
+            # has nothing to hand the guard, and the guard's answer for a
+            # missing declaration is `not_measurable` -- a halt either way, so
+            # it fails here where the message says what is wrong.
+            "edited_paths": _arr(
+                items={"type": "string", "non_empty": True},
+                non_empty=True,
+            ),
         },
     },
     # P1 Step 10 -> Step 11 (spec artifact generation; supplementary)

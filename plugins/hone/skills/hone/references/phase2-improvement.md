@@ -299,7 +299,9 @@ Re-read the artifact from disk and compare its content to the `artifact_content`
 
 This prevents the exact failure mode where two CC sessions edit the same artifact and last-write-wins silently destroys the other session's work.
 
-Edit the artifact at `{edit_path}`. After all edits, re-read each edited file from disk and confirm the changes are present, then record the outcome as `applied_edits.confirmed_on_disk` in the handoff below. `validate_handoff.py` requires that field to be `true`, so this read-back is a gate, not a nudge: a handoff recording `false` fails validation. If the re-read does not confirm every planned edit, STOP and report which edits are missing. Do not hand off to Phase 3 -- it compares before/after scores and auto-reverts from `artifact_before_snapshot`, both of which assume the edits are on disk.
+Edit the artifact at `{edit_path}`. After all edits, re-read each edited file from disk and confirm the changes are present, then record the outcome as `applied_edits.confirmed_on_disk` in the handoff below. `validate_handoff.py` requires that field to be `true`, so this read-back is a gate, not a nudge: a handoff recording `false` fails validation. If the re-read does not confirm every planned edit, STOP and report which edits are missing.
+
+**Record the paths you wrote, in `applied_edits.edited_paths`.** You are already re-reading every edited file to confirm it landed, so you have the list; write it down. Step 6a's scope guard attributes from it and from nothing else, because no comparison of two tree states can tell your write from the user's editor saving the same file mid-round. Absolute paths, one entry per file, and **every** file this round wrote -- the artifact, a generated companion validator, anything else. The field is required and non-empty alongside `edit_count >= 1`: a round that applied edits and cannot name one file it wrote has nothing to hand the guard, whose answer to a missing declaration is `not_measurable` and a halt. Do not hand off to Phase 3 -- it compares before/after scores and auto-reverts from `artifact_before_snapshot`, both of which assume the edits are on disk.
 
 **Validator Generation (multi-phase skills and commands only):**
 
@@ -329,6 +331,7 @@ If this hone pass added or modified handoff interface blocks in the artifact, an
 
 **Gate: P2 Step 6 → Step 7 (checklist)**
 - [ ] All planned edits were applied (re-read from disk confirms changes present)
+- [ ] Every path written this round is recorded in `applied_edits.edited_paths` (Step 6a attributes from that list and from nothing else)
 - [ ] No syntax errors introduced (for scripts/hooks: `bash -n` check; for skills/commands: markdown structure intact)
 - [ ] Edit count matches improvement plan count (no silently skipped edits)
 - [ ] If handoff schemas were added to a multi-phase artifact: companion validator script was generated and syntax-checked
@@ -339,7 +342,10 @@ applied_edits: {
   edit_count: number,                    // number of edits applied
   confirmed_on_disk: boolean,            // re-read confirms changes present; must be true
   artifact_before_snapshot: string,      // pre-edit content path (for revert)
-  syntax_check_passed: boolean           // bash -n or markdown structure ok
+  syntax_check_passed: boolean,          // bash -n or markdown structure ok
+  edited_paths: string[]                 // every file this round wrote; the scope
+                                         // guard attributes from this and nothing
+                                         // else. Required, non-empty.
 }
 ```
 Write `artifact_before_snapshot` (pre-edit file content) to the workflow state file before applying edits. Phase 3 reads this for auto-revert on regression.
@@ -348,10 +354,24 @@ Write `artifact_before_snapshot` (pre-edit file content) to the workflow state f
 
 ```bash
 python3 <skill-dir>/scripts/check_scope.py \
-  --manifest /tmp/scope-${RUN_ID}.json --verify --json
+  --manifest /tmp/scope-${RUN_ID}.json --verify --json \
+  --declared-file $STATE_FILE
 ```
 
 Nothing from Step 5a needs reproducing: the manifest records the root and the scope, and `--verify` reads them back out. That is deliberate. Step 5a and Step 6a are separate Bash tool calls, shell state does not persist between them, and a re-derived `$SCOPE_ROOT` that disagrees with the snapshotted one compares two unrelated trees.
+
+**`--declared-file $STATE_FILE` is what makes the verdict mean anything.** It reads `applied_edits.edited_paths` -- the list Step 6 just recorded -- and that list is the only thing in the system that can attribute a change to this run. A snapshot proves a file changed *during* the round; it can never prove *you* changed it, because the user's editor and a second session in the same checkout leave identical marks. Attributing from the diff instead got it backwards in both directions at once: an out-of-scope file the run really did edit came back `not_measurable`, while a file the user was editing themselves came back `scope_violation` with a `git checkout` instruction pointed at their uncommitted work.
+
+Three spellings, and the difference between the last two is load-bearing:
+
+| form | meaning |
+|---|---|
+| `--declared-file <json>` | read the paths from `applied_edits.edited_paths` (a bare list or `{"edited_paths": [...]}` also work) |
+| `--declared <path>` | one path, repeatable |
+| `--declared-none` | this run wrote nothing -- an explicit, checkable claim |
+| *(omitted)* | **not a claim at all.** The verify returns `not_measurable` and exits 3 |
+
+An empty `edited_paths` list is rejected as a usage error rather than read as `--declared-none`: the one reading of a declaration that must never be inferred is "wrote nothing".
 
 **Emit the `scope_verify` gate event on every path.** The clean path is the one that gets forgotten, and a check that only records itself when it fails is indistinguishable from a check that never ran:
 
@@ -364,9 +384,9 @@ Nothing from Step 5a needs reproducing: the manifest records the root and the sc
 | exit | `verdict` | what happened | what to do |
 |---|---|---|---|
 | 0 | `clean` | the tree was read and holds no out-of-scope change | emit `result: "pass"` and continue |
-| 1 | `scope_violation` | an out-of-scope change with a recorded pre-image, so the manifest attributes it to this round | revert **only** the paths under `violations`, then halt |
-| 2 | (none; the report is on stderr) | the check never ran: the manifest is missing or unreadable. `/tmp` cleared between rounds, a `${RUN_ID}` unrecoverable after compaction, or Step 5a skipped | revert nothing, then halt |
-| 3 | `not_measurable` | the check ran and could not answer. `not_measurable_reasons` says which of the three: git stopped answering, a nested repository or submodule could not be hashed, or an out-of-scope file changed with no recorded pre-image | revert nothing, then halt |
+| 1 | `scope_violation` | an out-of-scope change this round DECLARED writing, so it is attributable to this round | undo **only** the paths under `violations`, then halt |
+| 2 | (none; the report is on stderr) | the check never ran: the manifest is missing or unreadable, or the declaration was malformed. `/tmp` cleared between rounds, a `${RUN_ID}` unrecoverable after compaction, or Step 5a skipped | revert nothing, then halt |
+| 3 | `not_measurable` | the check ran and could not answer. `not_measurable_reasons` says which: git stopped answering, a nested repository or submodule could not be hashed, an out-of-scope file changed that this round did not declare, an in-scope change was left undeclared, or no declaration was supplied at all | revert nothing, then halt |
 
 **Only exit 0 is a `pass`.** Exit 2 and exit 3 are the cases this table exists for. Neither is a clean tree; both are the guard saying it does not know, and emitting `result: "pass"` on either records a scope check over a tree nothing looked at. That is strictly worse than having no guard, because the run's gate log then carries positive evidence for a claim nobody verified.
 
@@ -379,10 +399,13 @@ Nothing from Step 5a needs reproducing: the manifest records the root and the sc
 
 That pair is a valid halt tail (`hone_common.is_halt_tail`), so a run that halts as instructed scores as compliant. Emitting `phase2_to_phase3` after the failing `scope_verify` is the shape that draws the `validate_gates.py` warning and the `score_gate_compliance` penalty, and it describes a run that carried on past its own halt order. Put the paths from `violations`, `unattributed_out_of_scope`, and `not_measurable_reasons` in the run summary so the human has something to act on.
 
-**Revert nothing listed under `preexisting_dirty_out_of_scope` or `unattributed_out_of_scope`.** Only the manifest can attribute a change to this run, and it holds no pre-image for either list.
+**Revert nothing listed under `preexisting_dirty_out_of_scope` or `unattributed_out_of_scope`.** Neither is attributable to this run.
 
 - `preexisting_dirty_out_of_scope` was already uncommitted when the run started and is byte-identical to the snapshot, so this run did not touch it. Git reports a file dirty relative to HEAD; the manifest reports it relative to this run's start.
-- `unattributed_out_of_scope` did change during the round, but it was clean in git at snapshot so nothing was hashed, and git alone cannot tell your edit from one the user's editor or a concurrent session made in the same checkout. Reverting it destroys uncommitted work this run never created, which is the one outcome a safety check must not cause. It is a separate list from `violations` for exactly that reason, and its presence is what makes the verdict `not_measurable` rather than `clean` -- the change is reported and the round halts, but no destructive instruction rides on a guess.
+- `unattributed_out_of_scope` did change during the round, but this round did not declare writing it, so a concurrent session, the user's editor, or a build step is what changed it. Reverting it destroys uncommitted work this run never created, which is the one outcome a safety check must not cause. It is a separate list from `violations` for exactly that reason, and its presence is what makes the verdict `not_measurable` rather than `clean` -- the change is reported and the round halts, but no destructive instruction rides on a guess.
+- `undeclared_in_scope` is the mirror of it: a change inside the permitted scope that the declaration omitted. Nothing needs reverting, but the declaration is demonstrably incomplete, so what it omits *outside* scope is unknown and the verdict is `not_measurable`. Fix the record and re-run rather than proceeding.
+
+**Undo a violation the right way.** `git checkout -- <path>` restores a file that was clean and tracked when the run began. It is wrong for anything else: on a file already uncommitted at snapshot it discards the user's earlier work along with this round's, and on a file this round created it does nothing. `violations_manual_revert` lists the subset in that state -- undo those edits by hand, or delete the file if this round created it.
 
 ### Step 7: Description Trigger Testing (skills and commands only)
 
@@ -467,7 +490,7 @@ After writing the handoff, set `steps.phase2_trigger_test` to `"done"` in the wo
 - `id` is unique **within the artifact's whole ledger**, not within this run. `F1` above is round 1 of the first run; a later run's first finding is the next unused number, not `F1` again. The reopen counter is cross-run by design, and reusing ids makes two unrelated findings look like one that keeps coming back. `check_convergence.py` defends itself by pairing the id with the finding's summary wording, so a reused id is safe rather than fatal — but the pairing depends on summaries staying verbatim across restatements, and unique ids are what make it exact.
 - Each round **appends a new entry** and restates every finding still live, carried-over ones included. That repetition is what lets the check see a finding stay open across rounds; it is also why those signals are scoped to the current run rather than the whole file.
 - Findings go **inside** the round entry. A bare array, or findings at the top level, is rejected with exit 2.
-- Record each constraint ablation (SKILL.md Phase 2 Step 6b) and its outcome here too, as a finding whose `status` is `fixed` (constraint removed, nothing regressed) or `rejected` (restored because a test regressed).
+- Record each constraint ablation (SKILL.md Phase 2 Step 6b) and its outcome here too, as a finding whose `status` is `fixed` (constraint removed, nothing regressed) or `rejected` (restored because a test regressed). Both outcomes wrote to disk, and both landed after Step 6a ran, so an ablated round owes a second Step 6a verify with those paths added to `applied_edits.edited_paths`.
 
 **When `check_convergence.py` exits 2.** Exit 2 means the ledger is missing or unparseable, and it is the one exit code that is a real failure rather than a verdict. It is repairable, and the repair belongs to this step:
 
