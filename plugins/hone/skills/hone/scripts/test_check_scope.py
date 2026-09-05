@@ -143,6 +143,30 @@ class TestDerivation(unittest.TestCase):
         self.assertEqual(install_root(artifact, "skill"),
                          self.tmp / ".claude" / "skills")
 
+    def test_the_install_dir_survives_a_symlinked_artifact_directory(self):
+        """r4-B1, at the unit: the root comes from where it is installed.
+
+        `access_path` resolves the install directory and stops there. A full
+        `realpath` of the artifact moves it into the checkout the symlink
+        points at, and `derive_root` then widens to that checkout -- a tree
+        that does not contain the install directory at all.
+        """
+        checkout = self.tmp / "checkout"
+        (checkout / "skills" / "hone").mkdir(parents=True)
+        (checkout / "skills" / "hone" / "SKILL.md").write_text("v1\n")
+        if not init_repo(checkout):  # pragma: no cover - git is in CI
+            self.skipTest("git unavailable")
+        install = self.tmp / "install" / "skills"
+        install.mkdir(parents=True)
+        (install / "hone").symlink_to(checkout / "skills" / "hone")
+
+        artifact = check_scope.access_path(install / "hone" / "SKILL.md", "skill")
+        self.assertEqual(artifact,
+                         Path(os.path.realpath(install)) / "hone" / "SKILL.md")
+        root, fallback = derive_root(artifact, "skill")
+        self.assertIsNone(fallback)
+        self.assertEqual(root, Path(os.path.realpath(install)))
+
     def test_outside_a_repo_the_root_is_the_install_dir(self):
         hooks = self.tmp / "hooks"
         hooks.mkdir()
@@ -961,9 +985,14 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
         self.assertIn("sub/other.md", json.loads(run.stdout)["violations"])
 
     def test_an_unhashable_subtree_reports_not_measurable(self):
+        # The budget has to sit above the outer tree's own hashing workload
+        # (one opaque subtree, counted once) and below the subtree's contents,
+        # or the snapshot bails before it gets as far as the subtree. Two
+        # files in `nested` against a budget of one does that.
+        (self.nested / "second.md").write_text("nested v1 too\n")
         snap = run_cli("--root", str(self.repo), "--scope", "skills/s",
                        "--manifest", str(self.manifest), "--snapshot", "--json",
-                       "--max-files", "0")
+                       "--max-files", "1")
         self.assertEqual(snap.returncode, 0, snap.stderr)
         self.assertIn("nested", json.loads(snap.stdout)["unmeasurable"])
         run = run_cli("--manifest", str(self.manifest), "--verify", "--json", "--declared-none")
@@ -978,9 +1007,10 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
         The subtree nobody could hash must not take the actionable revert list
         down with it: the caller needs both the halt and the paths.
         """
+        (self.nested / "second.md").write_text("nested v1 too\n")
         snap = run_cli("--root", str(self.repo), "--scope", "skills/s",
                        "--manifest", str(self.manifest), "--snapshot", "--json",
-                       "--max-files", "0")
+                       "--max-files", "1")
         self.assertEqual(snap.returncode, 0, snap.stderr)
         (self.repo / "outside.md").write_text("untracked and out of scope\n")
         run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
@@ -1124,10 +1154,6 @@ class TestToolCacheDirectoriesAreIgnored(unittest.TestCase):
         for rel in ("scripts/x.py", "src/app/main.py", "dist/bundle.js",
                     "build/out.txt", "references/notes.md"):
             self.assertFalse(_is_ignored(Path(rel)), rel)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestAttributionComesFromTheDeclaration(unittest.TestCase):
@@ -1920,7 +1946,12 @@ class TestCommandScopeAdmitsItsValidator(unittest.TestCase):
 
 
 class TestASymlinkedArtifactDirectoryIsUsable(unittest.TestCase):
-    """The ordinary `~/.claude/skills` layout, end to end.
+    """The ordinary `~/.claude/skills` layout, root and scope passed in.
+
+    These pin `_under_root` and the walk against a symlinked artifact
+    directory. They are NOT end to end: the root arrives by hand, so they say
+    nothing about where the root comes from, which is what
+    `TestTheSymlinkedInstallLayoutEndToEnd` below is for.
 
     `~/.claude/skills/{name}` is normally a symlink into a repository
     checkout. Walking follows it, so the detected paths are spelled through
@@ -1961,3 +1992,157 @@ class TestASymlinkedArtifactDirectoryIsUsable(unittest.TestCase):
                         declared=declaring(self.root, "other.md"))
         self.assertEqual(report["verdict"], "scope_violation")
         self.assertEqual(report["violations"], ["other.md"])
+
+
+class TestTheSymlinkedInstallLayoutEndToEnd(unittest.TestCase):
+    """r4-B1: the CLI derives the watch root from the install directory.
+
+    `~/.claude/skills/{name}` symlinked into a checkout is the layout this
+    module is written around, and `main()` resolved the artifact with
+    `realpath` before deriving anything from it. The root then came from the
+    symlink *target*: `install_root` answered `<checkout>/skills`, `derive_root`
+    widened to the checkout, and the watched tree was the repository the skill
+    came from rather than the directory the skill is installed in. An edit to
+    the sibling `~/.claude/skills/other/SKILL.md` -- the collateral damage the
+    module docstring names as this guard's purpose -- verified `clean`,
+    exit 0.
+
+    The class this replaces passed the root in by hand while calling itself
+    end to end, which is how the bug survived three review rounds. Everything
+    here goes through the CLI with `--artifact`/`--type` and asserts on what
+    the CLI wrote.
+    """
+
+    def setUp(self):
+        self.checkout = Path(tempfile.mkdtemp())
+        skill = self.checkout / "skills" / "hone"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("skill v1\n")
+        (self.checkout / "unrelated.md").write_text("checkout file v1\n")
+        if not init_repo(self.checkout):  # pragma: no cover - git is in CI
+            self.skipTest("git unavailable")
+        self.install = Path(tempfile.mkdtemp()) / "skills"
+        (self.install / "other").mkdir(parents=True)
+        (self.install / "other" / "SKILL.md").write_text("a sibling skill v1\n")
+        (self.install / "hone").symlink_to(skill)
+        self.artifact = self.install / "hone" / "SKILL.md"
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.checkout, ignore_errors=True)
+        shutil.rmtree(self.install.parent, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _snapshot(self):
+        return run_cli("--artifact", str(self.artifact), "--type", "skill",
+                       "--manifest", str(self.manifest), "--snapshot", "--json")
+
+    def _verify(self, *declared: str):
+        args = ["--manifest", str(self.manifest), "--verify", "--json"]
+        for path in declared:
+            args += ["--declared", path]
+        if not declared:
+            args.append("--declared-none")
+        return run_cli(*args)
+
+    def test_the_watch_root_is_the_install_dir_not_the_checkout(self):
+        snap = self._snapshot()
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        payload = json.loads(self.manifest.read_text())
+        self.assertEqual(payload["root"], os.path.realpath(self.install))
+        self.assertEqual(payload["scope"], ["hone"])
+
+    def test_an_undeclared_sibling_edit_is_not_clean(self):
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.install / "other" / "SKILL.md").write_text("clobbered\n")
+        run = self._verify()
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["unattributed_out_of_scope"],
+                         ["other/SKILL.md"])
+
+    def test_a_declared_sibling_edit_is_a_violation(self):
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.install / "other" / "SKILL.md").write_text("clobbered\n")
+        run = self._verify(str(self.install / "other" / "SKILL.md"))
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "scope_violation")
+        self.assertEqual(report["violations"], ["other/SKILL.md"])
+
+    def test_the_artifacts_own_edit_through_the_symlink_is_clean(self):
+        self.assertEqual(self._snapshot().returncode, 0)
+        self.artifact.write_text("skill v2\n")
+        run = self._verify(str(self.artifact))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "clean")
+        self.assertEqual(report["modified_in_scope"], ["hone/SKILL.md"])
+        self.assertEqual(report["declared_outside_root"], [])
+
+    def test_the_checkout_the_symlink_points_into_is_not_watched(self):
+        """The far side of the symlink is another tree, not this run's watch.
+
+        Widening to it was the bug. The artifact's own directory is still
+        watched -- through the symlink, where the run reaches it.
+        """
+        self.assertEqual(self._snapshot().returncode, 0)
+        (self.checkout / "unrelated.md").write_text("checkout file v2\n")
+        run = self._verify()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(json.loads(run.stdout)["verdict"], "clean")
+
+
+class TestTheBudgetIsSpentInGitModeToo(unittest.TestCase):
+    """r4-N1: `--max-files` used to be inert on any root git could answer for.
+
+    Only the walk branch checked it, so a repository root was hashed without
+    limit however small the budget was, while the same budget still went to
+    `_hash_opaque` and to verify. `--max-files 0` therefore produced a
+    snapshot of the whole outer tree and a `not_measurable` verdict for any
+    nested subtree in it, and the `except TooManyFiles` handler behind the
+    help text's promised bail could never fire.
+    """
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp())
+        (self.repo / "skills").mkdir()
+        (self.repo / "skills" / "s.md").write_text("v1\n")
+        if not init_repo(self.repo):  # pragma: no cover - git is in CI
+            self.skipTest("git unavailable")
+        self.workdir = Path(tempfile.mkdtemp())
+        self.manifest = self.workdir / "m.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+        shutil.rmtree(self.workdir, ignore_errors=True)
+
+    def _snapshot(self, budget: str):
+        return run_cli("--root", str(self.repo), "--scope", "skills",
+                       "--manifest", str(self.manifest), "--snapshot", "--json",
+                       "--max-files", budget)
+
+    def test_a_root_over_budget_bails_instead_of_hashing_it_all(self):
+        (self.repo / "dirty.md").write_text("untracked\n")
+        run = self._snapshot("0")
+        self.assertEqual(run.returncode, 2, run.stdout)
+        self.assertIn("--max-files 0", run.stderr)
+        self.assertFalse(self.manifest.exists())
+
+    def test_a_clean_repository_costs_nothing_and_fits_any_budget(self):
+        """The budget is the hashing workload, not the size of the tree."""
+        run = self._snapshot("0")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout)["files_recorded"], 0)
+
+    def test_a_root_within_budget_still_snapshots(self):
+        (self.repo / "dirty.md").write_text("untracked\n")
+        run = self._snapshot("5")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(run.stdout)["mode"], "git")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -189,7 +189,11 @@ def scope_verify_exempt(mode: str, gates: list | None = None) -> bool:
     An exemption that a run can claim for itself is not an exemption, it is an
     off switch, and this one was reachable two ways. `--mode error-halt` set
     it straight from a caller flag: main() now passes the *derived* mode here
-    and never the override, so the flag can no longer reach it. The second way
+    and never the override, and when `steps{}` is missing, empty, or not a
+    dict -- the cases `derive_gate_mode` cannot derive a mode from -- it
+    passes `normal` rather than falling back to the flag, so the flag can no
+    longer reach it by either route. The exemption is a claim about `steps{}`,
+    and a `steps{}` nobody can read is not evidence for it. The second way
     needed no flag at all -- leave one entry of `steps{}` at `in_progress` and
     `derive_gate_mode` returns `error-halt` on its own. `gates[]` closes that
     one, because a run claiming it died mid-flight has to look like it:
@@ -295,7 +299,9 @@ def validate_gates(
     `mode` may be a caller's `--mode` override, and an override that could
     switch a safety requirement off is not an override, it is a way around the
     requirement. Leave it None and `mode` is treated as the derived one, which
-    is what an in-process caller with no state file is saying.
+    is what an in-process caller with no state file is saying. main() never
+    leaves it None: a state file it cannot derive a mode from gets `normal`,
+    because the alternative is the override reaching the exemption after all.
     """
     errors: list[str] = []
     warnings: list[str] = []
@@ -427,17 +433,28 @@ def validate_gates(
                 "state file but never recorded that it did"
             )
         elif step == "scope_verify" and mode == "error-halt":
-            # The exemption was claimed and refused. Say which guard refused
-            # it, or the message reads as the plain missing-event error the
-            # error-halt mode is supposed to be spared.
-            errors.append(
-                "missing required gate event 'scope_verify': the run applied "
-                "edits and never verified their scope. An error halt is "
-                "excused this only when its gates[] show a halt it could have "
-                "died in -- at least one failing event, and none of "
-                f"{list(PAST_PHASE2)}, which only a run already past Phase 2 "
-                "Step 6a can emit. These do not."
-            )
+            # The exemption was claimed and refused. Say which of the two
+            # guards refused it, or the message reads as the plain
+            # missing-event error the error-halt mode is supposed to be spared.
+            if derived_mode is not None and derived_mode != "error-halt":
+                errors.append(
+                    "missing required gate event 'scope_verify': the run "
+                    "applied edits and never verified their scope. Only an "
+                    "error halt is excused this, and the halt has to be "
+                    "visible in the state file's steps{}, which derives "
+                    f"'{derived_mode}' here (a steps{{}} that is missing, "
+                    "empty, or unreadable derives no halt and counts as "
+                    "'normal'). --mode does not confer the exemption."
+                )
+            else:
+                errors.append(
+                    "missing required gate event 'scope_verify': the run "
+                    "applied edits and never verified their scope. An error "
+                    "halt is excused this only when its gates[] show a halt it "
+                    "could have died in -- at least one failing event, and "
+                    f"none of {list(PAST_PHASE2)}, which only a run already "
+                    "past Phase 2 Step 6a can emit. These do not."
+                )
         else:
             errors.append(f"missing required gate event '{step}' for mode '{mode}'")
 
@@ -536,9 +553,15 @@ def main() -> None:
     # be the caller's --mode, and the scope_verify exemption must never be
     # reachable from a flag. `--mode error-halt` on a completed run that
     # applied edits used to turn the missing scope check into a warning.
+    #
+    # An underivable mode is passed as "normal" rather than as None, which
+    # validate_gates reads as "treat `mode` as derived" and which would hand
+    # the exemption straight back to --mode for any state file with a missing,
+    # empty, or non-dict steps{}. The run shape used for the expected event
+    # set keeps its own fallback above; only the exemption's input is pinned.
     report = validate_gates(
         state.get("gates", []), mode, resumed, edits_applied,
-        derived_mode=derived_mode,
+        derived_mode=derived_mode if derived_mode is not None else "normal",
     )
 
     if (

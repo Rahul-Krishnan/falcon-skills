@@ -445,7 +445,15 @@ def _git_hash_candidates(root: Path) -> int | None:
     status = _git_status(root)
     if status is None:
         return None
-    entries, opaque = status
+    return _candidate_count(*status)
+
+
+def _candidate_count(entries: list[tuple[str, str]], opaque: list[str]) -> int:
+    """Candidate count from a `_git_status` answer already in hand.
+
+    `snapshot_state` holds one and must not pay for a second `git status` just
+    to check the budget it is about to spend.
+    """
     hashed = [rel for _code, rel in entries if not _is_ignored(Path(rel))]
     return len(hashed) + len(opaque)
 
@@ -683,6 +691,32 @@ def install_root(artifact: Path, artifact_type: str) -> Path:
     return container.parent if artifact_type == "skill" else container
 
 
+def access_path(artifact: Path, artifact_type: str) -> Path:
+    """`artifact` with its install directory resolved and its own name kept.
+
+    Everything downstream of this is derived from the returned path, and a
+    plain `realpath` of the artifact answers a different question than the one
+    the watch root asks. `~/.claude/skills/{name}` is routinely a symlink into
+    a repository checkout: resolving it moves the artifact wholesale into the
+    checkout's namespace, `install_root` then answers `<checkout>/skills`
+    instead of `~/.claude/skills`, and `derive_root` widens to the checkout.
+    The watched tree becomes the repository the artifact happens to have come
+    from and stops containing the sibling artifacts a run can actually reach,
+    so an edit to `~/.claude/skills/other/SKILL.md` -- the collateral damage
+    this module exists to catch -- verified `clean`.
+
+    The install directory is the half that has to survive, because that is
+    where a collateral edit lands. Its *ancestors* are still resolved, because
+    the root and everything compared against it live in the realpath namespace
+    and leaving them alone reintroduces the `/tmp` against `/private/tmp`
+    mismatch. Only the components below the install directory keep the
+    spelling the caller used, which is exactly the spelling `_walk` produces
+    and `_under_root` expects.
+    """
+    container = install_root(artifact, artifact_type)
+    return Path(_real(container)) / artifact.relative_to(container)
+
+
 def derive_root(artifact: Path, artifact_type: str,
                 max_files: int = DEFAULT_MAX_FILES) -> tuple[Path, dict | None]:
     """Watch root for `artifact`, plus a fallback record if it was narrowed.
@@ -696,15 +730,29 @@ def derive_root(artifact: Path, artifact_type: str,
     watch, because widening it costs nothing there. Only when the work itself
     is too big does the root narrow to the install directory, and then it says
     so out loud.
+
+    Which repository, though, is asked of the *install directory* and not of
+    the artifact. Ask the artifact and a symlinked `~/.claude/skills/{name}`
+    reports the checkout it points into, which is a tree that does not contain
+    the install directory at all: widening to it swaps the watch for a
+    different tree, dropping every sibling artifact the run can reach and
+    admitting files it has no path to. Asking the install directory answers
+    the question the root is for -- what could plausibly be collateral damage
+    -- and still widens for the case that motivated widening, an install
+    directory that is itself inside a repository.
     """
-    narrow = install_root(artifact, artifact_type)
-    toplevel = _git_toplevel(artifact.parent)
+    narrow = Path(_real(install_root(artifact, artifact_type)))
+    toplevel = _git_toplevel(narrow)
     if toplevel is None:
         return narrow, None
-    # `artifact` arrives already resolved; put the repo root in the same
-    # namespace or the `is this below that` test below compares /tmp against
-    # /private/tmp and silently declines to narrow.
+    # Put the repo root in the same namespace as `narrow` or the `is this
+    # below that` tests below compare /tmp against /private/tmp and silently
+    # decline to narrow.
     toplevel = Path(_real(toplevel))
+    if toplevel != narrow and toplevel not in narrow.parents:
+        # git answered about a tree that does not contain the install
+        # directory. Widening to it would watch somewhere else entirely.
+        return narrow, None
 
     count = _git_hash_candidates(toplevel)
     can_narrow = narrow == toplevel or toplevel in narrow.parents
@@ -770,6 +818,15 @@ def snapshot_state(root: Path, exclude: set[Path] | None = None,
             "max_files": max_files,
         }
     entries, opaque = status
+    # The budget, spent where git mode actually spends it. Only the walk
+    # branch used to check it, so a root git could answer about was hashed
+    # without limit while the same budget still made verify report
+    # `not_measurable` for a nested subtree inside it. `derive_root` narrows
+    # first where narrowing is available, so a count over budget here means it
+    # is not.
+    candidates = _candidate_count(entries, opaque)
+    if candidates > max_files:
+        raise TooManyFiles(candidates, max_files)
 
     dirty_tracked: dict[str, str | None] = {}
     untracked: dict[str, str | None] = {}
@@ -1547,9 +1604,12 @@ def main() -> None:
                              "root-relative path the run may change.")
     parser.add_argument("--max-files", type=int, default=DEFAULT_MAX_FILES,
                         dest="max_files",
-                        help=f"Bail out of a watch root larger than N files "
-                             f"(default {DEFAULT_MAX_FILES}); inside a repo, fall "
-                             f"back to the install directory and say so.")
+                        help=f"Budget for the files a snapshot hashes "
+                             f"(default {DEFAULT_MAX_FILES}): every file under "
+                             f"the root outside a repo, the dirty and untracked "
+                             f"ones inside one. Inside a repo the root falls "
+                             f"back to the install directory and says so; when "
+                             f"it cannot, the snapshot bails.")
     parser.add_argument("--declared", action="append", default=[],
                         help="Repeatable. A path THIS RUN wrote, absolute or "
                              "root-relative. Only a declared out-of-scope "
@@ -1584,13 +1644,16 @@ def main() -> None:
 
     artifact = None
     if args.artifact:
-        artifact = Path(args.artifact).expanduser()
+        artifact = Path(os.path.abspath(str(Path(args.artifact).expanduser())))
         if not artifact.exists():
             _fail(f"artifact not found: {artifact}")
-        artifact = Path(_real(artifact))
         if artifact.is_dir():
             _fail(f"--artifact must be a file, not a directory: {artifact}. "
                   "For a skill, pass the SKILL.md inside it.")
+        # Resolve the install directory and nothing below it. A full realpath
+        # here is what made the watch root come from the symlink target rather
+        # than the install directory; see `access_path`.
+        artifact = access_path(artifact, args.artifact_type)
 
     manifest_path = Path(args.manifest).expanduser()
     excluded = {manifest_path}
@@ -1699,9 +1762,9 @@ def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
     try:
         state = snapshot_state(root, excluded, args.max_files)
     except TooManyFiles as exc:
-        _fail(f"watch root {root} holds more than --max-files {exc.limit} files "
-              f"and cannot be narrowed further; pass a smaller --root or raise "
-              f"--max-files")
+        _fail(f"watch root {root} needs to hash {exc.count} file(s), over "
+              f"--max-files {exc.limit}, and cannot be narrowed further; pass "
+              f"a smaller --root or raise --max-files")
         return
 
     payload = {

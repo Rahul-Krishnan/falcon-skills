@@ -581,8 +581,13 @@ class TestDocumentedCleanRunValidates(unittest.TestCase):
             "applied_edits": {"edit_count": 3},
             "gates": [
                 self._gate("phase1_to_phase2"),
-                self._gate("phase2_to_phase3"),
+                # SKILL.md's template and its gate table both put scope_verify
+                # here, in front of the phase transition: Step 6a runs before
+                # Phase 3 is entered. The order matters beyond bookkeeping,
+                # because PAST_PHASE2 treats a phase2_to_phase3 beside an
+                # exemption claim as proof Step 6a was already behind it.
                 self._gate("scope_verify"),
+                self._gate("phase2_to_phase3"),
                 self._gate("phase3_exit"),
                 self._gate("convergence"),
                 self._gate("workflow_exit"),
@@ -889,6 +894,33 @@ class TestScopeVerifyCannotBeSwitchedOff(unittest.TestCase):
         self.assertEqual(code, 0, report)
         self.assertEqual(report["missing_steps"], [])
         self.assertTrue(any("scope_verify" in w for w in report["warnings"]))
+
+    def test_an_underivable_steps_map_cannot_reach_the_exemption(self):
+        """No steps{}, no derived mode, and --mode must not fill the gap.
+
+        `derive_gate_mode` returns None for a steps{} that is missing, empty,
+        or not a dict. main() used to pass that None straight through, which
+        validate_gates reads as "treat `mode` as the derived one" -- so the
+        caller's --mode error-halt reached the exemption after all, on any
+        state file whose steps{} was absent.
+        """
+        halt_shape = [
+            gate("phase1_to_phase2", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]
+        for steps in ({}, None, [], "done"):
+            state = self._completed_run(gates=list(halt_shape))
+            if steps is None:
+                state.pop("steps")
+            else:
+                state["steps"] = steps
+            code, report = self._run(state, "--mode", "error-halt")
+            self.assertEqual(code, 1, (steps, report))
+            self.assertIn("scope_verify", report["missing_steps"])
+            self.assertTrue(
+                any("--mode does not confer" in e for e in report["errors"]),
+                report["errors"],
+            )
 
     def test_a_halt_recorded_past_phase_2_is_not_exempt(self):
         """`phase2_to_phase3` beside the claim says Step 6a was behind it."""
