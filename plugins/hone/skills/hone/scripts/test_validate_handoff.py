@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from validate_handoff import (
+    EDITED_PATHS_MIGRATION,
     HANDOFF_SCHEMAS,
     POWER_VERDICT_MIGRATION,
     ROUND_SCORES_SCHEMA,
@@ -1659,3 +1660,43 @@ class TestTheRoundRecordCanNameItsScorer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEditedPathsCarriesItsMigration(unittest.TestCase):
+    """r3-S2. `applied_edits.edited_paths` arrived required and non-empty with
+    the Step 6a scope guard, so a run whose Phase 2 handoff was recorded before
+    that and resumed after it hard-fails the mandatory pre-Phase-3 gate with a
+    bare "required field missing". This file already answers that situation for
+    `output_dir` and `power_verdict`; `_arr` just did not accept the note the
+    other spec builders did."""
+
+    HANDOFF = {
+        "edit_count": 3,
+        "confirmed_on_disk": True,
+        "artifact_before_snapshot": "/tmp/before.md",
+        "syntax_check_passed": True,
+    }
+
+    def _message(self, handoff):
+        result = validate_handoff({"applied_edits": handoff}, "applied_edits")
+        self.assertFalse(result.valid)
+        return {e.path: e.message for e in result.errors}[
+            "applied_edits.edited_paths"]
+
+    def test_the_absent_field_names_its_migration(self) -> None:
+        message = self._message(self.HANDOFF)
+        self.assertIn("required field missing", message)
+        self.assertIn("Migration:", message)
+
+    def test_an_empty_list_names_it_too(self) -> None:
+        # A resumed state file can carry the key holding an empty list as
+        # easily as it can omit the key, and the remedy is the same.
+        message = self._message(dict(self.HANDOFF, edited_paths=[]))
+        self.assertIn("array must be non-empty", message)
+        self.assertIn("Migration:", message)
+
+    def test_the_note_refuses_the_two_wrong_repairs(self) -> None:
+        # Inventing the list points a revert instruction at the wrong file,
+        # and --declared-none is a positive claim that nothing was written.
+        self.assertIn("--declared-none", EDITED_PATHS_MIGRATION)
+        self.assertIn("Step 5a", EDITED_PATHS_MIGRATION)

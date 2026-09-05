@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -28,9 +29,19 @@ from check_scope import (  # noqa: E402
 SCRIPT = str(Path(check_scope.__file__))
 
 
-def walk_state(root: Path, exclude=None) -> dict:
-    """A walk-mode manifest payload, as `--snapshot` writes outside a repo."""
-    return {"mode": "walk", "files": build_manifest(root, exclude)}
+def walk_state(root: Path, exclude=None,
+               max_files: int = check_scope.DEFAULT_MAX_FILES) -> dict:
+    """A walk-mode manifest payload, as `--snapshot` writes outside a repo.
+
+    Built the way `snapshot_state` builds it, budget and unreadable-path list
+    included. Hand-assembling the dict here let the helper drift from the real
+    thing: it omitted `max_files`, and the test that needed the budget spliced
+    the field in itself, which hid the fact that `snapshot_state` was not
+    writing one.
+    """
+    files, unmeasurable = check_scope.walk_manifest(root, exclude, max_files)
+    return {"mode": "walk", "files": files, "unmeasurable": unmeasurable,
+            "max_files": max_files}
 
 
 def init_repo(path: Path) -> bool:
@@ -1542,7 +1553,7 @@ class TestWalkVerifyRespectsTheSnapshotBudget(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_a_tree_that_grew_past_the_budget_is_not_measurable(self):
-        state = dict(walk_state(self.root), max_files=1)
+        state = walk_state(self.root, max_files=1)
         for name in ("a", "b", "c"):
             (self.root / f"{name}.md").write_text("grown since the snapshot\n")
         report = verify(self.root, state, ["hone"], declared=NOTHING)
@@ -1551,9 +1562,21 @@ class TestWalkVerifyRespectsTheSnapshotBudget(unittest.TestCase):
         self.assertTrue(report["not_measurable_reasons"])
 
     def test_a_tree_inside_the_budget_still_verifies(self):
-        state = dict(walk_state(self.root), max_files=100)
+        state = walk_state(self.root, max_files=100)
         report = verify(self.root, state, ["hone"], declared=NOTHING)
         self.assertEqual(report["verdict"], "clean")
+
+    def test_the_snapshot_carries_its_own_budget(self):
+        """r3-N1: the budget has to survive in the state, not just the CLI.
+
+        `verify` reads `state["max_files"]`, so a walk-mode snapshot that did
+        not store one had every in-process verify silently fall back to the
+        20000 default -- a tree snapshotted under a tight budget and grown
+        past it was re-hashed without bound instead of reported.
+        """
+        state = check_scope.snapshot_state(self.root, max_files=7)
+        self.assertEqual(state["mode"], "walk")
+        self.assertEqual(state["max_files"], 7)
 
 
 class TestASubtreeBecomingOpaqueInventsNothing(unittest.TestCase):
@@ -1626,3 +1649,315 @@ class TestASubtreeBecomingOpaqueInventsNothing(unittest.TestCase):
             self.assertEqual(run.returncode, 3, run.stdout)
         finally:
             shutil.rmtree(repo, ignore_errors=True)
+
+
+class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
+    """r3-B1: the fail-open invariant, asserted over the enumerated set.
+
+    Four doors on this class were closed one at a time (git unanswerable,
+    nested repositories, registered submodules, unreadable files) and a fifth
+    was still open: `_walk` dropped anything that was neither
+    `is_dir(follow_symlinks=False)` nor `is_file()`, which is every symlinked
+    directory, every dangling symlink, and every socket and fifo, with no
+    record anywhere. So this does not test the symlink example. It enumerates
+    every way an entry under the watch root can fail to be read or classified
+    -- cases 4 to 8 of the module docstring -- and asserts the invariant the
+    docstring states over the whole set: an out-of-scope path the guard could
+    not read never comes back `clean`.
+
+    Each case builds the same tree shape: an in-scope `hone/` the run is
+    allowed to touch, and one awkward entry beside it, out of scope.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "hone").mkdir()
+        (self.root / "hone" / "SKILL.md").write_text("in scope\n")
+
+    def tearDown(self):
+        for path in self.root.rglob("*"):
+            with contextlib.suppress(OSError):
+                path.chmod(0o755)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _verdict(self):
+        state = check_scope.snapshot_state(self.root)
+        return verify(self.root, state, ["hone"], declared=NOTHING)
+
+    # -- case 4: a directory that cannot be listed ------------------------
+    def test_an_unlistable_directory_is_recorded(self):
+        if os.geteuid() == 0:  # pragma: no cover - root reads anything
+            self.skipTest("running as root; chmod 000 does not deny reads")
+        shut = self.root / "shut"
+        shut.mkdir()
+        (shut / "inside.md").write_text("unreachable\n")
+        shut.chmod(0o000)
+        report = self._verdict()
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(any("shut" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+    # -- case 5: an entry whose type cannot be determined -----------------
+    def test_an_unclassifiable_entry_is_recorded(self):
+        real_scandir = os.scandir
+
+        class Exploding:
+            """A DirEntry whose stat calls fail, as one on a dying mount does."""
+
+            name = "flaky.md"
+
+            def __init__(self, path):
+                self.path = path
+
+            def is_dir(self, follow_symlinks=True):
+                raise OSError("stat failed")
+
+            is_file = is_symlink = is_dir
+
+        def scandir(path):
+            entries = list(real_scandir(path))
+            if Path(path) == self.root:
+                entries.append(Exploding(str(self.root / "flaky.md")))
+            return entries
+
+        with unittest.mock.patch.object(check_scope.os, "scandir", scandir):
+            report = self._verdict()
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(any("flaky.md" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+    # -- case 6: a dangling symlink --------------------------------------
+    def test_a_dangling_symlink_is_recorded(self):
+        (self.root / "gone.md").symlink_to(self.root / "never-existed.md")
+        report = self._verdict()
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(any("gone.md" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+    # -- case 7: an entry that is not a regular file ----------------------
+    def test_a_fifo_is_recorded(self):
+        if not hasattr(os, "mkfifo"):  # pragma: no cover - POSIX only
+            self.skipTest("os.mkfifo unavailable")
+        os.mkfifo(self.root / "pipe")
+        report = self._verdict()
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(any("pipe" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+    # -- case 8: a symlinked directory looping onto its own descent -------
+    def test_a_symlink_loop_is_recorded_not_followed(self):
+        (self.root / "loop").symlink_to(self.root)
+        report = self._verdict()
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(any("loop" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+    # -- the case that is deliberately NOT unmeasurable -------------------
+    def test_a_symlinked_directory_is_walked_rather_than_recorded(self):
+        """The reported case, and the reason the fix is not "record it too".
+
+        `~/.claude/skills/{name}` is routinely a symlink into a repository
+        checkout, so declining to read symlinked directories would report
+        `not_measurable` on every ordinary walk-mode run. They are followed
+        instead, which is what makes the change inside one visible at all.
+        """
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / "f.txt").write_text("v1\n")
+        (self.root / "linked").symlink_to(target)
+
+        state = check_scope.snapshot_state(self.root)
+        self.assertIn("linked/f.txt", state["files"])
+        self.assertEqual(state["unmeasurable"], [])
+
+        (self.root / "linked" / "f.txt").write_text("v2\n")
+        undeclared = verify(self.root, state, ["hone"], declared=NOTHING)
+        self.assertEqual(undeclared["verdict"], "not_measurable")
+        self.assertEqual(undeclared["violations"], [])
+        self.assertEqual(undeclared["unattributed_out_of_scope"], ["linked/f.txt"])
+
+        declared = verify(self.root, state, ["hone"],
+                          declared=declaring(self.root, "linked/f.txt"))
+        self.assertEqual(declared["verdict"], "scope_violation")
+        self.assertEqual(declared["violations"], ["linked/f.txt"])
+
+    def test_two_symlinks_to_one_target_are_not_a_loop(self):
+        """Loop protection must not misread a shared target as a cycle."""
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / "f.txt").write_text("v1\n")
+        (self.root / "one").symlink_to(target)
+        (self.root / "two").symlink_to(target)
+
+        state = check_scope.snapshot_state(self.root)
+        self.assertEqual(state["unmeasurable"], [])
+        self.assertIn("one/f.txt", state["files"])
+        self.assertIn("two/f.txt", state["files"])
+
+    def test_a_readable_tree_still_verifies_clean(self):
+        """The control. The invariant must not be satisfied by never saying clean."""
+        report = self._verdict()
+        self.assertEqual(report["verdict"], "clean")
+        self.assertEqual(report["not_measurable_reasons"], [])
+
+
+class TestUnmeasurableRecordsSurviveTheManifest(unittest.TestCase):
+    """The record has to reach --verify, which reads it back out of JSON."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "hone").mkdir()
+        (self.root / "hone" / "SKILL.md").write_text("in scope\n")
+        self.manifest = self.root.parent / f"{self.root.name}-m.json"
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            self.manifest.unlink()
+
+    def test_the_cli_reports_and_reloads_an_unreadable_entry(self):
+        (self.root / "gone.md").symlink_to(self.root / "never-existed.md")
+        snap = run_cli("--root", str(self.root), "--scope", "hone",
+                       "--manifest", str(self.manifest), "--snapshot", "--json")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        self.assertEqual(json.loads(snap.stdout)["unmeasurable"], ["gone.md"])
+
+        run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
+                      "--declared-none")
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertEqual(report["violations"], [])
+        self.assertTrue(any("gone.md" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+    def test_a_manifest_holding_the_old_bare_string_spelling_still_reads(self):
+        """Older manifests stored `unmeasurable` as bare subtree names."""
+        state = {"mode": "walk", "files": {}, "max_files": 100,
+                 "unmeasurable": ["vendor/sub"]}
+        report = verify(self.root, state, ["hone"], declared=NOTHING)
+        self.assertEqual(report["verdict"], "not_measurable")
+        self.assertTrue(any("vendor/sub" in reason
+                            for reason in report["not_measurable_reasons"]))
+
+
+class TestCommandScopeAdmitsItsValidator(unittest.TestCase):
+    """r3-B2: Phase 2 Step 6 must not write a file Step 6a orders deleted.
+
+    Step 6 mandates a companion `validate_handoffs.py` and mandates declaring
+    every file written, including that one. For a command the only in-scope
+    path was the command file itself, so the validator was declared and out of
+    scope, which is the definition of a real violation: Step 6a ordered the
+    run to delete the validator it had just been required to create, and halt.
+    """
+
+    def test_the_validator_sibling_is_in_scope_for_a_command(self):
+        artifact = Path("/x/commands/foo.md")
+        self.assertEqual(
+            check_scope.permitted_scopes(artifact, "command"),
+            [artifact, Path("/x/commands/foo-validator")],
+        )
+
+    def test_every_other_type_keeps_its_single_scope(self):
+        for kind, artifact in (
+            ("skill", Path("/x/skills/foo/SKILL.md")),
+            ("hook", Path("/x/hooks/foo.sh")),
+            ("script", Path("/x/scripts/foo.py")),
+        ):
+            self.assertEqual(
+                check_scope.permitted_scopes(artifact, kind),
+                [check_scope.permitted_scope(artifact, kind)], kind)
+
+    def test_a_generated_validator_verifies_clean_end_to_end(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        commands = root / "commands"
+        commands.mkdir()
+        command = commands / "foo.md"
+        command.write_text("# foo\n")
+        manifest = root / "m.json"
+
+        snap = run_cli("--artifact", str(command), "--type", "command",
+                       "--root", str(commands), "--manifest", str(manifest),
+                       "--snapshot", "--json")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        self.assertEqual(json.loads(snap.stdout)["scope"],
+                         ["foo.md", "foo-validator"])
+
+        (commands / "foo-validator").mkdir()
+        validator = commands / "foo-validator" / "validate_handoffs.py"
+        validator.write_text("import sys\n")
+        command.write_text("# foo, improved\n")
+
+        run = run_cli("--manifest", str(manifest), "--verify", "--json",
+                      "--declared", str(command), "--declared", str(validator))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        report = json.loads(run.stdout)
+        self.assertEqual(report["verdict"], "clean")
+        self.assertEqual(report["violations"], [])
+
+    def test_a_sibling_that_is_not_the_validator_is_still_a_violation(self):
+        """The widening is one named directory, not the commands folder."""
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        commands = root / "commands"
+        commands.mkdir()
+        command = commands / "foo.md"
+        command.write_text("# foo\n")
+        other = commands / "bar.md"
+        other.write_text("someone else's command\n")
+        manifest = root / "m.json"
+
+        snap = run_cli("--artifact", str(command), "--type", "command",
+                       "--root", str(commands), "--manifest", str(manifest),
+                       "--snapshot", "--json")
+        self.assertEqual(snap.returncode, 0, snap.stderr)
+        other.write_text("clobbered\n")
+        run = run_cli("--manifest", str(manifest), "--verify", "--json",
+                      "--declared", str(other))
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertEqual(json.loads(run.stdout)["violations"], ["bar.md"])
+
+
+class TestASymlinkedArtifactDirectoryIsUsable(unittest.TestCase):
+    """The ordinary `~/.claude/skills` layout, end to end.
+
+    `~/.claude/skills/{name}` is normally a symlink into a repository
+    checkout. Walking follows it, so the detected paths are spelled through
+    the symlink (`hone/SKILL.md`). A declaration is spelled the same way,
+    because that is the path the executor edited -- but `realpath` on it lands
+    inside the checkout, outside the watch root entirely. Resolving both ends
+    with `realpath` therefore reports every declared path as outside the root
+    and every run as `not_measurable`; resolving neither reintroduces the
+    `/tmp` against `/private/tmp` mismatch. `_under_root` resolves as far as
+    the root and no further.
+    """
+
+    def setUp(self):
+        self.checkout = Path(tempfile.mkdtemp())
+        (self.checkout / "hone").mkdir()
+        (self.checkout / "hone" / "SKILL.md").write_text("v1\n")
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "hone").symlink_to(self.checkout / "hone")
+        (self.root / "other.md").write_text("a sibling artifact\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+        shutil.rmtree(self.checkout, ignore_errors=True)
+
+    def test_an_in_scope_edit_through_the_symlink_is_clean(self):
+        state = check_scope.snapshot_state(self.root)
+        (self.root / "hone" / "SKILL.md").write_text("v2\n")
+        report = verify(self.root, state, ["hone"],
+                        declared=declaring(self.root, "hone/SKILL.md"))
+        self.assertEqual(report["verdict"], "clean")
+        self.assertEqual(report["declared_outside_root"], [])
+        self.assertEqual(report["modified_in_scope"], ["hone/SKILL.md"])
+
+    def test_an_out_of_scope_edit_through_the_symlink_is_a_violation(self):
+        state = check_scope.snapshot_state(self.root)
+        (self.root / "other.md").write_text("clobbered\n")
+        report = verify(self.root, state, ["hone"],
+                        declared=declaring(self.root, "other.md"))
+        self.assertEqual(report["verdict"], "scope_violation")
+        self.assertEqual(report["violations"], ["other.md"])

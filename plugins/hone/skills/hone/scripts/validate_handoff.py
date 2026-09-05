@@ -134,11 +134,14 @@ def _obj(fields: dict, required: bool = True) -> dict:
 
 
 def _arr(
-    items: dict | None = None, required: bool = True, non_empty: bool = False
+    items: dict | None = None, required: bool = True, non_empty: bool = False,
+    migration: str | None = None,
 ) -> dict:
     spec: dict = {"type": "array", "required": required, "non_empty": non_empty}
     if items is not None:
         spec["items"] = items
+    if migration is not None:
+        spec["migration"] = migration
     return spec
 
 
@@ -213,6 +216,26 @@ POWER_VERDICT_MIGRATION = (
     "(check_eval_power.py <eval_criteria.json> --artifact-type <type>, no "
     "--before/--after) and records that verdict instead (powered or "
     "underpowered)"
+)
+# `applied_edits.edited_paths` arrived required and non-empty with the scope
+# guard, so a run that recorded its Phase 2 handoff before the guard landed and
+# resumed after it hits the mandatory pre-Phase-3 gate with nothing to act on.
+# Unlike the two above, the remedy is not a re-run of a script: the executor is
+# the only thing that knows which files it wrote, and the paths have to be
+# recovered rather than recomputed. Say so, and say what to do when they cannot
+# be. references/phase2-improvement.md Step 6 carries the same instruction;
+# keep the two in step.
+EDITED_PATHS_MIGRATION = (
+    "state files written before the Step 6a scope guard landed have no "
+    "edited_paths, because nothing read it then. To migrate, list every file "
+    "this round wrote as an absolute path -- the artifact, a generated "
+    "companion validator, anything else; the read-back at Step 6 walked that "
+    "same list. If the round's edits cannot be recovered, do NOT invent the "
+    "list and do NOT pass --declared-none: re-run Step 5a to take a fresh "
+    "snapshot, or halt, because a declaration that is wrong is worse than one "
+    "that is missing (the guard answers a missing one with not_measurable and "
+    "a halt, and a wrong one with a revert instruction aimed at the wrong "
+    "file)"
 )
 
 
@@ -698,6 +721,7 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             "edited_paths": _arr(
                 items={"type": "string", "non_empty": True},
                 non_empty=True,
+                migration=EDITED_PATHS_MIGRATION,
             ),
         },
     },
@@ -1014,7 +1038,11 @@ def validate_value(
             )
         else:
             if spec.get("non_empty") and len(value) == 0:
-                errors.append(ValidationError(path, "array must be non-empty"))
+                # The migration note belongs here too: a resumed state file
+                # can carry the key with an empty list as easily as it can
+                # omit it, and the remedy is the same either way.
+                errors.append(ValidationError(
+                    path, _with_migration("array must be non-empty", spec)))
             if "items" in spec:
                 item_spec = spec["items"]
                 for idx, item in enumerate(value):

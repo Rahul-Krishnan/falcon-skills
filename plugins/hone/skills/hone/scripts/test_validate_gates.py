@@ -814,3 +814,102 @@ class TestRepeatedGateAttempts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScopeVerifyCannotBeSwitchedOff(unittest.TestCase):
+    """r3-S1: the exemption had two ways in, one with a flag and one without.
+
+    `_expected_steps` documents that its conditions come off the state file
+    and "never read off a caller flag that could switch them off". The
+    error-halt exemption did exactly that: the effective mode it keyed on
+    could be a `--mode error-halt` the caller supplied. And the mode is
+    derived from `steps{}`, which the executor writes, so leaving one step at
+    `in_progress` reached the same exemption with no flag at all.
+    """
+
+    @staticmethod
+    def _steps(phase1: str, phase23: str) -> dict:
+        from hone_common import PHASE1_STEPS, PHASE23_STEPS
+
+        return {
+            **{step: phase1 for step in PHASE1_STEPS},
+            **{step: phase23 for step in PHASE23_STEPS},
+        }
+
+    def _run(self, state, *extra):
+        import json as _json
+        import subprocess
+        import sys as _sys
+        import tempfile
+        from pathlib import Path
+
+        script = str(Path(__file__).parent / "validate_gates.py")
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as handle:
+            _json.dump(state, handle)
+            tmp_path = handle.name
+        result = subprocess.run(
+            [_sys.executable, script, tmp_path, "--json", *extra],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode, _json.loads(result.stdout)
+
+    def _completed_run(self, **overrides):
+        state = {
+            "steps": self._steps("done", "done"),
+            "applied_edits": {"edit_count": 3},
+            "gates": list(NORMAL_RUN),
+        }
+        state.update(overrides)
+        return state
+
+    def test_the_mode_flag_cannot_reach_the_exemption(self):
+        code, report = self._run(self._completed_run(), "--mode", "error-halt")
+        self.assertEqual(code, 1)
+        self.assertIn("scope_verify", report["missing_steps"])
+
+    def test_an_in_flight_step_alone_cannot_reach_the_exemption(self):
+        """No flag needed for this one: steps{} is executor-written too."""
+        state = self._completed_run(
+            steps=dict(self._steps("done", "done"), phase2_improve="in_progress")
+        )
+        code, report = self._run(state)
+        self.assertEqual(report["mode"], "error-halt")
+        self.assertEqual(code, 1)
+        self.assertIn("scope_verify", report["missing_steps"])
+
+    def test_a_real_halt_still_gets_the_exemption_and_the_warning(self):
+        state = self._completed_run(
+            steps=dict(self._steps("done", "done"), phase2_improve="in_progress"),
+            gates=[gate("phase1_to_phase2"), gate("workflow_exit", result="fail")],
+        )
+        code, report = self._run(state)
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["missing_steps"], [])
+        self.assertTrue(any("scope_verify" in w for w in report["warnings"]))
+
+    def test_a_halt_recorded_past_phase_2_is_not_exempt(self):
+        """`phase2_to_phase3` beside the claim says Step 6a was behind it."""
+        from validate_gates import scope_verify_exempt
+
+        self.assertFalse(scope_verify_exempt("error-halt", [
+            gate("phase2_to_phase3"),
+            gate("phase3_exit", result="fail"),
+            gate("workflow_exit", result="fail"),
+        ]))
+
+    def test_a_halt_with_no_failing_event_is_not_exempt(self):
+        from validate_gates import scope_verify_exempt
+
+        self.assertFalse(scope_verify_exempt("error-halt", [gate("workflow_exit")]))
+
+    def test_no_other_mode_is_ever_exempt(self):
+        from validate_gates import scope_verify_exempt
+
+        for mode in ("normal", "fix-only", "no-improvement"):
+            self.assertFalse(
+                scope_verify_exempt(mode, [gate("workflow_exit", result="fail")]),
+                mode,
+            )

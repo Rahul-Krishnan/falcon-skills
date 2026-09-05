@@ -60,11 +60,44 @@ have: the caller records a passing `scope_verify` gate and the run proceeds as
 though the tree had been checked. Every path that cannot answer therefore
 reports `not_measurable` and exits 3, following the vocabulary
 `check_overfit.py` and `check_eval_power.py` already use for the same
-distinction. Four cases reach it: git stops answering between snapshot and
-verify, a nested repository or submodule the guard could not hash, an
-out-of-scope change this run did not declare, and a `--verify` given no
-declaration at all. That last one is deliberately blunt: a run that will not
-say what it wrote cannot be told it stayed in scope.
+distinction.
+
+That invariant is only worth as much as the enumeration behind it, so here is
+the whole enumeration. Every point in this file where a path can decline to be
+read or classified is on this list, and every one of them records itself.
+
+Answers the tree refuses:
+
+  1.  git stops answering between snapshot and verify.
+  2.  a nested repository or submodule the guard could not hash.
+  3.  a regular file that exists but cannot be read (`_hash_file` -> UNREADABLE).
+  4.  a directory that cannot be listed (`os.scandir` raises).
+  5.  a directory entry whose type cannot be determined (`stat` raises).
+  6.  a dangling symlink: it names something that is not there to hash.
+  7.  an entry that is neither a directory nor a regular file -- a socket,
+      fifo, device, or door -- whose content there is no way to hash.
+  8.  a symlinked directory pointing back onto its own descent path, which
+      cannot be walked without looping.
+  9.  a tree over `--max-files` at snapshot or at verify time.
+  10. a manifest whose `mode` this script does not recognise.
+  11. a permitted scope that lies under an ignored directory name, so nothing
+      inside it was ever read.
+
+Answers the run refuses:
+
+  12. an out-of-scope change this run did not declare.
+  13. an in-scope change this run did not declare, which proves the
+      declaration incomplete and so says nothing reliable about elsewhere.
+  14. a declared path outside the watched root.
+  15. a `--verify` given no declaration at all. That one is deliberately
+      blunt: a run that will not say what it wrote cannot be told it stayed
+      in scope.
+
+A symlinked *directory* is deliberately absent from the list: it is followed
+and hashed rather than recorded, because `~/.claude/skills` and
+`~/.claude/hooks` normally hold artifact directories symlinked out of a
+repository, and those are the very roots walk mode exists for. Declining to
+read them would report `not_measurable` on every ordinary run instead.
 
 Exit codes: 0 clean, 1 scope violation, 2 usage error (the check never ran),
 3 not_measurable (the check ran and could not answer). Only 0 is a pass.
@@ -155,6 +188,30 @@ def _is_ignored(path: Path) -> bool:
 # one no sha256 digest can collide with.
 UNREADABLE = "unreadable"
 
+# The reason carried by every `unmeasurable` entry a manifest written before
+# walk mode recorded its own unreadable paths holds. Those were all opaque
+# subtrees and were stored as bare path strings; `_unmeasurable` reads both
+# spellings so an older manifest still verifies instead of crashing or, worse,
+# losing its record and verifying clean.
+NESTED_UNMEASURABLE = ("it is a nested repository or submodule the snapshot "
+                       "could not hash")
+
+
+def _unmeasurable(state: dict) -> list[dict]:
+    """`state['unmeasurable']`, normalised to `{"path", "reason"}` records."""
+    records: list[dict] = []
+    for entry in state.get("unmeasurable", []) or []:
+        if isinstance(entry, str):
+            records.append({"path": entry, "reason": NESTED_UNMEASURABLE})
+        elif isinstance(entry, dict) and isinstance(entry.get("path"), str):
+            reason = entry.get("reason")
+            records.append({
+                "path": entry["path"],
+                "reason": reason if isinstance(reason, str) and reason
+                else NESTED_UNMEASURABLE,
+            })
+    return records
+
 
 def _hash_file(path: Path) -> str:
     try:
@@ -169,43 +226,110 @@ def _real(path: Path) -> str:
 
 
 def _walk(root: Path, exclude: set[Path] | None = None,
-          limit: int | None = None) -> list[Path]:
-    """Every non-ignored file under root, without descending noise directories.
+          limit: int | None = None) -> tuple[list[Path], list[dict]]:
+    """`(files, unmeasurable)` for every entry under root.
 
     `rglob("*")` descends `.git` and `__pycache__` in full and only then
     discards what it found, which on a repository root costs orders of
     magnitude more than the walk itself. Prune at the directory boundary
     instead.
+
+    The second return value is what stops this walk failing open. An entry it
+    can neither hash nor descend used to be dropped with `continue`, so a
+    subtree the guard never read came back as a subtree with nothing in it,
+    and `--verify` reported `clean` over a tree it had not looked at. Cases 4
+    to 8 of the module docstring's enumeration all landed there. Each one now
+    returns a `{"path", "reason"}` record instead, which `snapshot_state`
+    stores and `verify` turns into a `not_measurable` reason.
+
+    Symlinked directories are followed, which is the change that closes the
+    common case: `~/.claude/skills/{name}` is routinely a symlink into a
+    repository checkout, and `is_dir(follow_symlinks=False)` called that
+    neither a directory nor a file and dropped the artifact's whole tree.
+    Following them needs loop protection, so each branch of the descent
+    carries the set of real directories above it and refuses to re-enter one.
+    Two distinct symlinks to the same target are not a loop and are both
+    walked: they are two real paths in the watched tree, and a change reached
+    through either one is a change.
     """
     excluded = {_real(p) for p in (exclude or set())}
     found: list[Path] = []
-    stack = [root]
+    unmeasurable: list[dict] = []
+
+    def record(path: Path, reason: str) -> None:
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:  # pragma: no cover - path always sits under root
+            rel = str(path)
+        unmeasurable.append({"path": rel, "reason": reason})
+
+    # (directory, real paths of every directory from root down to it).
+    stack: list[tuple[Path, frozenset[str]]] = [(root, frozenset({_real(root)}))]
     while stack:
-        current = stack.pop()
+        current, ancestors = stack.pop()
         try:
             entries = list(os.scandir(current))
-        except OSError:
+        except OSError as exc:
+            record(current, f"the directory could not be listed "
+                            f"({type(exc).__name__})")
             continue
         for entry in entries:
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    if entry.name in IGNORED_PARTS:
-                        continue
-                    stack.append(Path(entry.path))
-                    continue
-                if not entry.is_file():
-                    continue
-            except OSError:
-                continue
             path = Path(entry.path)
+            try:
+                # Both follow symlinks, which is what admits a symlinked
+                # artifact directory and a symlinked file alike.
+                is_dir = entry.is_dir()
+                is_file = entry.is_file()
+                is_link = entry.is_symlink()
+            except OSError as exc:
+                record(path, f"the entry could not be classified as a file or "
+                             f"a directory ({type(exc).__name__})")
+                continue
+            if is_dir:
+                if entry.name in IGNORED_PARTS:
+                    continue
+                real = _real(path)
+                if real in excluded:
+                    continue
+                if real in ancestors:
+                    record(path, "the directory is a symlink back onto the "
+                                 "path from the watch root, so walking it "
+                                 "would loop")
+                    continue
+                stack.append((path, ancestors | {real}))
+                continue
             if _is_ignored(path.relative_to(root)):
                 continue
             if _real(path) in excluded:
                 continue
-            found.append(path)
-            if limit is not None and len(found) > limit:
-                raise TooManyFiles(len(found), limit)
-    return found
+            if is_file:
+                found.append(path)
+                if limit is not None and len(found) > limit:
+                    raise TooManyFiles(len(found), limit)
+                continue
+            if is_link:
+                record(path, "the symlink target does not exist, so there is "
+                             "nothing to hash")
+            else:
+                record(path, "the entry is neither a directory nor a regular "
+                             "file (socket, fifo, or device), so its content "
+                             "could not be hashed")
+    return found, unmeasurable
+
+
+def walk_manifest(root: Path, exclude: set[Path] | None = None,
+                  limit: int | None = None) -> tuple[dict, list[dict]]:
+    """`build_manifest`, plus the paths under root that could not be read.
+
+    Both halves, because either alone fails open: the hashes without the
+    unreadable list report `clean` over what nobody looked at, and the list
+    without the hashes has nothing to compare.
+    """
+    files, unmeasurable = _walk(root, exclude, limit)
+    return (
+        {str(p.relative_to(root)): _hash_file(p) for p in files},
+        sorted(unmeasurable, key=lambda entry: entry["path"]),
+    )
 
 
 def build_manifest(root: Path, exclude: set[Path] | None = None,
@@ -215,11 +339,11 @@ def build_manifest(root: Path, exclude: set[Path] | None = None,
     `exclude` holds paths to skip. The manifest itself belongs there: writing
     it inside the guarded tree would otherwise register as a new out-of-scope
     file on the very next verify.
+
+    Callers that must not fail open want `walk_manifest`, which also returns
+    what could not be read.
     """
-    return {
-        str(p.relative_to(root)): _hash_file(p)
-        for p in _walk(root, exclude, limit)
-    }
+    return walk_manifest(root, exclude, limit)[0]
 
 
 def _git(root: Path, *args: str) -> str | None:
@@ -509,7 +633,7 @@ def _in_scope(rel_path: str, scope: list[str]) -> bool:
 
 
 def permitted_scope(artifact: Path, artifact_type: str) -> Path:
-    """The one path this run may change.
+    """The artifact's own path: the primary entry in `permitted_scopes`.
 
     A skill is a directory (`.../{name}/SKILL.md`), so the whole directory is
     fair game -- references, scripts, evals all belong to it. A command, hook,
@@ -518,6 +642,33 @@ def permitted_scope(artifact: Path, artifact_type: str) -> Path:
     the directory would permit editing every one of them.
     """
     return artifact.parent if artifact_type == "skill" else artifact
+
+
+def permitted_scopes(artifact: Path, artifact_type: str) -> list[Path]:
+    """Every path this run may change, artifact first.
+
+    One entry for every type but `command`, which gets two. Phase 2 Step 6
+    mandates a companion `validate_handoffs.py` for a multi-phase artifact,
+    and for a command it has nowhere to put it but the `{name}-validator/`
+    sibling directory: the command itself is a single file, so there is no
+    in-scope directory to write into. With the file as the only scope entry,
+    Step 6 wrote a file that Step 6 also required be declared, and Step 6a
+    then read "declared and out of scope" as a violation and ordered the run
+    to delete the validator it had just been required to create.
+
+    Admitting the sibling resolves that without widening the blast radius in
+    the way the docstring above warns against. `{name}-validator/` is named
+    for this artifact and holds nothing else; the objection to permitting a
+    hook's directory is that the siblings there belong to other artifacts, and
+    that objection does not reach a directory this artifact owns outright.
+    Hooks and scripts need no equivalent, because Step 6 skips validator
+    generation for them entirely -- they are tested by direct invocation, not
+    through state files -- so their scope stays the single file.
+    """
+    primary = permitted_scope(artifact, artifact_type)
+    if artifact_type != "command":
+        return [primary]
+    return [primary, artifact.parent / f"{artifact.stem}-validator"]
 
 
 def install_root(artifact: Path, artifact_type: str) -> Path:
@@ -604,9 +755,19 @@ def snapshot_state(root: Path, exclude: set[Path] | None = None,
     if status is None or tracked is None:
         # Not a repository (or git is unavailable): walk it. These roots are
         # install directories, which are small.
+        files, unmeasurable = walk_manifest(root, exclude, max_files)
         return {
             "mode": "walk",
-            "files": build_manifest(root, exclude, max_files),
+            "files": files,
+            # What the walk could not read. Without it a symlink loop, an
+            # unlistable directory, or a socket vanished from the manifest and
+            # `--verify` called the tree clean.
+            "unmeasurable": unmeasurable,
+            # The budget this snapshot was taken under, carried in the state
+            # itself and not only in the CLI's manifest payload, so an
+            # in-process `verify(root, snapshot_state(root, max_files=N))`
+            # walks under N rather than silently falling back to the default.
+            "max_files": max_files,
         }
     entries, opaque = status
 
@@ -639,25 +800,32 @@ def snapshot_state(root: Path, exclude: set[Path] | None = None,
 
 
 def _hash_opaque(root: Path, opaque: list[str], exclude: set[Path] | None,
-                 max_files: int) -> tuple[dict[str, dict], list[str]]:
+                 max_files: int) -> tuple[dict[str, dict], list[dict]]:
     """Hash each subtree git cannot see into; name the ones that could not be.
 
     Returns `({subtree: {path relative to the subtree: digest}}, unmeasurable)`.
     A subtree over `--max-files` or unreadable goes in the second list, which
-    is what makes the verify report `not_measurable` instead of `clean`.
+    is what makes the verify report `not_measurable` instead of `clean`, and
+    so does anything inside a subtree that the walk itself could not read.
     """
     nested: dict[str, dict] = {}
-    unmeasurable: list[str] = []
+    unmeasurable: list[dict] = []
     for rel in opaque:
         subtree = root / rel
         if not subtree.is_dir():
-            unmeasurable.append(rel)
+            unmeasurable.append({"path": rel, "reason": NESTED_UNMEASURABLE})
             continue
         try:
-            nested[rel] = build_manifest(subtree, exclude, max_files)
+            files, inner = walk_manifest(subtree, exclude, max_files)
         except (TooManyFiles, OSError):
-            unmeasurable.append(rel)
-    return nested, sorted(unmeasurable)
+            unmeasurable.append({"path": rel, "reason": NESTED_UNMEASURABLE})
+            continue
+        nested[rel] = files
+        unmeasurable.extend(
+            {"path": str(Path(rel) / entry["path"]), "reason": entry["reason"]}
+            for entry in inner
+        )
+    return nested, sorted(unmeasurable, key=lambda entry: entry["path"])
 
 
 def state_size(state: dict) -> int:
@@ -821,32 +989,39 @@ def _classify_nested(root: Path, state: dict, pre_images: dict[str, object],
     the exact tree a run on a hook or a script watches, so this is the ordinary
     case here rather than an exotic one.
     """
-    unmeasurable = list(state.get("unmeasurable", []) or [])
+    unmeasurable = _unmeasurable(state)
+    unmeasurable_paths = {entry["path"] for entry in unmeasurable}
     # The snapshot's own budget, so a subtree that fitted then and has since
     # grown past it is reported rather than walked without limit.
     limit = state.get("max_files")
-    if not isinstance(limit, int):
+    if not isinstance(limit, int) or isinstance(limit, bool):
         limit = DEFAULT_MAX_FILES
     blind = [
-        f"subtree {rel!r} is a nested repository or submodule the snapshot "
-        f"could not hash, so changes inside it were not checked"
-        for rel in unmeasurable
+        f"{entry['path']!r} was not read when the snapshot was taken because "
+        f"{entry['reason']}, so changes there were not checked"
+        for entry in unmeasurable
     ]
 
     modified: list[str] = []
     added: list[str] = []
     removed: list[str] = []
     unreadable: list[str] = []
-    for rel in sorted(set(opaque_now) - set(unmeasurable)):
+    for rel in sorted(set(opaque_now) - unmeasurable_paths):
         subtree = root / rel
         if subtree.is_dir():
             try:
-                now = build_manifest(subtree, exclude, limit)
+                now, inner = walk_manifest(subtree, exclude, limit)
             except (TooManyFiles, OSError):
                 blind.append(
                     f"subtree {rel!r} could not be hashed at verify time, so "
                     f"changes inside it were not checked")
                 continue
+            blind.extend(
+                f"{str(Path(rel) / entry['path'])!r} could not be read at "
+                f"verify time because {entry['reason']}, so whether it "
+                f"changed during the round is unknown"
+                for entry in inner
+            )
         else:
             # Opaque per git, yet not a directory on disk. Whatever it is, its
             # contents were not read, and the snapshot records the same shape
@@ -944,6 +1119,39 @@ class Declaration:
 ABSENT = Declaration(None)
 
 
+def _under_root(candidate: Path, root_real: Path) -> str | None:
+    """Root-relative spelling of `candidate`, keeping symlinks inside the root.
+
+    Two spellings have to meet here, and resolving both ends the same way is
+    not available. The walk descends from the root, so a file reached through
+    a symlinked directory inside the root keeps that directory's name --
+    `hone/SKILL.md`, where `hone` is a symlink into a checkout, which is the
+    ordinary shape of `~/.claude/skills`. A declared path is whatever the
+    executor typed, and `realpath` on it resolves that symlink away onto a
+    path that is not under the root at all. Resolving the walk instead would
+    make `~/.claude/skills` report paths inside whatever repository each skill
+    came from, and the scope it was handed would match none of them.
+
+    So resolve the candidate one ancestor at a time and stop at the first one
+    that IS the root. Everything below that keeps the spelling it arrived
+    with, which is the spelling the walk produces. Returns None when no
+    ancestor is the root; the caller then tries the fully-resolved form before
+    giving up, which is what catches a path spelled through the symlink's
+    target instead of through the symlink.
+    """
+    parts: list[str] = []
+    current = candidate
+    target = str(root_real)
+    while True:
+        if _real(current) == target:
+            return os.path.join(*reversed(parts)) if parts else "."
+        parent = current.parent
+        if parent == current:
+            return None
+        parts.append(current.name)
+        current = parent
+
+
 def normalize_declared(raw: list[str], root: Path) -> Declaration:
     """Resolve declared paths into the same namespace the detected paths use.
 
@@ -965,6 +1173,11 @@ def normalize_declared(raw: list[str], root: Path) -> Declaration:
     A declared path that lands outside the watched root is kept separately. It
     cannot be checked against a snapshot that never covered it, so it is
     reported rather than silently dropped or blamed.
+
+    "Outside the root" is decided by `_under_root`, which keeps the spelling a
+    symlinked directory inside the root gives a path. A full `realpath` would
+    put every file under `~/.claude/skills/{name}` outside the root the moment
+    that directory is a symlink into a checkout, which is its ordinary state.
     """
     root_real = Path(_real(root))
     inside: set[str] = set()
@@ -984,12 +1197,14 @@ def normalize_declared(raw: list[str], root: Path) -> Declaration:
                 f"everything under it to this run, including whatever the "
                 f"user changed there, and the caller reverts what it is told "
                 f"to revert.")
-        try:
-            rel = resolved.relative_to(root_real)
-        except ValueError:
-            outside.append(text)
-            continue
-        inside.add(str(rel))
+        rel = _under_root(candidate, root_real)
+        if rel is None:
+            try:
+                rel = str(resolved.relative_to(root_real))
+            except ValueError:
+                outside.append(text)
+                continue
+        inside.add(rel)
     return Declaration(inside, outside)
 
 
@@ -1017,6 +1232,10 @@ def verify(root: Path, state: dict, scope: list[str],
     """
     blind: list[str] = []
     unreadable: list[str] = []
+    # Paths the walk could neither hash nor descend, at snapshot time and at
+    # verify time. Git mode routes its own straight into `blind` through
+    # `_classify_nested`; walk mode collects them here and does the same below.
+    unmeasurable: list[dict] = []
     mode = state.get("mode")
     declaration = declared if declared is not None else ABSENT
     if mode == "git":
@@ -1038,12 +1257,16 @@ def verify(root: Path, state: dict, scope: list[str],
         if not isinstance(limit, int) or isinstance(limit, bool):
             limit = DEFAULT_MAX_FILES
         try:
-            current = build_manifest(root, exclude, limit)
+            current, walked = walk_manifest(root, exclude, limit)
         except TooManyFiles as exc:
             return _blind_report(root, scope, state, [
                 f"the watched tree holds more than {exc.limit} file(s) at "
                 f"verify time, over the budget its snapshot was taken under, "
                 f"so it was not hashed"], declaration)
+        # Both ends of the comparison. A path the snapshot could not read is
+        # as unmeasurable as one the verify cannot: either way its content at
+        # one end is unknown and no comparison can be made.
+        unmeasurable = _unmeasurable(state) + walked
         unreadable = sorted(
             p for p in set(manifest) | set(current)
             if manifest.get(p) == UNREADABLE or current.get(p) == UNREADABLE
@@ -1134,6 +1357,21 @@ def verify(root: Path, state: dict, scope: list[str],
         f"{path!r} could not be read, so whether it changed during the round "
         f"is unknown" for path in sorted(unreadable) if not _in_scope(path, scope)
     )
+    # Cases 4 to 8 of the module docstring's enumeration: an entry the walk
+    # could neither hash nor descend. Reported on the same terms as an
+    # unreadable file, and out of scope only for the same reason -- inside the
+    # scope this run is free to change what it likes. An unreadable directory
+    # in scope hides only paths that are themselves in scope, since `_in_scope`
+    # matches on the path prefix.
+    seen: set[tuple[str, str]] = set()
+    for entry in sorted(unmeasurable, key=lambda item: item["path"]):
+        key = (entry["path"], entry["reason"])
+        if key in seen or _in_scope(entry["path"], scope):
+            continue
+        seen.add(key)
+        blind.append(
+            f"{entry['path']!r} could not be read during the round because "
+            f"{entry['reason']}, so whether anything changed there is unknown")
     # The scope itself sitting under an ignored directory name would make every
     # edit the run is supposed to make invisible, and a tree nothing was read
     # from must not come back `clean`.
@@ -1369,12 +1607,19 @@ def _resolve_scope(artifact: Path | None, artifact_type: str | None,
         return explicit
     if artifact is None:
         return []
-    scope_abs = permitted_scope(artifact, artifact_type)
-    try:
-        return [str(scope_abs.relative_to(Path(_real(root))))]
-    except ValueError:
-        _fail(f"artifact {artifact} is not inside the watch root {root}")
-    return []  # unreachable; _fail exits
+    real_root = Path(_real(root))
+    resolved: list[str] = []
+    for index, scope_abs in enumerate(permitted_scopes(artifact, artifact_type)):
+        try:
+            resolved.append(str(scope_abs.relative_to(real_root)))
+        except ValueError:
+            if index == 0:
+                _fail(f"artifact {artifact} is not inside the watch root {root}")
+                return []  # unreachable; _fail exits
+            # A companion directory outside the watch root is not in the
+            # watched tree at all, so it cannot produce a finding and needs no
+            # scope entry. The artifact itself falling outside is the error.
+    return resolved
 
 
 def _declared_paths(args) -> list[str] | None:
@@ -1476,7 +1721,7 @@ def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
         _fail(f"cannot write manifest {args.manifest}: {exc}")
 
     recorded = state_size(state)
-    unmeasurable = list(state.get("unmeasurable", []) or [])
+    unmeasurable = _unmeasurable(state)
     report = {
         "verdict": "snapshot",
         "files_recorded": recorded,
@@ -1485,7 +1730,9 @@ def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
         "scope": scope,
         "mode": state.get("mode"),
         "nested_repos": sorted(state.get("nested", {}) or {}),
-        "unmeasurable": unmeasurable,
+        # Paths only: the reasons go to the human on the text path below, and
+        # the manifest keeps the full records for --verify to read back.
+        "unmeasurable": [entry["path"] for entry in unmeasurable],
     }
     if fallback:
         report["root_fallback"] = fallback
@@ -1499,8 +1746,9 @@ def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
         print(f"  scope: {', '.join(scope) if scope else '(none declared)'}")
         for rel in report["nested_repos"]:
             print(f"  nested repository hashed in full: {rel}")
-        for rel in unmeasurable:
-            print(f"  WARNING: {rel} could not be hashed; --verify will report "
+        for entry in unmeasurable:
+            print(f"  WARNING: {_display(entry['path'])} could not be read "
+                  f"because {entry['reason']}; --verify will report "
                   f"not_measurable rather than clean")
         if fallback:
             print("  " + _fallback_note(fallback))
