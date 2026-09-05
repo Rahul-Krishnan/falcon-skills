@@ -254,6 +254,133 @@ RESUMPTION_STEP = "resume"
 RESUMABLE_STEPS: frozenset[str] = frozenset({"convergence", "workflow_exit"})
 
 
+# WHAT THE FAIL DECLARES -- the one thing a flat list of events cannot carry.
+#
+# `convergence:fail` is three different things wearing one name, and their
+# settlement rules are opposites:
+#
+#   escalate        a FORCED halt. references/phase3-reevaluation.md is
+#                   explicit that continuing after it "is a fresh `/hone`
+#                   invocation with the findings triaged by hand, not an
+#                   extension of this one". Nothing restarts it.
+#   capped          a FORCED halt that DOES have a documented restart: the
+#                   `--confirm` human gate grants more rounds and the run
+#                   records a `resume`.
+#   ledger_missing  not a halt at all. Exit 2 is a Phase 2 Step 8 omission,
+#                   repaired in place by writing the ledger and re-running the
+#                   check once; the re-run's verdict then drives the round,
+#                   `in_progress` included.
+#
+# Four previous revisions of the predicates below tried to tell these apart
+# from the SHAPE of what followed, and each was principled and each was
+# defeated by an ordering it had not been shown. The reason it kept happening
+# is not that the inferences were careless: the honest continuation of a
+# `ledger_missing` repair and the laundering of an ignored `escalate` are the
+# SAME steps with the SAME results in the SAME order. No predicate over the
+# list can separate them, because the difference is not in the list.
+#
+# It is in the executor, which already knows mechanically which one it has:
+# `check_convergence.py` returns `escalate` and `capped` as its own `verdict`,
+# and exit 2 is the missing ledger. The vocabulary below is deliberately those
+# same words, so declaring is copying a value the run already computed rather
+# than composing a new claim. The event says why it halted; this table is what
+# that declaration is read against.
+#
+# PER STEP AND PER EVENT, not per run. One correct run emits several
+# halt-ordering fails with different reasons -- the exit-2 repair, then the
+# re-run's own `capped` -- so a run-level field could not say which was which,
+# and the predicates ask about one failing event at a time.
+#
+# Keyed by step because `reason` is free-form annotation everywhere else:
+# SKILL.md's corrupt-state `workflow_exit` carries `corrupt_state_file` and
+# `fixonly_entry` carries "prior evaluation reused". Closing the enum over
+# every event would invalidate documented examples and buy nothing. A step
+# earns a vocabulary exactly when a predicate reads its declaration, which is
+# also the fail-closed shape for a gate added later: no vocabulary means no
+# declaration unlocks anything, and adding one can only tighten.
+#
+# AUTHORITATIVE. references/gate-event-schema.json mirrors this enum in its
+# conditional branch (test_hone_common asserts the two agree) and SKILL.md and
+# references/phase3-reevaluation.md quote it.
+HALT_REASONS: dict[str, frozenset[str]] = {
+    "convergence": frozenset({"ledger_missing", "escalate", "capped"}),
+}
+
+# WHICH SETTLEMENT A DECLARATION LEAVES REACHABLE. Read the direction
+# carefully, because it is the whole safety property of this feature: these
+# sets do not GRANT anything. They name the one reason that still reaches a
+# settlement the undeclared event already reached, and every other value --
+# including every non-answer -- takes settlements away.
+#
+# `reason` is written by the executor being scored and nothing independent
+# corroborates it (see is_settled_by_retry, "WHY THERE IS NO CORROBORATION").
+# So the invariant is: A DECLARATION MAY ONLY EVER NARROW, measured against
+# the behaviour before `reason` was read at all. Every value, and every
+# non-answer, leaves a SUBSET of the settlements that same event already had
+# (`fail_is_accounted` tabulates the four rows). Lying can therefore cost an
+# executor a settlement it would otherwise have had, and can never buy one.
+#
+# `capped` is the only halt the docs let a `resume` restart, so it is the only
+# reason that keeps `is_authorized_restart` reachable -- a restart every
+# undeclared halt used to get unconditionally. `ledger_missing` is the only
+# `convergence:fail` the docs re-attempt at all, so it is the only reason that
+# keeps `is_settled_by_retry` reachable, under the same blunt in-place rule
+# that predicate has always applied. `escalate` appears in neither, which is
+# the point of naming it: a run that declares `escalate` has said, in its own
+# state file, that it may not resume and has no retry.
+#
+# BOTH GUARDS MUST BE WRITTEN THE SAME WAY, and the way is
+# `declared_halt_reason(step, reason) not in <SET>`. Membership is what makes
+# the non-answers fail-closed, because `declared_halt_reason` collapses an
+# absent, empty, misspelled, invented, or wrongly-typed value to `None` and
+# `None` is in neither set. The tempting alternative -- resolve the reason
+# first, then subtract only `if reason is not None` -- reads as the same rule
+# and is not: it lets every non-answer past the guard, so silence and typos
+# outscore a truthful `escalate`. That inversion shipped once (see
+# `is_settled_by_retry`) and three sets of hand-picked cases missed it.
+#
+# Adding a reason to either set is the other way this invariant breaks, so do
+# not add one without an independent check that the claim is true.
+RESTART_AUTHORIZING_REASONS: frozenset[str] = frozenset({"capped"})
+IN_PLACE_REPAIR_REASONS: frozenset[str] = frozenset({"ledger_missing"})
+
+
+def step_declares_reason(step: object) -> bool:
+    """True when this step's `fail` has a closed `reason` vocabulary.
+
+    Only such a step can unlock anything by declaring, and only such a step is
+    penalized for declaring nothing. Everywhere else `reason` is free text and
+    is read by nothing.
+    """
+    return isinstance(step, str) and step in HALT_REASONS
+
+
+def declared_halt_reason(step: object, reason: object) -> str | None:
+    """The reason this failing gate declared, or None if it declared nothing.
+
+    FAIL-CLOSED, AND THE FOUR NON-ANSWERS ARE ALL ONE ANSWER. `None` is
+    returned for an absent `reason`, for an empty or whitespace-only string,
+    for a string outside this step's vocabulary, and for any non-string
+    (number, null, list, dict) -- and every caller treats `None` as "not
+    declared", which is the conservative branch in each of them. So an
+    executor that writes nothing, writes junk, or writes the wrong type can
+    never do better than one that declares truthfully; the most it can do is
+    decline the concession that telling the truth would have earned.
+
+    Matching is exact and unnormalized on purpose. Case-folding or stripping
+    would make the vocabulary bigger than the enum the schema publishes, and
+    every widening of a security predicate's input space is a door. A near
+    miss (`"Capped"`, `" capped "`) reads as undeclared here and is reported
+    as a schema error by validate_gates.py, which is the pair of outcomes a
+    typo should have.
+    """
+    if not step_declares_reason(step):
+        return None
+    if not isinstance(reason, str):
+        return None
+    return reason if reason in HALT_REASONS[step] else None
+
+
 def fail_orders_halt(step: object) -> bool:
     """True when a `fail` on this step is itself an order to stop the run."""
     return not (
@@ -268,21 +395,24 @@ def is_repeatable_step(step: object) -> bool:
     return step in REPEATABLE_STEPS or step.startswith(REPEATABLE_STEP_PREFIXES)
 
 
-def is_authorized_restart(later_gates: object, failed_step: object) -> bool:
+def is_authorized_restart(
+    later_gates: object,
+    failed_step: object,
+    declared_reason: object = None,
+) -> bool:
     """True when the run halted on this fail and a recorded `resume` restarted it.
 
     The one legitimate way a run emits events after a halt order, and it is
     the shape references/phase3-reevaluation.md documents for the `capped`
     human gate:
 
-        convergence:fail          <- capped
+        convergence:fail          <- reason: "capped"
         workflow_exit:fail        <- the loop stopped; the human is asked here
         resume:pass               <- more rounds granted, restart on record
         phase2_to_phase3:pass
         ...
 
-    Three conditions, and the second and third are restrictions this predicate
-    did not always carry:
+    Four conditions, and only the first was ever obvious:
 
     1. everything before the `resume` is a valid halt tail for the failing
        step, so the run really did stop before it restarted;
@@ -291,16 +421,30 @@ def is_authorized_restart(later_gates: object, failed_step: object) -> bool:
        exit and a `resume`" into a universal laundering suffix for any halt;
     3. the `resume` itself PASSED. A `resume` carrying `result: "fail"` is a
        restart that did not happen, and reading it as authorization credited
-       the run for the event rather than for what the event said.
+       the run for the event rather than for what the event said;
+    4. where the failing step declares a reason (`HALT_REASONS`), that
+       declaration is one the docs give a restart -- `capped`, and only
+       `capped`.
 
-    KNOWN GAP, deliberately left: `convergence:fail` is `escalate` OR
-    `capped`, and only `capped` reaches the human gate -- the reference is
-    explicit that continuing after `escalate` "is a fresh `/hone` invocation
-    with the findings triaged by hand, not an extension of this one". Telling
-    the two apart needs the event's own `reason` field, which the docs already
-    mandate; the declare-and-verify change that reads it is a follow-up PR
-    (see the note on `is_settled_by_retry`). Until then a `resume` after an
-    `escalate` is still accepted here.
+    Condition 4 closes what was recorded here as a KNOWN GAP.
+    `convergence:fail` is `escalate` OR `capped`, only `capped` reaches the
+    `--confirm` human gate, and the reference is explicit that continuing
+    after `escalate` "is a fresh `/hone` invocation with the findings triaged
+    by hand, not an extension of this one". The two produce identical event
+    sequences, so the gap was not closable by looking harder at the tail; it
+    needed the event to say which verdict it carried, which is now the
+    `reason` field `check_convergence.py` already computes.
+
+    A `convergence:fail` that declares nothing, or declares `escalate` or
+    `ledger_missing`, or declares junk, authorizes no restart. That is
+    stricter than the behaviour this replaces -- an undeclared halt used to be
+    resumable -- and deliberately so: "cannot tell" resolves to "refuse".
+    The membership test below is what implements that, since `None` is in no
+    set; `is_settled_by_retry` is written the same way for the same reason,
+    and the two must stay that way (see RESTART_AUTHORIZING_REASONS).
+    `workflow_exit` has no vocabulary and needs no declaration; its `fail` has
+    exactly one meaning (the error halt) and SKILL.md's cross-session `resume`
+    is documented behind it.
 
     references/phase3-reevaluation.md puts the `--confirm` gate outside and
     after the FORCED halt: asking the human is what happens once the loop has
@@ -327,6 +471,11 @@ def is_authorized_restart(later_gates: object, failed_step: object) -> bool:
     """
     if failed_step not in RESUMABLE_STEPS:
         return False
+    if step_declares_reason(failed_step) and (
+        declared_halt_reason(failed_step, declared_reason)
+        not in RESTART_AUTHORIZING_REASONS
+    ):
+        return False
     if not isinstance(later_gates, (list, tuple)):
         return False
     for index, event in enumerate(later_gates):
@@ -337,7 +486,11 @@ def is_authorized_restart(later_gates: object, failed_step: object) -> bool:
     return False
 
 
-def is_settled_by_retry(later_gates: object, failed_step: object) -> bool:
+def is_settled_by_retry(
+    later_gates: object,
+    failed_step: object,
+    declared_reason: object = None,
+) -> bool:
     """True when a documented retry of the same step settled this fail.
 
     One predicate where there were two, because the pair it replaces
@@ -376,21 +529,104 @@ def is_settled_by_retry(later_gates: object, failed_step: object) -> bool:
          scored clean. Requiring the tail makes the whole window a halt, not
          just its front edge.
 
-         CONSERVATIVE ON PURPOSE, PENDING THE DECLARE-AND-VERIFY FOLLOW-UP.
-         Do not relax this back to an unconstrained immediate retry. It is a
-         deliberately blunt restriction, not an attempt to describe the
-         repair exactly, and it is blunt in one direction only: a repair
-         whose re-run returns `in_progress` and legitimately continues into
-         more rounds now reads as NOT accounted. That is the cost, and it is
-         the cheap error -- a false "not accounted" costs gate score on a
-         correct run, while a false "accounted" credits a run for ignoring a
-         halt, which is a scoring bypass. This predicate infers intent from a
-         flat event list that does not carry intent, and four previous
-         inferences here were each correct and each defeated by a shape they
-         had not been shown. The real fix reads the `reason` field the docs
-         already mandate on the one repairable `convergence:fail`
-         (`ledger_missing`) instead of guessing, and lands in a follow-up PR.
-         Until it does, the blunt version stands.
+         CONSERVATIVE ON PURPOSE, AND A DECLARATION DOES NOT LIFT IT. The
+         restriction applies to every halt-ordering retry, declared or not,
+         and the cost is real and known: a `ledger_missing` repair whose
+         re-run returns `in_progress` and legitimately continues into more
+         rounds reads as NOT accounted, costing gate score on a correct run.
+         That cost is accepted. It is the cheap error -- a false "not
+         accounted" costs score, a false "accounted" credits a run for
+         ignoring a halt, which is a scoring bypass.
+
+         WHY THERE IS NO CORROBORATION, and so why the declaration cannot buy
+         its way out of this. A revision of this predicate did lift the rule
+         for a declared `ledger_missing`, on the reasoning that the exit-2
+         repair's re-run drives the round and so owes nothing behind it. The
+         reasoning about the repair is right; the conclusion was still a
+         bypass, because the honest repair and the laundering of an ignored
+         `escalate` emit the same steps with the same results in the same
+         order, and `reason` is written by the same executor being scored.
+         Lying was then monotonically the best move: on the round-6 laundering
+         shape, declaring nothing scored not-accounted, declaring the truth
+         (`escalate`) scored not-accounted, and declaring `ledger_missing`
+         scored accounted.
+
+         Every candidate corroborator was examined and none survives:
+
+           * THE STATE FILE records nothing about the ledger. It carries
+             `steps{}`, `iteration`, `gates`, `applied_edits`, `eval_results`
+             and `resumed`, and Phase 2 Step 8 is inside `phase2_improve`, so
+             there is no write for a `ledger_missing` claim to contradict.
+           * THE LEDGER ITSELF cannot separate the two. The honest repair
+             WRITES it, so after any run -- honest or lying -- the file exists
+             and parses. The signal is null in the one direction needed. It is
+             also executor-written, and its path is not derivable from the
+             state file validate_gates.py is handed.
+           * THE EXECUTION TIMELINE, which score_execution.py's
+             `score_gate_compliance` does receive, is executor-written JSON
+             (see
+             `_timeline_entries`, which normalizes it precisely because it is
+             untrusted), it is absent entirely in SIMULATION MODE where gates
+             are quoted in prose, and `validate_gates.py` never sees one at
+             all. A check only one of the two consumers can run is not a
+             check; they would disagree about the same state file.
+           * `phase2_to_phase3` is owned by Phase 2 Step 8, so its absence
+             would witness the omission that causes exit 2 -- but gates[] is a
+             membership set with no per-round keying, and exit 2 also fires on
+             a ledger that Step 8 DID write unparseably. Compatible with both
+             honest causes and with the lie.
+
+         The general form, which is the part worth remembering: a
+         "contradiction between two things the executor wrote" is not
+         corroboration. It catches a liar who is also sloppy enough to record
+         the truth elsewhere, and any liar declines that for the price of one
+         omitted field. There is no second party anywhere in this pipeline, so
+         a declaration is only ever admissible as a REASON TO REFUSE.
+
+         What the declaration is still read for here is exactly that:
+
+           * `reason: "escalate"` or `"capped"` -- a FORCED halt. Neither has
+             a documented re-attempt, so no retry settles them at all and this
+             predicate refuses outright; such a fail is accounted for by its
+             halt tail (or, for `capped`, by an authorized restart) or not at
+             all. STRICTER than the blunt rule, which is the only direction a
+             declaration is allowed to move.
+           * `reason: "ledger_missing"` -- the one `convergence:fail` the
+             docs re-attempt, so it is the one reason a retry may settle,
+             under the same blunt in-place rule this predicate has always
+             applied. It buys nothing against the pre-`reason` baseline; it
+             merely declines to forfeit.
+           * nothing declared, or something unresolvable (empty, whitespace,
+             a near miss, an invented word, a non-string) -- NO retry, the
+             same answer `escalate` and `capped` get. "Cannot tell" resolves
+             to "refuse", which is how every other guard in this file reads a
+             missing answer and how `is_authorized_restart` reads this exact
+             one. The guard is written `not in IN_PLACE_REPAIR_REASONS` so
+             that `None` fails the membership test, rather than as an
+             `is not None` test that lets `None` past.
+
+             THE ALTERNATIVE SHAPE WAS A LIVE DISINCENTIVE, and it is worth
+             naming because it survived three rounds of hand-picked cases.
+             While this guard only subtracted when the reason RESOLVED, a
+             `convergence:fail` that declared `escalate` or `capped`
+             truthfully forfeited the retry while an absent, empty, or
+             misspelled one kept it. On the ordinary
+             `[convergence:fail, convergence:pass, workflow_exit]` shape that
+             is 0.8333 gate_compliance for the truth against 1.0 for silence
+             or a typo, which inverts the invariant `fail_is_accounted`
+             states: truth paid, and the field's entire purpose is that it
+             cannot.
+
+             THE COST OF FIXING IT IS REAL AND IS ACCEPTED. An UNDECLARED
+             exit-2 in-place repair -- the shape every pre-`reason` state
+             file writes -- is no longer accounted, so a correct legacy run
+             loses gate score for it. That is the same migration cost, of the
+             same kind and for the same reason, as the restart such a run
+             already forfeits: a false "not accounted" costs score on a
+             correct run, while anything that lets silence beat the truth is
+             an incentive against adopting the field at all. The repair is
+             one string away from being accounted again, and it is a string
+             the executor already holds.
        * A LATER `pass` ACROSS ANY GAP settles a VALIDATION VERDICT only.
          Nothing between the attempts was forbidden, so the `pass` is
          affirmative evidence the input was repaired whatever route reached
@@ -402,6 +638,19 @@ def is_settled_by_retry(later_gates: object, failed_step: object) -> bool:
     if not is_repeatable_step(failed_step):
         return False
     if not isinstance(later_gates, (list, tuple)):
+        return False
+    if step_declares_reason(failed_step) and (
+        declared_halt_reason(failed_step, declared_reason)
+        not in IN_PLACE_REPAIR_REASONS
+    ):
+        # Only `ledger_missing` has a documented re-attempt, so only
+        # `ledger_missing` reaches a retry. A declared FORCED halt (escalate,
+        # capped) forfeits it because the docs re-attempt neither, and an
+        # UNRESOLVABLE reason -- absent, empty, junk, wrong type -- forfeits
+        # it too. The shape is `not in <set>`, deliberately identical to
+        # `is_authorized_restart`, and the `None` that falls out of that
+        # membership test is the whole point: see the note on the same shape
+        # there.
         return False
     if not fail_orders_halt(failed_step) and any(
         isinstance(later, dict)
@@ -415,27 +664,111 @@ def is_settled_by_retry(later_gates: object, failed_step: object) -> bool:
             if later_gates[:offset]:
                 return False
             if fail_orders_halt(failed_step):
-                # See "CONSTRAINED FROM BEHIND" above: for a halt order the
-                # retry has to be inside the halt, so everything after it is
-                # the halt's tail. Deliberately conservative; the follow-up
-                # PR replaces the inference rather than loosening this.
+                # See "CONSTRAINED FROM BEHIND" above. This is the blunt rule,
+                # and it applies to a declared `ledger_missing` exactly as it
+                # applies to an undeclared fail: the retry has to be inside
+                # the halt, so everything after it is the halt's tail. The
+                # declaration does not relax it, because nothing corroborates
+                # the declaration.
                 return is_halt_tail(later_gates[offset + 1:], failed_step)
             return True
     return False
 
 
-def fail_is_accounted(later_gates: object, failed_step: object) -> bool:
+def fail_is_accounted(
+    later_gates: object,
+    failed_step: object,
+    declared_reason: object = None,
+) -> bool:
     """The one predicate for "this failing gate is not a compliance defect".
 
     Three ways, all of them corollaries of the invariant above -- the run did
     not proceed past the fail on its own authority:
 
       * it stopped there (`is_halt_tail`);
-      * it stopped there and a recorded `resume` restarted it
+      * it stopped there and a recorded `resume` restarted it, which for a
+        step with a vocabulary means the fail declared `capped`
         (`is_authorized_restart`);
       * a documented retry of the same step settled it, in place for a halt
         order or by a later `pass` for a validation verdict
         (`is_settled_by_retry`).
+
+    `declared_reason` is the failing event's own `reason` field. Callers pass
+    `gate.get("reason")`; it defaults to None so a caller that passes nothing
+    gets the conservative reading rather than a crash, which is the same
+    fail-closed default `declared_halt_reason` applies to the value itself.
+
+    THE DECLARATION IS SUBTRACTIVE, and the baseline it subtracts from is the
+    behaviour BEFORE `reason` was read at all -- which is the comparison that
+    matters, because that behaviour is what an executor got for free. Reading
+    `reason` opens no route it did not already have. For any tail, the ways a
+    fail can be accounted are:
+
+        before this feature       halt tail, restart, retry
+        declares ledger_missing   halt tail,          retry
+        declares capped           halt tail, restart
+        declares escalate         halt tail
+        declares nothing          halt tail
+        declares anything else    halt tail
+
+    TWO GUARANTEES, STATED PRECISELY, because a looser wording of them has
+    now been wrong twice.
+
+      1. NOTHING EXCEEDS THE PRE-`reason` BASELINE. Every row is a subset of
+         the first, so no value and no non-value reaches a settlement the
+         same events did not already reach. The most a declaration does is
+         give one up.
+      2. NO NON-ANSWER BEATS A VOCABULARY VALUE. The bottom two rows are the
+         weakest in the table, so for every word in the vocabulary, saying it
+         is worth at least as much as saying nothing or saying junk.
+
+    Together these give the property that matters: ON THE EVENTS AN HONEST
+    RUN ACTUALLY EMITS, declaring the truth scores at least as well as any
+    alternative it could have written instead, and usually strictly better.
+    An honest exit-2 repair emits the adjacent re-run, where `ledger_missing`
+    is accounted and every other answer is not. An honest `capped` emits the
+    exit and the `resume`, where `capped` is accounted and every other answer
+    is not. An honest `escalate` emits its halt tail, where every answer is
+    accounted and the truth therefore ties rather than loses.
+
+    WHAT IS NOT CLAIMED, and cannot be while the field is uncorroborated: on
+    an ARBITRARY sequence, a false declaration may still read better than a
+    true one -- `ledger_missing` on a sequence that ran another round beats
+    `escalate` on that same sequence. Reading an executor-written field at
+    all forfeits that, and the design accepts it because guarantee 1 caps the
+    liar at what those same events scored before this field existed. The lie
+    buys back a settlement silence used to get; it opens no new door. The one
+    sequence where that cap is load-bearing -- the round-6 laundering shape
+    -- is refused under every reading, declared or not.
+
+    Guarantee 2 is the half that is easy to lose, and losing it is worse
+    than it sounds: were a non-answer to keep a settlement a truthful
+    `escalate` gives up, the field would be a tax on telling the truth and
+    the correct move would be to leave it out. That is why the last two rows
+    sit at the BOTTOM of the table rather than somewhere in the middle.
+
+    Both guarantees have been broken once each, in the two guards
+    below, in opposite directions. Round 1: `ledger_missing` bought a retry
+    the same events did not otherwise reach, so lying paid. Round 2: the
+    retry guard subtracted only when the reason RESOLVED, so `escalate` and
+    `capped` forfeited a retry that silence and typos kept, and truth paid.
+    Both are guard-shape bugs, and the shape that is correct in both
+    directions is the one written in both guards now: `declared_halt_reason(
+    ...) not in <SET>`, where `None` fails the membership test. Any rewrite
+    of these guards must reproduce this table exactly, including the two
+    bottom rows; a test over the full cross product of the vocabulary against
+    the non-answers asserts it (`TestNoDeclarationBeatsTheTruth`).
+
+    `capped` and `ledger_missing` each keep rather than gain what they have.
+    Every halt used to be resumable unconditionally and every repeatable step
+    used to reach the blunt retry, so those two rows recover a piece of what
+    silence used to buy, and every other value and non-value now forfeits it.
+
+    That is the property to preserve when touching the three predicates
+    below, and it is the reason none of them may be loosened on the strength
+    of a `reason` alone: the field is written by the executor being scored and
+    nothing in this pipeline corroborates it (see is_settled_by_retry, "WHY
+    THERE IS NO CORROBORATION").
 
     validate_gates.py and score_execution.py each used to hand-copy the first
     of these and had already drifted once. Both now call nothing but this, so
@@ -443,8 +776,8 @@ def fail_is_accounted(later_gates: object, failed_step: object) -> bool:
     """
     return (
         is_halt_tail(later_gates, failed_step)
-        or is_authorized_restart(later_gates, failed_step)
-        or is_settled_by_retry(later_gates, failed_step)
+        or is_authorized_restart(later_gates, failed_step, declared_reason)
+        or is_settled_by_retry(later_gates, failed_step, declared_reason)
     )
 
 

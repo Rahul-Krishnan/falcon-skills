@@ -975,6 +975,20 @@ def score_gate_compliance(
     'pass' that was reached by doing that forward progress: running another
     round is what a halt order forbade.
 
+    Where the failing event declares a 'reason' (hone_common.HALT_REASONS,
+    today a failing 'convergence'), that declaration can only RULE OUT
+    settlements, never open one: 'capped' is the one halt a 'resume' may
+    restart, 'ledger_missing' the one an in-place retry may settle, and
+    'escalate' has neither. The field is written by the executor being scored
+    and nothing here corroborates it -- the timeline this function is handed
+    is executor-written too -- so it is never read as evidence a claim is
+    true. Nothing declared, or something unrecognized, gets the STRICTEST
+    reading rather than a middling one: no restart and no retry, the same
+    answer 'escalate' gets. That is what keeps the truth from costing score.
+    Were a non-declaration to keep a settlement that a truthful 'escalate'
+    forfeits, this dimension would pay an executor to omit the field, which
+    is the opposite of what reading it is for.
+
     Fallback (legacy): keyword counting when no structured gate events are found.
     Legacy score is capped at 0.7 to incentivize migration to structured events.
 
@@ -1036,7 +1050,9 @@ def score_gate_compliance(
             # later `pass` for a gate whose `fail` was itself a halt order: a
             # run that ignored an `escalate` and did another round scored 1.0
             # on the strength of the next round's passing `convergence`.
-            if fail_is_accounted(gates[idx + 1 :], gate.get("step")):
+            if fail_is_accounted(
+                gates[idx + 1 :], gate.get("step"), gate.get("reason")
+            ):
                 compliant += 1
                 expected_fail += 1
 

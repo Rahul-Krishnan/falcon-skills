@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from check_convergence import analyze  # noqa: E402
+from hone_common import HALT_REASONS  # noqa: E402
 
 
 def finding(fid, severity="major", status="open", file="SKILL.md", summary="issue"):
@@ -1293,3 +1294,43 @@ class TestTuningLimitsAreValidated(unittest.TestCase):
         result = self._run()
         self.assertEqual(result.returncode, 1)
         self.assertIn('"verdict"', result.stdout)
+
+
+class TestHaltVerdictsAreDeclarableReasons(unittest.TestCase):
+    """The gate event's `reason` vocabulary is this script's own verdicts.
+
+    `hone_common.HALT_REASONS["convergence"]` is what a failing `convergence`
+    event may declare, and two of its three members are the verdicts computed
+    here. That is deliberate: declaring is copying a value the run already
+    holds, not composing a new claim, so there is no step at which the
+    executor gets to decide what its halt "really" was.
+
+    If a future verdict halts the loop and is not in the vocabulary, the
+    executor has nothing truthful to write and the event falls back to the
+    conservative reading -- safe, but a silent loss of the concession. This
+    test is what makes that a visible failure instead.
+    """
+
+    def test_every_halting_verdict_this_script_returns_is_declarable(self):
+        escalating = analyze(
+            ledger([[finding("f1")]] * 3, max_rounds=9), 3, 9)
+        self.assertEqual(escalating["verdict"], "escalate")
+        capped = analyze(
+            ledger([[finding("f1")],
+                    [finding("f1", status="fixed"), finding("f2")]],
+                   max_rounds=2), 5, 5)
+        self.assertEqual(capped["verdict"], "capped")
+        for report in (escalating, capped):
+            with self.subTest(verdict=report["verdict"]):
+                self.assertIn(report["verdict"], HALT_REASONS["convergence"])
+
+    def test_the_non_halting_verdicts_are_not_in_the_vocabulary(self):
+        """`converged` and `in_progress` are `pass` events, so they declare nothing.
+
+        A `reason` of `in_progress` on a `fail` is a contradiction, and the
+        closed vocabulary is what rejects it rather than quietly accepting a
+        word this script also produces.
+        """
+        for verdict in ("converged", "in_progress"):
+            with self.subTest(verdict=verdict):
+                self.assertNotIn(verdict, HALT_REASONS["convergence"])

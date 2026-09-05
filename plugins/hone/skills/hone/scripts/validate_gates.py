@@ -51,7 +51,7 @@ import json
 import sys
 from pathlib import Path
 
-from hone_common import derive_gate_mode, fail_is_accounted
+from hone_common import HALT_REASONS, derive_gate_mode, fail_is_accounted
 
 VALID_RESULTS = ("pass", "fail")
 
@@ -367,6 +367,86 @@ def validate_gates(
                             f"gates[{index}] findings[{finding_index}] is "
                             f"not a string"
                         )
+        # `reason` is validated because a settlement predicate KEYS on it
+        # (hone_common.HALT_REASONS). No value buys an outcome there -- a
+        # declaration only ever rules a settlement out -- but the field is
+        # still executor-written, so an arbitrary string must not do better
+        # than the truth here either. A declaration outside the closed
+        # vocabulary is an error, and it is ALSO read as "not declared" by
+        # the predicate, which is the strictest branch there is. Failing both
+        # ways is the point: junk cannot beat a vocabulary value here or in
+        # `hone_common`, so on the events a correct run emits, declaring the
+        # truth scores at least as well as anything else it could write.
+        #
+        # The type check is not scoped to the vocabulary steps, because
+        # gate-event-schema.json declares `reason` a string for every event;
+        # the enum check is, because `reason` is free-form annotation
+        # elsewhere (SKILL.md's `corrupt_state_file` on a `workflow_exit`,
+        # "prior evaluation reused" on a `fixonly_entry`).
+        #
+        # THE ENUM CHECK IS A DELIBERATE BREAKING CHANGE, not an oversight,
+        # and it is deliberately an ERROR rather than a migration-window
+        # warning. `reason` was in no `properties` block and was read by
+        # nothing before this change, so a free-form value on a failing
+        # `convergence` -- `"escalate: f1,f2 open 4 rounds"` -- was legal and
+        # now exits this script non-zero at the mechanical exit gate. Three
+        # reasons to take that rather than warn:
+        #
+        #   1. THERE IS NO CORPUS TO MIGRATE. The state file is a per-run
+        #      artifact at /tmp/workflow-${RUN_ID}.json (SKILL.md line 230),
+        #      written and validated inside the same run. The next run writes
+        #      a fresh one under the new rules, so the only file this can
+        #      break is an archived one being re-validated by hand, which is
+        #      a diagnostic, not a gate on live work.
+        #   2. NOTHING EVER TOLD AN EXECUTOR TO WRITE THAT VALUE. The only
+        #      `reason` the docs ever mandated on a `convergence:fail` was the
+        #      literal `ledger_missing`, which is in the vocabulary and still
+        #      validates. The free-form uses the docs DO name sit on
+        #      `workflow_exit` and `fixonly_entry`, which this check does not
+        #      touch. So the breaking case is legal-but-undocumented rather
+        #      than a shape the skill produced.
+        #   3. A MIGRATION WINDOW HAS NO WAY TO CLOSE. Nothing in the state
+        #      file records a schema version, so a warning added "for a
+        #      window" is a warning forever, and a near miss like `"Capped"`
+        #      -- a typo, not a legacy value -- would be downgraded along
+        #      with it. An error is what makes a typo visible.
+        #
+        # The absent case stays a WARNING, and the asymmetry with the
+        # out-of-vocabulary case is not an inconsistency: absence is what
+        # every pre-`reason` state file actually contains, junk is what none
+        # of them contain. Neither buys anything either way -- both resolve to
+        # `None` and reach the same settlements (`hone_common`'s
+        # `declared_halt_reason`) -- so this file is free to report them
+        # differently without either one outscoring the truth.
+        if "reason" in gate and not isinstance(gate["reason"], str):
+            errors.append(
+                f"gates[{index}] reason must be a string, got "
+                f"{type(gate['reason']).__name__}"
+            )
+        if (
+            gate.get("result") == "fail"
+            and isinstance(step, str)
+            and step in HALT_REASONS
+        ):
+            vocabulary = tuple(sorted(HALT_REASONS[step]))
+            reason = gate.get("reason")
+            if "reason" not in gate:
+                # A WARNING, not an error, and only because state files
+                # written before the declaration existed carry no `reason`.
+                # They keep validating; what they lose is settlements, not
+                # validity, and they lose the same ones every other
+                # non-answer loses.
+                warnings.append(
+                    f"gates[{index}] step '{step}' failed without declaring a "
+                    f"reason; one of {vocabulary} is expected, and an "
+                    "undeclared halt is settled conservatively (no restart, "
+                    "no in-place retry)"
+                )
+            elif isinstance(reason, str) and reason not in HALT_REASONS[step]:
+                errors.append(
+                    f"gates[{index}] step '{step}' reason {reason!r} is not "
+                    f"one of {vocabulary}"
+                )
         result = gate.get("result")
         if "result" in gate and result not in VALID_RESULTS:
             errors.append(
@@ -398,16 +478,23 @@ def validate_gates(
     # rather than two hand-copied conditions that had already drifted apart.
     # It carries two cases the hand-copies missed. An authorized restart: the
     # run halted, recorded `workflow_exit`, and a `resume` records the human
-    # granting more rounds. And a documented in-place retry: the exit-2 ledger
-    # repair emits `convergence:fail` and then a second `convergence` that may
-    # fail too, so a correct repair has no later `pass` and is not its own
-    # halt tail. What it deliberately does NOT accept is a later `pass` for a
-    # gate whose `fail` was a halt order, which is how a run that ignored an
-    # `escalate` and did another round used to score clean.
+    # granting more rounds, which only a fail declaring `capped` may claim.
+    # And a documented in-place retry: the exit-2 ledger repair emits
+    # `convergence:fail` and then a second `convergence` that may fail too, so
+    # a correct repair has no later `pass` and is not its own halt tail. That
+    # retry is reachable only for a fail that declared `"ledger_missing"`, the
+    # one failure the docs re-attempt; every other declaration and every
+    # non-declaration forfeits it, and the retry that remains still has to sit
+    # inside the halt, because `reason` is executor-written and nothing here
+    # corroborates it. What the helper deliberately does NOT accept is a later
+    # `pass` for a gate whose `fail` was a halt order, which is how a run that
+    # ignored an `escalate` and did another round used to score clean.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
-        if not fail_is_accounted(gates[index + 1 :], gate.get("step")):
+        if not fail_is_accounted(
+            gates[index + 1 :], gate.get("step"), gate.get("reason")
+        ):
             warnings.append(
                 f"gates[{index}] step '{gate.get('step')}' failed but the run "
                 "continued: no halt tail behind it, no recorded 'resume' after "
