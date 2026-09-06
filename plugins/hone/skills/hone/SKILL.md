@@ -23,7 +23,7 @@ Infer the type when unambiguous. Resolve symlinks and edit the maintained source
 not a marketplace installation that an update will overwrite. If the artifact is
 missing or ambiguous, ask one concise question using the host's available interface.
 Invalid or conflicting arguments stop before writes. Never interpolate an unchecked
-name into a shell command. See [artifact profiles](references/v3-next/artifact-profiles.md)
+name into a shell command. See [artifact profiles](references/artifact-profiles.md)
 for discovery and type-specific verification.
 
 - `--auto` is the default: complete authorized local work without intermediate
@@ -102,19 +102,19 @@ Legacy grade caches stay stale until their consumers support this measurement.
 ## Workflow
 
 1. **Establish the task and baseline.** Read
-   [evaluation](references/v3-next/phase1-evaluation.md). Identify the actual defect or
+   [evaluation](references/phase1-evaluation.md). Identify the actual defect or
    improvement hypothesis, freeze representative task requirements and checks,
    inspect references, and run a baseline with the current artifact. For migration,
    compare each available target with and without the skill. The evaluation produces
    verified observations and a concrete reason to edit, or an unchanged/inconclusive
    report when there is no supported change.
 2. **Make a bounded candidate.** Read
-   [improvement](references/v3-next/phase2-improvement.md). Preserve user requirements,
+   [improvement](references/phase2-improvement.md). Preserve user requirements,
    change the smallest coherent set of instructions, and test the hypothesis.
    Instruction removal is a normal candidate. Use an independent reviewer when
    judgment or consequences warrant one. Protect the original and concurrent work.
 3. **Verify and decide.** Read
-   [reevaluation](references/v3-next/phase3-reevaluation.md). Compare the candidate against
+   [reevaluation](references/phase3-reevaluation.md). Compare the candidate against
    the fixed baseline, check scope, and apply only an adequately supported change.
    Continue only for an identified unresolved defect while budget remains.
 
