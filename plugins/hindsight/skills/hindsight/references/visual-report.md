@@ -1,10 +1,10 @@
 # Phase 3f: Visual Report (only if --viz flag is set)
 
-After Phase 3e wrap-up completes (including writing `last-retro.json`), generate a visual HTML report. The `--viz` flag was set at invocation, so no additional confirmation is needed.
+After Phase 3e writes `last-retro.json`, generate the HTML report. `--viz` authorizes this step.
 
 ## Steps
 
-1. **Read the CSS reference file:** Try `~/.claude/hindsight/references/organic-earth.css`. This contains the complete Organic Earth identity (palette, typography, components). Use it verbatim as the `<style>` block. Do NOT modify it. **If the CSS file is missing,** generate minimal inline styles using this palette and proceed without error:
+1. **Read the CSS reference file:** Try `~/.claude/hindsight/references/organic-earth.css`. Use it unchanged as the `<style>` block. If missing, use these fallback styles:
    ```css
    :root { --foreground:#faf8f5; --background:#1c1917; --card:#292524;
      --border:#3d3835; --muted-foreground:#a8a29e; --primary:#84cc16;
@@ -44,7 +44,7 @@ After Phase 3e wrap-up completes (including writing `last-retro.json`), generate
 
    d. **Friction sparkline:** `<div class="card sparkline-row">` containing:
       - `<span class="sparkline-label">Friction</span>`
-      - `<div class="sparkline-bars">` with one `<div class="bar">` per session. Height = `(score / 10) * 100` percent — the denominator is always 10, the same fixed scale as the terminal sparkline (Phase 2 step 7). Do NOT scale by the maximum score observed in this window, or a low-friction run will render its worst session as a full-height bar. Add class `high` to bars where score >= 5.
+      - `<div class="sparkline-bars">` with one `<div class="bar">` per session. Height = `(score / 10) * 100` percent. Use the terminal sparkline's fixed denominator of 10 (Phase 2 step 7), never the window's maximum score. Add class `high` to bars where score >= 5.
       - `<span class="sparkline-avg">avg X.X/10</span>`
       - If `friction_scores` is empty, render `<div class="empty-state">No session data</div>` instead.
 

@@ -1,56 +1,42 @@
 ---
 name: hindsight
-description: "Cross-session retrospective analysis. Finds recurring friction, mistakes, and improvement opportunities across multiple Claude Code sessions. Use when the user wants to review patterns across past sessions, asks what keeps going wrong, or invokes /hindsight. Do NOT trigger for single-session questions like 'what did I do last session' or 'what happened in my last session' — those are session-history lookups, not cross-session retrospectives. Answer single-session questions directly from that session's transcript (via the session-history skill if it is installed, otherwise by reading the transcript) — do not invoke the hindsight pipeline."
+description: "Find recurring friction, mistakes, and workflow improvements across Claude Code sessions. Use for cross-session pattern reviews or /hindsight. For single-session questions, read that transcript directly or use session-history if installed."
 metadata:
   user-invocable: true
   argument-hint: "[window=7d] [--hype|--roast] [--human|--ai] [--viz] [--auto]"
   allowed-tools: "Task, Read, Glob, Grep, Bash(mkdir:*, cat:*, ls:*, touch:*, echo:*, python3:*, wait:*, which:*, cp:*, rm:*, tail:*, wc:*), Write, TodoWrite, AskUserQuestion"
 ---
 
-```
-██╗  ██╗██╗███╗   ██╗██████╗ ███████╗██╗ ██████╗ ██╗  ██╗████████╗
-██║  ██║██║████╗  ██║██╔══██╗██╔════╝██║██╔════╝ ██║  ██║╚══██╔══╝
-███████║██║██╔██╗ ██║██║  ██║███████╗██║██║  ███╗███████║   ██║
-██╔══██║██║██║╚██╗██║██║  ██║╚════██║██║██║   ██║██╔══██║   ██║
-██║  ██║██║██║ ╚████║██████╔╝███████║██║╚██████╔╝██║  ██║   ██║
-╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝
-It's not nagging if it's data-driven.
-```
+# /hindsight
 
-# /hindsight — Cross-Session Retrospective
+Find recurring friction, mistakes, stale rules, and workflow improvements across Claude Code sessions, covering both AI and user behavior. Scan transcripts, memory, and workspace files with three parallel agents.
 
-> Three parallel agents scan your transcripts, memory, and workspace to surface recurring friction, stale rules, and missed automation opportunities.
-
-Analyzes patterns across multiple Claude Code sessions to find recurring friction, mistakes, workflow inefficiencies, and improvement opportunities for both the AI and the human user.
-
-**PRIVACY:** See [Privacy Rules](#privacy-rules) at the end of this file -- they apply to ALL phases.
+[Privacy Rules](#privacy-rules) apply to every phase.
 
 ## Trigger
 
 Invoked via `/hindsight`. Optional arguments:
-- `window=<duration>` — eg `window=7d`, `window=3sessions` (default: max(since last hindsight, last 14 days), or last 14 days if no prior hindsight)
-- `--viz` — after wrap-up, generate a visual HTML report (Organic Earth style) saved to your local reports directory. Off by default. When active, print at Phase 0: "Visual report will be saved locally at the end." The `--viz` flag does NOT affect Phases 0-3e; it only triggers Phase 3f after everything else is done.
-- `--auto` — non-interactive automation mode. Skips Phase 3c (AskUserQuestion) and Phase 3d (user-driven finding review). Instead: auto-applies all LOW/MED NEEDS_APPROVAL findings without prompting; logs HIGH/CRITICAL NEEDS_APPROVAL findings to `~/.claude/state/overnight-flags.md` for human review; writes the full report automatically; exits. Use when invoked from rem-sleep or other automated pipelines where no user is present.
+- `window=<duration>`: eg `window=7d`, `window=3sessions` (default: max(since last hindsight, last 14 days), or last 14 days if no prior hindsight)
+- `--viz`: after wrap-up, generate a visual HTML report (Organic Earth style) saved to your local reports directory. Off by default. When active, print at Phase 0: "Visual report will be saved locally at the end." The `--viz` flag does NOT affect Phases 0-3e; it only triggers Phase 3f after everything else is done.
+- `--auto`: non-interactive automation mode. Skips Phase 3c (AskUserQuestion) and Phase 3d (user-driven finding review). Instead: auto-applies all LOW/MED NEEDS_APPROVAL findings without prompting; logs HIGH/CRITICAL NEEDS_APPROVAL findings to `~/.claude/state/overnight-flags.md` for human review; writes the full report automatically; exits. Use when invoked from rem-sleep or other automated pipelines where no user is present.
 
 ### Tone Modes
 
-Control how findings are presented. Affects Phase 3 output style only — collection and synthesis are always analytical.
+Control how findings are presented. Affects Phase 3 output style only: collection and synthesis are always analytical.
 
-- **(default)** — Neutral. Analytical, evidence-first, no editorializing. "Pattern: AI sent external message without approval. 4 incidents across 3 sessions."
-- **`--roast`** — Brutal. Calls it like it is. "You did this AGAIN. Third time this week, and you literally have a rule about it. The rule you wrote. After the last time you did this."
-- **`--hype`** — Celebratory. Highlights wins and frames issues as easy fixes. "Look at this growth! You caught 3 more patterns than last retro. One small thing to tighten up and you're golden."
+- **(default)**: Neutral. Analytical, evidence-first, no editorializing. "Pattern: AI sent external message without approval. 4 incidents across 3 sessions."
+- **`--roast`**: Blunt and confrontational. "You broke the approval rule three times this week, after writing it for exactly this situation."
+- **`--hype`**: Celebratory. Highlight wins and frame issues as manageable fixes. "You caught three more patterns than last time. The remaining fix is small."
 
 ### Focus Modes
 
-Control what categories of findings to prioritize. Affects which taxonomy categories are surfaced prominently vs deprioritized.
+Focus controls finding order and weighting.
 
-- **(default)** — Both human and AI patterns, weighted equally.
-- **`--human`** — Prioritize human-side patterns: scope creep, skipping planning, not reading AI output, overriding good suggestions, context-switching too fast, not confirming before posting.
-- **`--ai`** — Prioritize AI-side patterns: constraint amnesia, search cascades, unauthorized actions, shallow investigation, task substitution, context compaction losses.
+- **(default)**: Both human and AI patterns, weighted equally.
+- **`--human`**: Prioritize human-side patterns: scope creep, skipping planning, not reading AI output, overriding good suggestions, context-switching too fast, not confirming before posting.
+- **`--ai`**: Prioritize AI-side patterns: constraint amnesia, search cascades, unauthorized actions, shallow investigation, task substitution, context compaction losses.
 
-When tone and focus modes are combined (eg `--roast --human`), apply the tone mode to all findings regardless of focus. Focus determines sort order and weighting; tone determines presentation style.
-
-Focus modes don't hide findings — they sort and weight. A `--human` run still shows AI issues, just after the human ones. The Phase 3 header shows the active mode:
+Apply tone to all findings, including those deprioritized by focus. Keep all findings visible; show the active mode in the Phase 3 header:
 
 ```
   Mode: --roast --human
@@ -58,7 +44,7 @@ Focus modes don't hide findings — they sort and weight. A `--human` run still 
 
 ## Argument Parsing (do this FIRST before any phase)
 
-Parse the invocation string into structured flags. This is a prerequisite for all phases.
+Parse flags before Phase 0.
 
 ```
 Input: "/hindsight [args...]"
@@ -79,19 +65,17 @@ Examples:
 
 When `viz` is true, print at Phase 0: "Visual report will be saved locally at the end."
 
-When combining tone + focus: tone affects Phase 3 presentation style only; focus affects sort order of findings in Phase 3. Collection and synthesis (Phases 1-2) are always analytical regardless of tone.
-
 ## Workflow State
 
-**Write this file as your FIRST action — before Phase 0, before reading any other file, before any other tool call.** This is unconditional. It applies no matter which flag was passed and no matter which mechanic (carry-forward, roast mode, a specific window) the invocation is focused on. An executor that jumps straight to Phase 0 because the interesting part of the request lives later in the pipeline has already broken the resume path.
+**Create the workflow state file before any other tool call, for every invocation.**
 
 **Run ID (compute once, at start):**
 ```bash
 RUN_ID="hindsight-$(date +%Y%m%d-%H%M)"   # eg hindsight-20260713-0022
 ```
-The state file is keyed per RUN, not per session, so two hindsight runs in one session (or a hindsight dispatched from `/rem-sleep` alongside other skills) never share a file.
+Use a separate state file for each run, including multiple runs in one session or runs dispatched by `/rem-sleep`.
 
-**Recovering RUN_ID after compaction:** the timestamp is not reconstructible from memory. Glob for the most recent run instead:
+**After compaction, recover the latest run ID from disk:**
 ```bash
 STATE_FILE=$(ls -t /tmp/workflow-hindsight-*.json 2>/dev/null | head -1)
 ```
@@ -109,7 +93,7 @@ Update each step to `"in_progress"` then `"done"` as you go. Track open question
 ```
 Required transitions: phase0→phase0_5, phase0_5→phase1, phase1→phase1_5, phase1_5→phase2, phase2→phase3. Use `"result": "fail"` only when the transition should not proceed (eg zero sessions at phase0_5).
 
-**Mechanical exit gate (MANDATORY before any exit):** Before stopping for any reason (wrap-up, early exit, error), re-read the state file and verify: (1) all steps are `"done"` or `"skipped"`, (2) no step is `"pending"` or `"in_progress"`, (3) `open_questions` is empty or all items are unanswerable. If any step is non-done with no error: resume from that step, do not exit.
+**Before every exit**, including errors and early exits, re-read the state file. All steps must be `"done"` or `"skipped"`; open questions must be empty or unanswerable. Resume any unfinished step that has no blocking error.
 
 ## Quick Start
 
@@ -150,14 +134,14 @@ Before reading the full pipeline, determine which path applies:
   +--> --viz flag set? --> Phase 3f: Generate HTML visual report
 ```
 
-**Phase narration (mandatory):** As you progress through each phase, explicitly label it in your output (e.g., "**Phase 0: Setup**", "**Phase 1: Collection**", "**Phase 2: Synthesis**"). This helps the user track progress. After Phase 0 completes, output one summary line: "Setup complete — window: `<start>` → `<end>`, parser: `<mode>`, taxonomy: `<N>` categories."
+**Label each phase in progress output**, eg "Phase 0: Setup" and "Phase 1: Collection". After setup, print: "Setup complete: window: `<start>` → `<end>`, parser: `<mode>`, taxonomy: `<N>` categories."
 
 ### Phase 0: Setup
 
-**Read all setup files in parallel** (steps 1, 2, and 4 are independent reads — issue them in a single message with multiple Read tool calls):
+Read setup items 1, 2, and 4 in parallel; item 5 can run alongside them.
 
-1. Read `~/.claude/hindsight/last-retro.json` to determine the analysis window and load carry-forward state. If missing, default to last 14 days. If present, use `max(since last hindsight, last 14 days)` as the window — this guarantees a minimum 14-day floor so slow-burn patterns aren't missed by frequent runs. Also extract `unresolved_findings` if present — these are findings from the previous hindsight that were skipped. They will be re-checked against the current window and re-surfaced if the pattern continues (with bumped severity). If the pattern is not found in the new window, age it out silently.
-1a. **Resolve session-count windows.** If `window` matches `N sessions` (eg `window=3sessions`), do NOT convert it to a calendar duration. Instead: enumerate all sessions across all projects (live transcripts plus fingerprints, deduplicated), sort by end timestamp descending, take the N most recent, and set the effective window to `[end timestamp of the Nth session, now]`. Pass this resolved date range — not the raw session count — into `setup_context.window`, so every downstream subagent filters on the same concrete boundary. If fewer than N sessions exist, use all available ones and say so in the Phase 0 summary line. Without this resolution step two runs of the same `window=3sessions` command can select different session sets.
+1. Read `~/.claude/hindsight/last-retro.json`. Default to the last 14 days if missing; otherwise use `max(since last hindsight, last 14 days)`. Load `unresolved_findings` for recurrence checks. Resurface recurring findings with increased severity; drop those absent from the current window.
+1a. **Resolve session-count windows.** For `window=Nsessions`, enumerate live transcripts and fingerprints across all projects, deduplicate, sort by end timestamp descending, and take the N most recent sessions. Set `setup_context.window` to `[end timestamp of the Nth session, now]`. If fewer than N sessions exist, use all available sessions and note the shortfall in the setup summary. Pass this date range to every subagent.
 
 2. Load finding categories from taxonomy. Check in order: (a) `~/.claude/hindsight/taxonomy.json`, (b) `references/taxonomy.json` relative to this skill file's directory. If neither exists, use these hardcoded categories:
    ```
@@ -167,17 +151,13 @@ Before reading the full pipeline, determine which path applies:
    ```
 3. Parse the window argument if provided (override default).
 4. Check for `~/.claude/skills/session-history/scripts/cclog.py`. Set parser mode to `robust` if present, `fallback` if not. If fallback, tell the user: "For better results, install the session-history skill (provides a robust transcript parser)."
-5. Check for fingerprint files in `~/.claude/hindsight/fingerprints/*.json`. These are lightweight session summaries persisted by the hindsight plugin's Stop hook. They persist across machines when you sync `~/.claude`, providing data even when raw transcripts are gone. Count how many fingerprints fall within the analysis window.
+5. Count fingerprints within the analysis window in `~/.claude/hindsight/fingerprints/*.json`. These Stop-hook summaries survive transcript removal and sync across machines with `~/.claude`.
 
-6. Run `mkdir -p ~/.claude/hindsight/{logs,reports,fingerprints}` to ensure output directories exist.
-
-**Do NOT read these files sequentially.** Steps 1, 2, and 4 have no dependencies on each other and MUST be issued as parallel Read calls in a single message. Step 5 can run in parallel with them.
+6. Run `mkdir -p ~/.claude/hindsight/{logs,reports,fingerprints}` to create output directories.
 
 ### Phase 0.5: Pre-flight Session Check
 
-**CRITICAL: Do this check BEFORE launching any subagents.** If there is no data, exit early and save tokens.
-
-Before launching subagents, do a quick session count check to avoid wasting tokens on empty data:
+Before launching subagents, count both data sources:
 - Count **live transcripts** (current machine):
   - If `robust` mode: Run `~/.claude/skills/session-history/scripts/cclog.py --format=json projects 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(p['sessions'] for p in d.get('projects',[])))"` and check the total session count across all projects.
   - If `fallback` mode: Run `ls ~/.claude/projects/*/*.jsonl 2>/dev/null | wc -l` to count session files.
@@ -186,12 +166,12 @@ Before launching subagents, do a quick session count check to avoid wasting toke
 **Zero-session exit flow (MANDATORY):**
 - If 0 live transcripts AND 0 fingerprints:
   1. Print: "No sessions found in the last `<window>`. Try widening: `/hindsight window=30d`"
-  2. If no fingerprints directory exists, that's expected — fingerprints are an optional enhancement and the skill works on live transcripts alone.
+  2. If no fingerprints directory exists, that's expected: fingerprints are an optional enhancement and the skill works on live transcripts alone.
   3. Do NOT proceed to Phase 1, Phase 2, or Phase 3
   4. Do NOT write `last-retro.json`
-  5. Update the workflow state file before exiting: set `phase0_5` to `"done"`, set every remaining step (`phase1`, `phase1_5`, `phase2`, `phase3`) to `"skipped"`, and append a gate event with `"result": "fail"` and a reason of `"zero sessions"`. The Mechanical Exit Gate forbids exiting with any step left `pending`; skipping this leaves stale `pending` steps on disk that the next run's compaction-resume logic will try to resume from.
-  6. Exit cleanly — the pipeline ends here
-- If 0 live transcripts but fingerprints exist, proceed — the transcript scanner will use fingerprints as its data source.
+  5. Set `phase0_5` to `"done"` and remaining steps (`phase1`, `phase1_5`, `phase2`, `phase3`) to `"skipped"`. Append a failed gate event with reason `"zero sessions"`.
+  6. Exit cleanly: the pipeline ends here
+- If 0 live transcripts but fingerprints exist, proceed: the transcript scanner will use fingerprints as its data source.
 
 ### Phase 1: Collection (3 parallel subagents)
 
@@ -214,9 +194,9 @@ setup_context: {
 
 Launch 3 subagents in parallel using the Task tool. Each outputs structured JSON findings.
 
-**Important:** Use `subagent_type: "general-purpose"`, `model: "sonnet"`, and `max_turns: 20` for all three. These subagents do pattern recognition, taxonomy classification, and severity assessment on top of I/O work — sonnet provides meaningfully better analytical quality than haiku for these judgment-heavy tasks while remaining fast. The `max_turns` cap prevents runaway subagents from burning tokens on edge cases. Before launching, substitute the Phase 0 values (analysis window, parser mode, taxonomy categories) into each prompt template's placeholders. Launch all 3 in a single message with `run_in_background: true` for maximum parallelism.
+Use `subagent_type: "general-purpose"`, `model: "sonnet"`, and `max_turns: 20` for all three agents. Substitute the Phase 0 window, parser mode, and taxonomy into each prompt. Launch all three in one message with `run_in_background: true`.
 
-**Pass `unresolved_findings` to the Transcript Scanner.** The subagents are the only actors that actually read this window's transcripts, so they are the only ones who can confirm whether a prior finding recurred. Substitute the `unresolved_findings` array from `setup_context` into Subagent 1's prompt and instruct it to actively look for those patterns, reporting any it finds as normal findings under the same `category` key with fresh evidence. If this array never reaches a subagent, Phase 2 step 6a has nothing to match against and carry-forward is dead on arrival.
+Pass `setup_context.unresolved_findings` to the Transcript Scanner. It must check for recurrence and return matching patterns under the same `category` key with current-window evidence for Phase 2 carry-forward matching.
 
 **Parallelism fallback and subagent prompts:** See [references/subagent-prompts.md](references/subagent-prompts.md) for the full fallback collection pattern and all 3 subagent prompt templates (Transcript Scanner, Memory Auditor, Workspace Scanner).
 
@@ -253,7 +233,7 @@ After all subagents return and pass validation, synthesize their outputs:
    - MODERATE: 2 instances or strong single instance with indirect corroboration
    - WEAK: 1 instance, inferred pattern, or low-confidence match
 6. **Group related findings** that share a root cause.
-6a. **Match carry-forward findings.** For each entry in `setup_context.unresolved_findings` (loaded in Phase 0), try to match it against the merged findings list from step 1. A match requires BOTH: (i) the `category` taxonomy key is identical, and (ii) the new finding describes the same underlying behavior — judge by root cause, not string equality, because `pattern` text is regenerated fresh each run and will rarely match byte-for-byte. On a match, mark the *new* finding as carried forward: set `times_carried = unresolved.times_carried + 1` and bump `current_severity` one level per carry (LOW→MEDIUM→HIGH), capping at HIGH. Add it to `carry_forward_findings`. If several unresolved entries and several new findings share a category, pair the highest-severity ones first. If an unresolved entry has no match in this window, drop it silently — do not re-emit it as a finding. **Without this step `carry_forward_findings` is never populated and the `[HIGH↑]` display in 3b, the severity-bump mechanic, and the entire "is this getting worse" signal quietly stop working while everything still looks like it ran.**
+6a. **Match carry-forward findings.** Match `setup_context.unresolved_findings` against merged findings by identical `category` key and shared underlying behavior, judging root cause rather than wording. Pair highest-severity findings first when several share a category. For each match, set `times_carried = unresolved.times_carried + 1`, bump `current_severity` one level per carry (LOW→MEDIUM→HIGH, capped at HIGH), and add the new finding to `carry_forward_findings`. Drop unmatched prior findings.
 7. **Compute per-session friction scores** for the header sparkline: for each session, count `corrections + errors + retries` from transcript scanner data and cap at 10. The denominator is always 10 (not the max score observed). Store as an ordered array (oldest to newest). Compute the mean. Map each score to a block character: 0=▁, 1-2=▂, 3-4=▃, 5-6=▅, 7-8=▆, 9-10=█. Display as `avg <score>/10` (always /10, never /5 or any other denominator).
 8. **Compute trend delta** (if `last-retro.json` was loaded in Phase 0): compare `findings_count`, severity distribution, and which categories are new vs resolved. Store as a structured delta for the header.
 9. **Generate proposed actions** for each finding:
@@ -282,7 +262,7 @@ synthesis_results: {
 
 #### 3a. Logo + Stats Header
 
-Open the report with this branded header. **All fields are mandatory** — fill every slot from the parsed arguments and Phase 2 synthesis data:
+Open the report with this branded header. **All fields are mandatory**: fill every slot from the parsed arguments and Phase 2 synthesis data:
 
 ```
 ██╗  ██╗██╗███╗   ██╗██████╗ ███████╗██╗ ██████╗ ██╗  ██╗████████╗
@@ -307,17 +287,17 @@ Open the report with this branded header. **All fields are mandatory** — fill 
 ```
 If this is the first run, show `  vs last:  (first run)` instead.
 
-**Friction score:** Compute a per-session friction score (0-10) during Phase 2 synthesis: `min(10, corrections + errors + retries)` for each session. Show in the header as a sparkline using block characters (eg `▁▂▁▅▁▂▁`) and the mean. This answers "am I getting better?" at a glance without reading individual findings.
+**Friction score:** Show the Phase 2 per-session scores as a sparkline and mean on the fixed 0–10 scale.
 
 #### 3b. Findings Summary
 
-Present all findings sorted by severity (CRITICAL first) using this EXACT format — 3 lines per finding, plain text, no box-drawing characters.
+Present all findings sorted by severity (CRITICAL first) using this EXACT format: 3 lines per finding, plain text, no box-drawing characters.
 
 **Privacy reminder:** Apply the [Privacy Rules](#privacy-rules) to all finding descriptions.
 
-**Category display rule:** `category` is ALWAYS stored as the taxonomy key (snake_case, one of the categories loaded in Phase 0 step 2). Never invent a key at storage time — a genuinely novel pattern goes to `uncategorized` with a suggested key. For display only, Title-Case the key with spaces: `unauthorized_actions` → `Unauthorized Actions`, `memory_staleness` → `Memory Staleness`. The display string is never written back to `last-retro.json`. If a freeform label reaches storage, the next run's carry-forward matching (Phase 2 step 6a, which compares taxonomy keys) silently fails to match it and the trend delta treats it as a brand-new category forever.
+**Category display:** Store the snake_case taxonomy key in `category`. For display, replace underscores with spaces and use title case: `unauthorized_actions` → `Unauthorized Actions`. Never store the display label. Put novel patterns in `uncategorized` with a suggested key.
 
-**Tone applies to every finding.** When a focus mode is active (`--human` or `--ai`), focus changes only the sort order — it does not soften the tone on deprioritized findings. A `--roast --human` run roasts the AI-side findings just as hard as the human-side ones; they simply appear further down.
+Apply the selected tone to every finding. Focus affects sort order and weighting only.
 
 ```
   #1 [CRIT] Unauthorized Actions                   (4 incidents)
@@ -339,7 +319,7 @@ Present all findings sorted by severity (CRITICAL first) using this EXACT format
 ```
 
 Format rules:
-- **Line 1:** `#N [SEVERITY] Category Name` left-aligned, `(N incidents)` right-aligned. The category name is the Title-Cased taxonomy key — every label above maps to a real key.
+- **Line 1:** `#N [SEVERITY] Category Name` left-aligned, `(N incidents)` right-aligned. The category name is the Title-Cased taxonomy key: every label above maps to a real key.
 - **Line 2:** One-sentence pattern description, indented
 - **Line 3:** `→ Apply/Discuss/Skip: <action summary>`, indented
 - Blank line between findings
@@ -351,21 +331,19 @@ Format rules:
 **If `auto=true` (--auto flag set):** Skip AskUserQuestion and the finding detail flow entirely. Execute the following instead:
 
 1. Auto-apply all LOW and MEDIUM severity NEEDS_APPROVAL findings without prompting. For each applied finding, log: `[AUTO-APPLIED] #N [SEV] <category>: <action taken>`.
-2. Collect all HIGH and CRITICAL severity NEEDS_APPROVAL findings. Append them to `~/.claude/state/overnight-flags.md` under a `## Hindsight` section (create the section if not present; do not overwrite existing content in the file — append only):
+2. Collect all HIGH and CRITICAL severity NEEDS_APPROVAL findings. Append them to `~/.claude/state/overnight-flags.md` under a `## Hindsight` section (create the section if not present; do not overwrite existing content in the file: append only):
    ```markdown
    ## Hindsight
    - [ ] [HIGH] <category>: <pattern> — <proposed_action>
    - [ ] [CRIT] <category>: <pattern> — <proposed_action>
    ```
-3. Collect all DISCUSS-tier findings, at any severity, and append them to the same `## Hindsight` section as `- [ ] [DISCUSS] <category>: <pattern> — <proposed_action>`. Set their `disposition` to `"discussed"`. DISCUSS exists precisely because a finding is ambiguous and needs a human; `--auto` is the one mode where no human is watching, so a DISCUSS finding that is neither applied nor flagged here vanishes silently.
+3. Append all DISCUSS-tier findings, regardless of severity, to the same section as `- [ ] [DISCUSS] <category>: <pattern> — <proposed_action>`. Set their `disposition` to `"discussed"` so they remain queued for human review.
 4. Write the full report to `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.md` (same as the Level 3 "Full report" path in 3e). Do not wait for user input.
 5. Proceed directly to 3e wrap-up with `applied = <count of auto-applied>`, `skipped = 0`, `discussed = <count of DISCUSS-tier plus HIGH/CRIT findings flagged to overnight-flags.md>`.
 
 **If `auto=false` (interactive mode, default):** Follow the full interactive flow below.
 
-**You MUST call the AskUserQuestion tool after presenting findings — unless it is genuinely unavailable in this tool context, which is the only exception (see Fallback below).** Do not print options as text because it is faster. Do not present a numbered list out of convenience. Do not skip this step. Do not proceed to detail views without calling AskUserQuestion first. If you find yourself typing "1.", "2.", "3." as navigation options while the tool IS available, STOP and use AskUserQuestion instead. This is the primary interactive mechanism and is required for the pipeline to function correctly.
-
-After presenting the header and findings summary, use AskUserQuestion to let the user navigate interactively. AskUserQuestion provides clickable options which is a better UX than plain text.
+**Use AskUserQuestion for navigation after presenting findings.** Use the text fallback only when the tool is unavailable; wait for a selection before showing details.
 
 ```
 Question: "What would you like to do?"
@@ -377,9 +355,9 @@ Options:
   - "Done" / "Finish hindsight, save state, skip remaining"
 ```
 
-**Fallback:** If AskUserQuestion is unavailable (eg running inside a subagent or restricted tool context), present the same options as a numbered text list and ask the user to type their choice. The interactive tool is preferred but not required for the pipeline to function.
+**Fallback:** If AskUserQuestion is unavailable, show the same options as a numbered list and wait for the user's choice.
 
-#### 3d. Finding Detail Flow (interactive mode only — skip if `auto=true`)
+#### 3d. Finding Detail Flow (interactive mode only: skip if `auto=true`)
 
 When the user selects a finding to review, show:
 
@@ -471,11 +449,11 @@ The `all_findings` array captures every finding with its final disposition, evid
 ```
    - `~/.claude/hindsight/logs/YYYY-MM-DD-changes.md` (changelog)
 
-The `unresolved_findings` array contains findings the user skipped. On the next hindsight, these are loaded in Phase 0 step 1 and re-checked. If the pattern recurs, severity bumps one level (LOW→MEDIUM, MEDIUM→HIGH), capping at HIGH — carry-forward findings never become CRITICAL, since CRITICAL is reserved for genuine safety/data-loss issues, not persistence. If not found in the new window, the finding is dropped silently.
+Store skipped findings in `unresolved_findings` for the next run's recurrence check. Increase recurring findings one severity level, capped at HIGH; persistence alone cannot make a finding CRITICAL. Drop findings absent from the new window.
 
 3. Verify both files were written by reading the first line of each (issue both Read calls in a single message).
 
-**Level 3 — Full report (on user request):**
+**Level 3: Full report (on user request):**
 
 Write `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.md` containing:
 - Executive summary with the branded header
@@ -485,26 +463,24 @@ Write `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.md` containing:
 
 #### 3f. Visual Report (only if --viz flag is set)
 
-**STOP. You MUST read [references/visual-report.md](references/visual-report.md) before executing this phase.** It contains the full HTML generation spec, inline CSS, local save flow, and validation steps.
+Read [references/visual-report.md](references/visual-report.md) before this phase for the HTML specification, styles, save flow, and validation.
 
 ## Error Handling
 
 - **No cclog.py**: Use fallback parser mode. Tell user: "Install session-history skill for robust parsing."
-- **0 sessions**: Detect this in Phase 0.5 (before launching subagents). Show: "No sessions found in the last `<window>`. Try widening: `/hindsight window=30d`". Do NOT proceed to Phase 2/3 with empty data — exit cleanly. Do NOT write `last-retro.json` (nothing to persist).
+- **0 sessions**: Detect this in Phase 0.5 (before launching subagents). Show: "No sessions found in the last `<window>`. Try widening: `/hindsight window=30d`". Exit before Phase 2/3 if no data exists. Do NOT write `last-retro.json` (nothing to persist).
 - **No memory DB**: Skip Memory Auditor. Note in output.
 - **No workspace files**: Skip Workspace Scanner. Note in output.
 - **Subagent failure**: Proceed with remaining subagent outputs. Note which source was unavailable.
 
 ## Context Compaction Protection
 
-This workflow runs 15+ minutes with subagents. After context compaction:
-1. Re-invoke the hindsight skill to reload this file (works for both plugin and local installs; the SKILL.md location is resolved by the skill loader, not a hardcoded path)
+After context compaction:
+1. Re-invoke hindsight to reload this file through the skill loader.
 2. Re-read the workflow state file (`/tmp/workflow-${RUN_ID}.json`) to determine current step
 3. Re-read persisted intermediate results from `/tmp/hindsight_*.json` (fingerprints, sessions, memory, workspace manifest)
-4. Re-read `~/.claude/hindsight/last-retro.json` from disk. This is unconditional — do not reuse values you believe you already know. After compaction you have no memory of prior turns, so anything that "feels" already loaded is a reconstruction, not data.
-5. Resume from the first non-done step in the state file — do not restart from Phase 0
-
-**STOP. You MUST re-read this file after any context compaction.** The workflow state file tracks which phases completed. Skip done phases and resume from the first pending or in-progress step.
+4. Re-read `~/.claude/hindsight/last-retro.json` from disk, even if it was loaded before compaction.
+5. Skip completed phases and resume the first pending or in-progress step.
 
 ## Privacy Rules
 

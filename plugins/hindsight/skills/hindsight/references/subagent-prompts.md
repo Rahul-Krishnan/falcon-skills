@@ -2,17 +2,15 @@
 
 ## Parallelism Fallback (when Task tool unavailable)
 
-If the Task tool is unavailable (eg running inside a nested subagent context), use a **collect-then-analyze** pattern that parallelizes the I/O-bound data collection via Bash backgrounding:
+If Task is unavailable, collect data with parallel Bash jobs, then analyze it in one pass.
 
-### Step A — Parallel data collection (Bash backgrounding)
+### Step A: Parallel data collection (Bash backgrounding)
 
 Run ALL raw data collection in a single Bash call with background jobs:
 
 ```bash
-# Collect all raw data in parallel
 (
-  # Fingerprint data (persisted across machines via ~/.claude sync)
-  # Each file is a complete JSON object (not JSONL), so use glob to read individually
+  # Fingerprints are JSON objects, not JSONL.
   python3 -c "
 import json, glob, os, sys
 fps = []
@@ -24,18 +22,15 @@ for path in sorted(glob.glob(os.path.expanduser('~/.claude/hindsight/fingerprint
 json.dump(fps, sys.stdout)
 " > /tmp/hindsight_fingerprints.json 2>/dev/null &
 
-  # Transcript data (current machine only)
-  # Enumerate projects, then fetch sessions for each
+  # List sessions for each local project.
   for proj in $(~/.claude/skills/session-history/scripts/cclog.py --format=json projects 2>/dev/null | python3 -c "import sys,json; [print(p['path']) for p in json.load(sys.stdin).get('projects',[])]"); do
     ~/.claude/skills/session-history/scripts/cclog.py --format=json --project="$proj" sessions 2>/dev/null
   done > /tmp/hindsight_sessions.json &
 
-  # Memory data
-  # (memory_recall must be called via MCP, so just mark as pending)
+  # Defer memory collection to MCP.
   touch /tmp/hindsight_memory_pending &
 
-  # Workspace files — discover and read config files from multiple locations
-  # Supports Falcon personality dir, generic CC, and project-level setups
+  # Discover Falcon, user, and project configuration files.
   python3 -c "
 import os, json
 ws = {}
@@ -43,7 +38,7 @@ ws = {}
 for n in ['MEMORY.md','ROUTING.md','PROJECTS.md','SOUL.md','IDENTITY.md','PEOPLE.md']:
     p = os.path.expanduser(f'~/Projects/falcon/personality/{n}')
     if os.path.isfile(p): ws[n] = p
-    # Also check smithing dir for PROJECTS.md
+    # Fall back to the smithing directory for PROJECTS.md.
     if n == 'PROJECTS.md':
         p2 = os.path.expanduser('~/Projects/falcon/.smithing/PROJECTS.md')
         if os.path.isfile(p2) and n not in ws: ws[n] = p2
@@ -54,7 +49,7 @@ for p in [os.path.expanduser('~/.claude/CLAUDE.md'), os.path.expanduser('~/.llms
 for p in ['CLAUDE.md', '.claude/CLAUDE.md']:
     if os.path.isfile(p): ws['project-CLAUDE.md'] = os.path.abspath(p); break
 json.dump(ws, open('/tmp/hindsight_ws_manifest.json','w'))
-# Copy each discovered file for scanner access
+# Copy discovered files for the scanner.
 for name, path in ws.items():
     tag = name.replace('.md','').lower().replace(' ','-')
     try:
@@ -68,9 +63,9 @@ for name, path in ws.items():
 
 Then call `memory_recall` (MCP tool, can't be backgrounded) to collect memory data.
 
-### Step B — Single-pass analysis
+### Step B: Single-pass analysis
 
-Instead of 3 separate LLM analysis passes, do ONE combined analysis pass over all collected data. Read the collected files from `/tmp/hindsight_*` and apply all 3 detection lenses (transcript patterns, memory audit, workspace scan) in a single structured output. This eliminates 2 full LLM reasoning passes worth of token overhead.
+Read `/tmp/hindsight_*` and analyze transcript patterns, memory, and workspace rules in one pass. Return one structured result.
 
 Structure the single-pass output as:
 ```json
@@ -84,8 +79,6 @@ Structure the single-pass output as:
 
 Then proceed to Phase 1.5 validation as normal.
 
-**Why this is faster:** The bottleneck in sequential fallback is 3 separate LLM analysis passes (~30K tokens each). By collecting data in parallel via Bash and analyzing in one pass, we cut from ~90K tokens to ~40K tokens and eliminate I/O wait time entirely.
-
 ## Subagent 1: Transcript Scanner
 
 ```
@@ -97,7 +90,7 @@ prompt: |
   TAXONOMY: [paste taxonomy.json categories section]
 
 UNRESOLVED FINDINGS FROM LAST RETRO: [paste the unresolved_findings array from setup_context, or "none"]
-Actively check whether each of these patterns recurs in this window. If you find evidence, report it as a normal finding using the SAME taxonomy `category` key, citing only evidence from the current window. This is what lets the main thread bump severity on patterns that keep coming back.
+Check each prior pattern for recurrence. Report matches under the same taxonomy `category` key with current-window evidence.
 
   INSTRUCTIONS:
 
@@ -105,7 +98,7 @@ Actively check whether each of these patterns recurs in this window. If you find
 
      A. FINGERPRINTS (persisted across machines via ~/.claude sync):
        Glob ~/.claude/hindsight/fingerprints/*.json
-       Read each file — it contains pre-extracted session metadata (corrections,
+       Read each file for session metadata (corrections,
        errors, tools used, files modified, timestamps).
        Filter to fingerprints within the analysis window using first_message/last_message.
        These are the PRIMARY cross-session data source when transcripts are unavailable.
@@ -215,7 +208,7 @@ prompt: |
      c. Staleness: memories referencing things that are likely outdated (old dates, completed projects)
      d. Correction clusters: many corrections about the same topic (indicates a persistent problem)
      e. Gaps: important behavioral rules that should exist but don't
-     f. Promotion candidates (3+ threshold): corrections or preferences about the same topic that appear 3+ times. These have graduated from one-off corrections to recurring patterns and should be promoted from memory DB to the relevant workspace file (MEMORY.md, ROUTING.md, SOUL.md, or a skill/command file). Tag each candidate with: the topic, the count, the target file for promotion, and a draft rule.
+     f. Promotion candidates (3+ threshold): corrections or preferences about the same topic that appear 3+ times. Propose a rule for MEMORY.md, ROUTING.md, SOUL.md, or a skill/command file. Include the topic, occurrence count, target file, and draft rule.
 
   4. OUTPUT FORMAT (strict JSON):
      {
@@ -254,7 +247,7 @@ prompt: |
      - ~/.claude/CLAUDE.md
      - ~/.llms/rules/personal.md
      - CLAUDE.md or .claude/CLAUDE.md in current directory
-     These cover the Falcon personality dir, generic CC, and project-level setups. If none exist, note it and continue.
+     If no files exist, note it and continue.
 
   2. ANALYZE FOR:
      a. Rule contradictions: two rules that conflict with each other
