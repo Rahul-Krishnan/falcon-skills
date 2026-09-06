@@ -893,12 +893,8 @@ class TestScriptTestCoverage(unittest.TestCase):
 
 
 class TestStructuralAuditScriptOutputValidates(unittest.TestCase):
-    """structural_audit.py's own --json output must satisfy the handoff schema.
-
-    Regression: the schema used to require transitions/handoffs plus 8 booleans
-    the script never emitted, so every audited run hard-stopped at Phase 2
-    handoff validation unless the model fabricated the fields.
-    """
+    """The structural audit's JSON output must satisfy its handoff schema without
+    fabricated per-transition fields."""
 
     def test_audit_output_passes_structural_audit_schema(self) -> None:
         from structural_audit import audit
@@ -1056,15 +1052,7 @@ class TestRunShapeTable(unittest.TestCase):
 
 
 class TestReadBackIsAGate(unittest.TestCase):
-    """`applied_edits.confirmed_on_disk` must be true, not merely present.
-
-    Regression: the contract was `_bool()`, which requires the key. A handoff
-    recording `confirmed_on_disk: false` validated, so the post-edit read-back
-    that phase2-improvement.md calls "a gate, not a nudge" was unenforced --
-    a run could report that its edits were not on disk and still hand off to
-    Phase 3, which compares before/after scores and auto-reverts against a
-    snapshot on the assumption that they are.
-    """
+    """confirmed_on_disk must be true before Phase 3 compares or reverts edits."""
 
     HANDOFF = {
         "edit_count": 1,
@@ -1096,12 +1084,7 @@ class TestReadBackIsAGate(unittest.TestCase):
         self.assertFalse(result.valid)
 
     def test_the_declared_paths_are_required(self) -> None:
-        """The scope guard attributes from this list, so an absent one halts.
-
-        `check_scope.py --verify` answers a missing declaration with
-        `not_measurable`, which halts the run anyway. Failing here instead
-        makes the halt say what is actually wrong.
-        """
+        """Missing edited_paths must fail with attribution guidance before the scope guard."""
         handoff = {k: v for k, v in self.HANDOFF.items() if k != "edited_paths"}
         result = validate_handoff({"applied_edits": handoff}, "applied_edits")
         self.assertFalse(result.valid)
@@ -1128,12 +1111,7 @@ class TestReadBackIsAGate(unittest.TestCase):
         )
 
     def test_the_constraint_is_opt_in(self) -> None:
-        """A plain boolean field still records false as a value, not an error.
-
-        Most of these booleans are findings (`has_state_persistence`,
-        `criteria_existed`): false is information the next step needs. Only a
-        field whose false value means the run may not continue opts in.
-        """
+        """Ordinary boolean findings may be false; only continuation gates require true."""
         from validate_handoff import _bool
 
         errors: list = []
@@ -1231,10 +1209,7 @@ class TestCliReadErrors(unittest.TestCase):
 
 
 class TestOutputDirIsLoadBearing(unittest.TestCase):
-    """r3-S5. `eval_results.output_dir` is what Phase 3 step 3a reads as
-    $PRIOR_OUTPUT_DIR, so an eval_results that omits it, or writes it empty,
-    leaves Phase 3 with no baseline and has to fail at this gate rather than
-    as check_eval_power's exit 2 a phase later."""
+    """Require output_dir before Phase 3 needs it as the baseline directory."""
 
     def _state(self, **overrides):
         block = {
@@ -1258,10 +1233,8 @@ class TestOutputDirIsLoadBearing(unittest.TestCase):
 
 
 class TestRoundScoresHaveASchema(unittest.TestCase):
-    """r3-S5. Phase 3 step 6 writes `round_{N}_scores`, and the next round
-    reads its `output_dir` (step 3a) and `per_test` (step 5); with no schema a
-    round could omit `output_dir` and round N+1 fell back to Phase 1's
-    baseline, crediting round N's gain to round N+1."""
+    """Round score records need output_dir so the next round cannot reuse Phase 1
+    and double-count the previous round's gain."""
 
     RECORD = {
         "output_dir": "/tmp/skill-eval/demo/reeval-1",
@@ -1345,11 +1318,7 @@ class TestRoundScoresHaveASchema(unittest.TestCase):
 
 
 class TestPreMigrationStateFilesGetAMigrationPath(unittest.TestCase):
-    """r4-S1. `eval_results.output_dir` went optional -> required-non-empty and
-    `power_verdict` was added as required, so a state file written before this
-    change and resumed after it (SKILL.md's resume protocol keeps runs alive
-    across sessions) hard-stops at the mandatory pre-Phase-2 gate. The stop is
-    correct; a stop that says only "required field missing" is a dead end."""
+    """Missing newly required output_dir or power_verdict must include migration guidance."""
 
     PRE_MIGRATION = {
         "results_path": "/tmp/skill-eval/demo/baseline/results.json",
@@ -1411,10 +1380,7 @@ class TestPreMigrationStateFilesGetAMigrationPath(unittest.TestCase):
 
 
 class TestSchemaListingsMatchWhatHandoffAccepts(unittest.TestCase):
-    """r4-N3. `--list-schemas` and the unknown-name error both printed
-    `round_scores` as a valid `--handoff` name, but `_schema_name` rejects it
-    by design, so `--handoff round_scores` exits 2. Only `main()`'s message
-    carried the clarifying parenthetical."""
+    """Every --handoff listing must explain that round_scores needs a concrete round key."""
 
     def _cli(self, *args):
         import json
@@ -1454,16 +1420,7 @@ class TestSchemaListingsMatchWhatHandoffAccepts(unittest.TestCase):
 
 
 class TestAPhase3RoundMustRecordItsScores(unittest.TestCase):
-    """r5-B5. `phase3_reevaluate` declared `produces: []`, and --all validated
-    only the `round_*_scores` keys that happened to be present, so a Phase 3
-    round that skipped step 6's record passed `validate_handoff.py --all`
-    clean. The next round's step 3a then fell back to
-    `eval_results.output_dir` -- Phase 1's baseline -- and credited round N's
-    gain to round N+1.
-
-    Same standard `convergence` is held to in validate_gates.REQUIRED_STEPS: a
-    record the workflow calls mandatory that this script does not check is
-    prose."""
+    """A completed Phase 3 step must provide a round score record in --step and --all."""
 
     RECORD = {
         "output_dir": "/tmp/skill-eval/demo/reeval-1",
@@ -1536,12 +1493,8 @@ class TestAPhase3RoundMustRecordItsScores(unittest.TestCase):
 
 
 class TestThePowerVerdictRemedyIsRunnable(unittest.TestCase):
-    """r5-B3. POWER_VERDICT_MIGRATION told the reader to "run
-    check_eval_power.py over this round's output_dir". That script's only
-    positional argument is the eval criteria file, and a directory there is an
-    explicit exit-2 usage error, so the printed remedy failed when followed
-    literally. A remedy that does not run is worse than no remedy: it sends
-    the operator looking for a broken script."""
+    """Power-verdict migration guidance must pass criteria positionally and score
+    files via --before/--after; a directory argument is a usage error."""
 
     def test_the_message_names_the_criteria_file_and_the_round_flags(self) -> None:
         self.assertIn("check_eval_power.py", POWER_VERDICT_MIGRATION)
@@ -1618,13 +1571,7 @@ class TestThePowerVerdictRemedyIsRunnable(unittest.TestCase):
 
 
 class TestTheRoundRecordCanNameItsScorer(unittest.TestCase):
-    """`scorer_fingerprint` is optional on both score records.
-
-    Step 5 re-reads the previous round from the state file, not from memory,
-    and after a compaction that record is all it has. Optional because every
-    state file written before score_execution.py recorded a fingerprint has
-    no value to copy, and a required field would hard-stop a resumed run.
-    """
+    """Scorer fingerprints remain optional for legacy score records on resume."""
 
     def _round(self, **extra):
         record = {
@@ -1663,12 +1610,7 @@ if __name__ == "__main__":
 
 
 class TestEditedPathsCarriesItsMigration(unittest.TestCase):
-    """r3-S2. `applied_edits.edited_paths` arrived required and non-empty with
-    the Step 6a scope guard, so a run whose Phase 2 handoff was recorded before
-    that and resumed after it hard-fails the mandatory pre-Phase-3 gate with a
-    bare "required field missing". This file already answers that situation for
-    `output_dir` and `power_verdict`; `_arr` just did not accept the note the
-    other spec builders did."""
+    """Missing or empty edited_paths must include recovery guidance for resumed states."""
 
     HANDOFF = {
         "edit_count": 3,

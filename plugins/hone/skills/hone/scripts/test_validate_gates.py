@@ -411,13 +411,7 @@ class TestScopeVerifyIsConditional(unittest.TestCase):
         self.assertIn("scope_verify", report["missing_steps"])
 
     def test_an_error_halt_is_not_failed_for_the_missing_event(self):
-        """Phase 2 writes edit_count at Step 6; scope_verify lands at Step 6a.
-
-        A crash between the two is a legitimate halt, and reporting it as a
-        missing required event turned the halt itself into a gate violation.
-        SKILL.md's resume note says the same: in error-halt the only required
-        event is the workflow_exit.
-        """
+        """A crash between edit recording and scope verification may omit scope_verify."""
         report = validate_gates(
             [gate("workflow_exit", result="fail")], "error-halt", edits_applied=True
         )
@@ -475,13 +469,7 @@ class TestHaltSequenceTail(unittest.TestCase):
         self.assertEqual(report["warnings"], [])
 
     def test_an_unemitted_step_in_the_tail_still_warns(self):
-        """Regression: a step Phase 3 never reached must not excuse the failure.
-
-        `convergence` is emitted, but only by Phase 3. A failed
-        `phase2_to_phase3` means Phase 3 never ran, so a `convergence` event
-        after it is invented. It was in HALT_SEQUENCE_STEPS anyway, so
-        appending one silenced this warning for any failed gate.
-        """
+        """A convergence event cannot excuse failure before Phase 3 was entered."""
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3", result="fail"),
@@ -493,17 +481,7 @@ class TestHaltSequenceTail(unittest.TestCase):
                     for w in report["warnings"]))
 
     def test_the_auto_revert_halt_in_emission_order_does_not_warn(self):
-        """Regression: the documented auto-revert halt warned.
-
-        Phase 3 emits `phase3_exit` (step 6) before `convergence` (step 7), so
-        a regression auto-revert halt has `convergence` in the tail behind the
-        failed `phase3_exit`. Every other fixture in this file used to list
-        the two the other way round, which is why nothing caught it: under the
-        real order `is_halt_tail` rejected the tail, `validate_gates` warned on
-        a correct halt, and `score_gate_compliance` scored it non-compliant.
-        `convergence` is mandatory, so the run cannot drop it to get its halt
-        shape back.
-        """
+        """The regression halt emits phase3_exit before convergence; preserve that order."""
         for convergence_result in ("pass", "fail"):
             with self.subTest(convergence=convergence_result):
                 gates = [
@@ -521,12 +499,7 @@ class TestHaltSequenceTail(unittest.TestCase):
 
 
 class TestResumedRuns(unittest.TestCase):
-    """A resumed run must record that it resumed (regression: TC-011).
-
-    The compaction-resume path was the one documented recovery path with no
-    gate event, so a correct resume left no trace and scored 0.0 on
-    gate_compliance.
-    """
+    """Resumption must record a resume gate event."""
 
     def _normal(self):
         return [
@@ -557,13 +530,7 @@ class TestResumedRuns(unittest.TestCase):
 
 
 class TestDocumentedCleanRunValidates(unittest.TestCase):
-    """A run that emits every documented gate event must pass its own exit gate.
-
-    `convergence` and `scope_verify` were added to REQUIRED_STEPS without the
-    instructions that emit them on the clean path, so every compliant run
-    failed here. These pin the two halves together: if the requirement moves,
-    the emission instructions have to move with it.
-    """
+    """Documented gate emissions and required events must agree."""
 
     STEPS = {
         "phase1_structural_audit": "done",
@@ -660,13 +627,7 @@ class TestResumedIsDerivedFromState(unittest.TestCase):
 
 
 class TestHaltTailMatchesTheScorer(unittest.TestCase):
-    """validate_gates and score_gate_compliance read one halt shape.
-
-    The comment above the fail-semantics loop claimed they already did; they
-    did not. `terminal` was `all(step in HALT_SEQUENCE_STEPS)`, satisfied by a
-    tail of `convergence` alone, while the scorer also required a
-    `workflow_exit`.
-    """
+    """Validation and scoring must agree on halt tails, including the required exit."""
 
     def test_tail_without_workflow_exit_warns(self):
         gates = [
@@ -702,16 +663,7 @@ class TestHaltTailMatchesTheScorer(unittest.TestCase):
 
 
 class TestRepeatedGateAttempts(unittest.TestCase):
-    """A gate emitted once per attempt is settled by its next attempt.
-
-    Phase 3's exit-2 branch emits `convergence` with `result: "fail"` and
-    `reason: ledger_missing`, rewrites the ledger, re-runs the check, and
-    emits a second `convergence`. That second event fails whenever the re-run
-    returns `escalate` or `capped`, so a CORRECT repair has no later `pass`
-    and, because the halt-tail slice is exclusive of the failing step, is not
-    its own halt either. It warned, and `score_gate_compliance` scored it
-    exactly as an ignored halt.
-    """
+    """A ledger_missing retry may itself fail; validate both attempts and their halt."""
 
     def test_the_exit_2_ledger_repair_does_not_warn(self):
         gates = [
@@ -738,15 +690,8 @@ class TestRepeatedGateAttempts(unittest.TestCase):
         self.assertEqual(report["warnings"], [])
 
     def test_a_recorded_confirm_extension_does_not_warn(self):
-        """capped -> halt -> --confirm grants rounds -> resume -> caps again.
-
-        `workflow_exit` sits BEFORE the `resume`: phase3-reevaluation.md puts
-        the human gate outside and after the FORCED halt, and requires the
-        exit event on the halt itself. Asking is what happens once the loop
-        has stopped, so the halt is on the record before the restart is. The
-        halt's exit PASSES: `capped` is a clean stop carrying a bad verdict,
-        and the gate table reserves `workflow_exit: fail` for an error halt.
-        """
+        """A capped run records workflow_exit:pass before human-approved resume.
+        A later cap must also halt; capped is a clean stop with a failing verdict."""
         gates = [
             gate("phase1_to_phase2"),
             gate("phase2_to_phase3"),
@@ -828,15 +773,7 @@ if __name__ == "__main__":
 
 
 class TestScopeVerifyCannotBeSwitchedOff(unittest.TestCase):
-    """r3-S1: the exemption had two ways in, one with a flag and one without.
-
-    `_expected_steps` documents that its conditions come off the state file
-    and "never read off a caller flag that could switch them off". The
-    error-halt exemption did exactly that: the effective mode it keyed on
-    could be a `--mode error-halt` the caller supplied. And the mode is
-    derived from `steps{}`, which the executor writes, so leaving one step at
-    `in_progress` reached the same exemption with no flag at all.
-    """
+    """Neither --mode nor unfinished steps alone may grant scope-check exemption."""
 
     @staticmethod
     def _steps(phase1: str, phase23: str) -> dict:
@@ -902,14 +839,7 @@ class TestScopeVerifyCannotBeSwitchedOff(unittest.TestCase):
         self.assertTrue(any("scope_verify" in w for w in report["warnings"]))
 
     def test_an_underivable_steps_map_cannot_reach_the_exemption(self):
-        """No steps{}, no derived mode, and --mode must not fill the gap.
-
-        `derive_gate_mode` returns None for a steps{} that is missing, empty,
-        or not a dict. main() used to pass that None straight through, which
-        validate_gates reads as "treat `mode` as the derived one" -- so the
-        caller's --mode error-halt reached the exemption after all, on any
-        state file whose steps{} was absent.
-        """
+        """Missing or unusable steps must not let --mode grant an exemption."""
         halt_shape = [
             gate("phase1_to_phase2", result="fail"),
             gate("workflow_exit", result="fail"),
@@ -954,14 +884,7 @@ class TestScopeVerifyCannotBeSwitchedOff(unittest.TestCase):
 
 
 class TestHaltReasonValidation(unittest.TestCase):
-    """`reason` is validated because a settlement predicate keys on it.
-
-    Before this, `reason` was validated nowhere -- not by this script, not by
-    the published schema. That is survivable while nothing reads the field and
-    is not survivable once a declaration buys an outcome: an executor writing
-    an arbitrary string, or the wrong type, or nothing at all, must never do
-    better than one telling the truth.
-    """
+    """Validate reasons used by settlement predicates; invalid claims cannot buy credit."""
 
     HALT = [
         gate("phase1_to_phase2"),
@@ -983,12 +906,7 @@ class TestHaltReasonValidation(unittest.TestCase):
                     [w for w in report["warnings"] if "reason" in w], [])
 
     def test_an_undeclared_halt_warns_and_names_the_vocabulary(self):
-        """A warning, not an error, and only for migration.
-
-        State files written before the field existed carry no `reason` and
-        stay valid. What they lose is settlements, not validity: an
-        undeclared halt forfeits both the restart and the in-place retry.
-        """
+        """Missing legacy reasons warn but remain valid; retry and restart credit is lost."""
         report = self._report(gate("convergence", result="fail"))
         self.assertTrue(report["valid"])
         matched = [w for w in report["warnings"]
@@ -998,36 +916,16 @@ class TestHaltReasonValidation(unittest.TestCase):
             self.assertIn(word, matched[0])
 
     def test_an_invented_reason_is_an_error(self):
-        """Junk is never better than silence, and here it is worse.
-
-        At the predicate the two are identical -- both resolve to `None` and
-        lose both settlements. This file is what separates them, and it
-        separates them in the direction a typo should go.
-        """
+        """Invalid reasons error; absent reasons warn. Both lose settlement credit."""
         report = self._report(
             gate("convergence", result="fail", reason="looks_fine_to_me"))
         self.assertFalse(report["valid"])
         self.assertTrue(any("is not one of" in e for e in report["errors"]))
 
     def test_a_legacy_free_form_reason_is_a_documented_breaking_change(self):
-        """A state file that validated before this enum existed now errors.
-
-        `reason` was in no `properties` block and was read by nothing, so a
-        free-form value on a failing `convergence` was legal. It is now an
-        error, which exits this script non-zero at the mechanical exit gate.
-        That is deliberate, not a regression to soften into a warning: the
-        state file is a per-run artifact at /tmp/workflow-${RUN_ID}.json
-        written and validated inside the same run, so there is no corpus to
-        migrate; the only `reason` the docs ever mandated on this step was
-        the literal `ledger_missing`, which is in the vocabulary; and nothing
-        in the state file records a schema version, so a warning added "for a
-        migration window" would have no way to close and would downgrade
-        typos along with legacy values.
-
-        An ABSENT reason stays a warning, because absence is what every
-        pre-`reason` file actually contains. Neither buys anything at the
-        predicate: both resolve to `None` and lose both settlements.
-        """
+        """Formerly legal free-form convergence reasons now error. The documented
+        ledger_missing value remains valid. Without schema versions, a temporary
+        warning would also hide typos indefinitely. Missing legacy reasons still warn."""
         legacy = self._report(
             gate("convergence", result="fail",
                  reason="escalate: f1,f2 open 4 rounds"))
@@ -1067,13 +965,7 @@ class TestHaltReasonValidation(unittest.TestCase):
         self.assertEqual(report["warnings"], [])
 
     def test_reason_stays_free_form_where_nothing_reads_it(self):
-        """SKILL.md's own examples must keep validating.
-
-        `corrupt_state_file` on a failing `workflow_exit` and "prior
-        evaluation reused" on a `fixonly_entry` are documented values that no
-        predicate reads, so closing the enum over every event would have
-        invalidated the skill's own text.
-        """
+        """Free-form reasons on steps outside HALT_REASONS must remain valid."""
         gates = [
             gate("fixonly_entry", reason="prior evaluation reused"),
             gate("phase2_to_phase3"),
@@ -1087,11 +979,7 @@ class TestHaltReasonValidation(unittest.TestCase):
         self.assertEqual(report["warnings"], [])
 
     def test_the_declaration_reaches_the_fail_semantics_check(self):
-        """The validator and the predicate read the same event.
-
-        Identical sequences, opposite verdicts, and the only difference is the
-        word on the failing event -- which is the whole change.
-        """
+        """Validation and settlement must interpret the same event reason consistently."""
         def run(reason):
             gates = self.HALT + [
                 gate("convergence", result="fail", reason=reason),

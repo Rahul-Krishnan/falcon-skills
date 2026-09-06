@@ -90,9 +90,7 @@ class TestInvalidCriteria(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
 
     def test_null_test_cases_reports_cleanly(self):
-        # Present-but-null test_cases: the type error must surface as a
-        # clean INVALID report (exit 1), not a TypeError traceback from
-        # the semantic duplicate-id pass iterating None.
+        # Null test_cases must produce INVALID, not crash the semantic pass.
         result = run_validate({"test_cases": None})
         self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
         self.assertIn("INVALID", result.stdout)
@@ -111,9 +109,7 @@ class TestInvalidCriteria(unittest.TestCase):
         self.assertNotIn("Traceback", result.stderr)
 
     def test_unhashable_id_reports_cleanly(self):
-        # An unhashable id (dict/list) raised TypeError at the seen_ids
-        # membership check, tracebacking both validate mode and --audit
-        # (which runs validate_schema first) with empty stdout.
+        # Unhashable IDs must produce findings without crashing validation or audit.
         data = {"test_cases": [dict(VALID_CRITERIA["test_cases"][0], id={"k": 1})]}
         result = run_validate(data, ["--json"])
         self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
@@ -287,9 +283,7 @@ class TestFileErrors(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
 
     def test_directory_path_exits_2_not_traceback(self):
-        # IsADirectoryError escaped the JSONDecodeError-only catch as a raw
-        # traceback with exit 1, violating the exit-2 usage-error contract
-        # and leaving --json consumers with zero parseable bytes.
+        # Directory inputs must return the documented exit-2 usage error.
         with tempfile.TemporaryDirectory() as tmp_dir:
             cmd = [sys.executable, SCRIPT, tmp_dir, "--json"]
             result = subprocess.run(cmd, capture_output=True, text=True)

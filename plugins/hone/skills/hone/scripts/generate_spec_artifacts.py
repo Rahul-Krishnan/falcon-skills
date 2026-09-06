@@ -42,14 +42,10 @@ def load_json(path):
 
 
 def load_criteria_json(path):
-    """Load eval_criteria.json and extract test case metadata.
+    """Return criteria metadata (id, name, category), or None on read/parse error.
 
-    Returns list of dicts with id, name, and category for each test case, or
-    None when the file cannot be read or parsed. None and [] are different
-    answers: [] is a criteria file that declares no test cases, None is no
-    usable criteria file at all. Collapsing them wrote an evals.json with zero
-    evals and exited 0, leaving grading.json's assertion_results pointing at
-    eval_ids that existed in no eval definition.
+    An empty list means valid criteria with no cases; None must stop generation
+    so grading never references missing eval definitions.
     """
     try:
         with open(path) as f:
@@ -84,13 +80,7 @@ def generate_evals(test_cases, results):
         result = results_by_id.get(tc_id, {})
 
         assertions = []
-        # Per-check semantic scores live in details.raw_semantic_scores
-        # (a {check_description: score} dict), the location the rest of the
-        # pipeline writes and reads (see analyze_results.py).
-        # get() tolerates explicit nulls for both details and the scores dict,
-        # exactly as generate_grading does; `raw_semantic_scores: null` is a
-        # documented shape from a judge that returned no per-check scores, and
-        # a raw dict.get handed that None straight to enumerate().
+        # Read the shared details.raw_semantic_scores mapping, tolerating nulls.
         details = get(result, "details", {}, expected=dict)
         raw_scores = get(details, "raw_semantic_scores", {}, expected=dict)
         for i, check in enumerate(raw_scores):
@@ -129,23 +119,15 @@ def generate_grading(results, det_scores):
         score = result.get("score", 0)
         det = det_by_id.get(tc_id, {})
         det_composite = det.get("composite", score)
-        # score_execution.py emits composite: null for inconclusive tests, and
-        # .get's fallback does not apply to a key present with null; unguarded,
-        # `det_composite >= 0.8` below would TypeError before any file is written.
+        # Inconclusive composites are null and cannot be compared numerically.
         if not isinstance(det_composite, (int, float)):
             det_composite = None
 
-        # Same location as generate_evals: details.raw_semantic_scores dict.
-        # expected=dict as in generate_evals: a judge that returned a list of
-        # check descriptions instead of a mapping raised AttributeError on
-        # .items(), and main() builds all four artifacts before writing any of
-        # them, so one malformed field cost the whole Step 10 set.
+        # Use the same typed mapping read as generate_evals.
         details = get(result, "details", {}, expected=dict)
         raw_scores = get(details, "raw_semantic_scores", {}, expected=dict)
         for i, (check, sc_score) in enumerate(raw_scores.items()):
-            # Same reason the det_composite guard above exists: a per-check
-            # score of null (or a stringified one) reached `>= 3.0` and raised
-            # TypeError. An unusable score is not a pass.
+            # Treat null or non-numeric per-check scores as unusable, not passing.
             if not isinstance(sc_score, (int, float)) or isinstance(sc_score, bool):
                 sc_score = None
             assertion_results.append(
@@ -201,24 +183,17 @@ def generate_timing(duration_ms, tokens_estimate):
 
 
 def generate_benchmark(results, det_scores, baseline_results, baseline_det):
-    """Generate benchmark.json: with_skill vs without_skill comparison.
+    """Generate a with_skill vs without_skill benchmark.
 
-    The delta is only computed between like metrics: deterministic composite
-    vs deterministic composite, or LLM-average vs LLM-average. The baseline
-    flow does not always run deterministic scoring, and subtracting an LLM
-    average from a deterministic composite (or from an absent baseline score,
-    which used to read as 0) reports a spurious skill benefit.
+    Compute deltas only between like metrics: deterministic composites or judge
+    averages. Missing baseline scores and mixed scorers cannot establish benefit.
     """
 
     def compute_summary(res, det):
         if not res:
             return None
         results_list = res.get("results", [])
-        # resolve_score is the canonical type-tolerant score reader; a raw
-        # r["score"] let a stringified "0.9" past the `is not None` filter and
-        # into sum(), losing the whole Step 10 set to a TypeError. default=None
-        # keeps a genuinely missing score out of the average instead of
-        # counting it as a failing 0.0.
+        # Use the type-tolerant score resolver; exclude missing scores from the average.
         scores = [
             s
             for s in (
@@ -227,8 +202,7 @@ def generate_benchmark(results, det_scores, baseline_results, baseline_det):
             )
             if s is not None
         ]
-        # A deterministic composite of 0.0 is a real (failing) score, not a
-        # missing one — only fall back to the LLM average when it is absent.
+        # Zero is a valid failing composite; fall back only when the score is absent.
         det_composite = det.get("composite_score") if det else None
         avg_score = round(sum(scores) / len(scores), 4) if scores else None
         if det_composite is not None:
@@ -280,10 +254,7 @@ def generate_benchmark(results, det_scores, baseline_results, baseline_det):
         delta = {
             "composite_delta": composite_delta,
             "metric": metric,
-            # pass_count derives solely from LLM score fields, so the delta is
-            # only meaningful when both runs actually have LLM scores; a
-            # deterministic-only run's pass_count of 0 is a metric artifact,
-            # not a regression (same like-metrics invariant as above).
+            # Compare pass counts only when both rounds have judge scores.
             "pass_count_delta": (
                 with_skill["pass_count"] - without_skill["pass_count"]
             )
@@ -336,10 +307,7 @@ def main():
 
     det_scores = load_json(det_path)
 
-    # Exit 1 per the documented codes rather than writing an empty evals.json:
-    # every downstream gate ("evals.json exists and is valid JSON") passes on
-    # the empty file, so a mistyped --criteria published a spec artifact set
-    # whose grading references eval_ids that are defined nowhere.
+    # Stop on unusable criteria rather than generating undefined eval references.
     test_cases = load_criteria_json(args.criteria)
     if test_cases is None:
         print(

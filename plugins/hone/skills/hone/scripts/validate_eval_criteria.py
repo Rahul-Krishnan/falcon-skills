@@ -111,14 +111,8 @@ DEFAULT_SKILL_TOOLS = [
 ]
 
 
-# These helpers go through hone_common.get with an `expected` type, which
-# treats an explicit JSON null OR a wrong-typed value the same as an absent
-# key. Audit mode runs on schema-invalid files by design, so any of these
-# fields can arrive as null or mistyped; a raw tc.get(k, default) crashes
-# the audit (e.g. None.strip(), ["list"].strip(), "str" + ["Skill"]) before
-# any findings reach stdout, and the auto-repair path never runs. The
-# string-list getters additionally drop non-string items so per-value
-# checks (regex search, .lower()) never meet an int or a dict.
+# Typed null-safe getters tolerate malformed audit inputs. String-list getters
+# also discard non-string items before regex checks and suggested repairs.
 
 
 def _string_items(values: list) -> list[str]:
@@ -147,13 +141,7 @@ def _get_runner_context(tc: dict) -> str:
 
 
 def _get_allowed_tools(tc: dict) -> list[str]:
-    """Get allowed_tools from test case (string items only).
-
-    _string_items matters here as much as for required_present/absent: a
-    mixed-type list would otherwise propagate non-string junk into
-    suggested_fix, and the auto-repair would write a file that still fails
-    the pre-launch schema gate, burning the repair pass.
-    """
+    """Return string allowed_tools entries only, so suggested repairs remain valid."""
     return _string_items(get(tc, "allowed_tools", [], expected=list))
 
 
@@ -168,14 +156,8 @@ def _get_prompt(tc: dict) -> str:
 
 
 def _get_id(tc: dict) -> str:
-    """Get the test case id, always as a string.
-
-    `id` is the one field used as a set member and sort key: a non-string
-    id (int, list, dict) crashed `sorted(unfixable_test_ids)` /
-    `unfixable_test_ids.add()` with a traceback and no JSON on stdout for
-    the criteria-audit consumer. expected=str maps any such id to
-    "unknown", same as an absent one.
-    """
+    """Return a string test ID, defaulting to unknown for missing or invalid values.
+    IDs must be hashable and sortable for audit findings."""
     return get(tc, "id", "unknown", expected=str)
 
 
@@ -276,12 +258,9 @@ def check_runner_context_present(tc: dict) -> dict | None:
     return None
 
 
-# Filesystem-mutating bash patterns that must not appear in runner_context.
-# These cause real side effects during eval runs (created scripts, written
-# files) and break test isolation — especially on unattended runs.
-# The regexes are shared with side_effect_guard.py via hone_common (this list
-# was previously a local fork and drifted); the SETUP: block pattern is
-# validator-specific hygiene layered on top.
+# Reject filesystem mutations and SETUP blocks in runner_context to preserve
+# eval isolation. Share mutation patterns with side_effect_guard via hone_common;
+# the SETUP pattern is specific to this validator.
 _FS_MUTATING_PATTERNS = [
     (re.compile(pattern), label) for pattern, label in FS_MUTATING_BASH_PATTERNS
 ] + [
@@ -292,22 +271,11 @@ _SIMULATION_HEADER = "SIMULATION MODE:"
 
 
 def check_runner_context_hygiene(tc: dict) -> list[dict]:
-    """Enforce side-effect-free, simulation-only runner_context.
-
-    Rules:
-      1. No filesystem-mutating commands (mkdir, printf >, echo >, cp).
-      2. No SETUP: blocks — they imply real setup. Use SIMULATION: blocks
-         that describe what a command would output instead.
-      3. When runner_context is non-empty, it must declare SIMULATION MODE
-         so the executor knows not to issue real tool calls.
-
-    The side_effect_guard sandbox block (everything from SANDBOX_HEADER on)
-    is exempt from rules 1-2: the guard's own simulation listing quotes the
-    commands it sandboxes ("cp → simulate: ..."), and criteria reuse runs
-    this audit on the on-disk file a previous run's guard already modified.
-    Flagging the guard's output would tell the executor to rewrite the very
-    block that keeps the eval side-effect-free.
-    """
+    """Require simulation-only runner_context: no filesystem mutations or SETUP
+    blocks, and a SIMULATION MODE declaration when context is non-empty.
+    Use SIMULATION blocks to describe command outputs.
+    The injected sandbox block is exempt from mutation and SETUP checks because
+    it quotes the commands it simulates and persists across criteria reuse."""
     findings: list[dict] = []
     tc_id = _get_id(tc)
     rc = _get_runner_context(tc)
@@ -366,12 +334,8 @@ def check_allowed_tools_audit(tc: dict) -> dict | None:
             },
         }
 
-    # Check if prompt invokes a skill but Skill not in allowed_tools.
-    # find_slash_invocations is the shared hardened detector (hone_common),
-    # the same one side_effect_guard uses for sandboxing: the previous local
-    # regex required whitespace/EOL after the command, so "Run /forge.",
-    # "Invoke /hone, then report", and backticked `/forge` all silently
-    # skipped the missing_skill_tool repair while still being sandboxed.
+    # Require Skill in allowed_tools for slash invocations, using the same
+    # detector as side_effect_guard so punctuation and backticks match consistently.
     if find_slash_invocations(prompt) and "Skill" not in tools:
         return {
             "test_id": tc_id,
@@ -447,13 +411,8 @@ def check_semantic_check_quality(tc: dict) -> list[dict]:
 
 
 def check_minimum_test_count(test_cases: list) -> dict | None:
-    """Warn if fewer than 3 test cases.
-
-    The contract (references/phase1-evaluation.md, Step 5 -> Step 6 gate)
-    is at least 3 test cases, or 2 for the lightweight complexity tier.
-    This script cannot see the tier, so 2 test cases draw a non-blocking
-    warning for the tier-aware gate to interpret, never a hard failure.
-    """
+    """Warn below three cases. Lightweight artifacts allow two; this validator
+    cannot see tier, so the tier-aware gate decides whether that warning matters."""
     if len(test_cases) < 3:
         return {
             "test_id": "_global",
@@ -566,13 +525,9 @@ def audit(criteria_path: str, artifact_path: str | None) -> dict:
     Does NOT modify the criteria file. Returns findings for the caller
     (hone main thread) to apply via Edit tool, preserving JSON formatting.
     """
-    # Run schema validation first.
-    # Route its summary to stderr: audit mode's contract is JSON on stdout.
-    # A failure must NOT short-circuit the audit: the schema requires exactly
-    # the fields (runner_context, non-empty allowed_tools) that the per-test
-    # checks below exist to catch and repair, so an early return here would
-    # report a legacy criteria file as "clean" and leave it to fail later at
-    # the pre-launch schema gate with no auto-repair chance left.
+    # Send schema diagnostics to stderr to keep stdout valid JSON. Continue the
+    # audit after schema errors so per-test checks can propose repairs for the
+    # missing context and tools that caused them.
     schema_rc = validate_schema(criteria_path, output_stream=sys.stderr)
     schema_valid = schema_rc == 0
 

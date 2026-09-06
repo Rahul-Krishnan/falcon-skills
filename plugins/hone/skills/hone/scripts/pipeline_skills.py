@@ -1,20 +1,10 @@
 #!/usr/bin/env python3
-"""Canonical pipeline skill/command name sets.
+"""Shared pipeline skill names for sandboxing and criteria validation.
 
-Single source of truth shared by side_effect_guard.py (which decides what to
-sandbox during eval runs) and validate_eval_criteria.py (which flags eval
-criteria that expect full pipeline execution). These two lists previously
-lived in each script independently and drifted apart; keep membership changes
-here so both consumers stay in sync.
-
-These are common names from a plan/implement/publish style pipeline. Extend
-the set without editing plugin source (edits are lost on update) via the
-HONE_SIDE_EFFECTING_SKILLS environment variable: a comma-separated list of
-skill/command names (leading slashes optional). The guard additionally fails
-closed: any slash-command delegation it detects that is NOT in this set is
-still sandboxed (see side_effect_guard.py), so this list is a refinement, not
-the safety boundary.
-
+side_effect_guard.py and validate_eval_criteria.py use these sets. Extend
+them through HONE_SIDE_EFFECTING_SKILLS (comma-separated, slashes optional)
+without editing plugin files that updates replace. The guard also sandboxes
+unknown slash-command delegations, so omissions here do not grant access.
 Stdlib only.
 """
 
@@ -49,9 +39,6 @@ def _extra_skills_from_env() -> frozenset[str]:
     )
 
 
-# Skills whose invocation must be sandboxed during evals. The guard's
-# definition of a side effect is broad (git push down to mkdir), and even
-# planning-stage commands can delegate to publishing stages, so every pipeline
-# command is included. The sandbox header is inert for a run that never
-# reaches a guarded command.
+# Sandbox every pipeline command: planning stages can delegate to publishing.
+# The simulation header has no effect unless a guarded command is reached.
 SIDE_EFFECTING_SKILLS = frozenset(PIPELINE_COMMANDS) | _extra_skills_from_env()

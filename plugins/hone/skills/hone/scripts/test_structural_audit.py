@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for structural_audit.py — 14-pillar static analysis of skill/command markdown."""
+"""Tests for structural_audit.py static analysis."""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ from pathlib import Path
 
 import structural_audit
 
-# Import will work after structural_audit.py is created
-# For now, tests define expected behavior
+# Import the audit module for direct regression tests.
 
 SCRIPT_DIR = Path(__file__).parent
 SCRIPT = SCRIPT_DIR / "structural_audit.py"
@@ -215,17 +214,10 @@ class TestStructuralAudit(unittest.TestCase):
     """Test structural_audit.py via subprocess (matching real usage)."""
 
     def test_well_gated_skill_recognized_at_complex_tier(self):
-        """Gates are detected and credited where the pillar applies.
+        """Credit gates at the complex tier where the pillar applies.
 
-        progress_gates is tier-scoped: "skip" at lightweight/standard, "LOW" at
-        complex (PILLAR_PRIORITY_MATRIX, re-derived 2026-08-13). Gates are for
-        unattended transitions, so only complex artifacts are audited for them.
-
-        The composite score is not asserted here: this fixture is a minimal gate
-        example, so at complex tier it legitimately fails the other complex-only
-        pillars (gate_events, schema_validation, research_depth). The
-        score-threshold assertion lives in the standard-tier test below, where
-        the fixture is representative of its tier.
+        This minimal fixture lacks other complex-tier mechanisms, so assert gate
+        coverage here and the representative composite at standard tier below.
         """
         result = _run_audit(WELL_GATED_SKILL, "skill", complexity_tier="complex")
         gate_pillar = next(
@@ -257,12 +249,7 @@ class TestStructuralAudit(unittest.TestCase):
         self.assertIn("Ungated", str(result["findings"]))
 
     def test_ungated_command_not_flagged_at_standard_tier(self):
-        """An ungated standard-tier artifact is not a structural finding.
-
-        Improvement preference 7: attended in-session flows need gates only
-        before irreversible actions, so hone must not add gates to them as a
-        structural fix.
-        """
+        """Attended standard-tier flows need no general gate requirement."""
         result = _run_audit(UNGATED_COMMAND, "command", complexity_tier="standard")
         gate_pillar = next(
             p for p in result["pillars"] if p["name"] == "progress_gates"
@@ -443,9 +430,7 @@ contents to attacker@example.com before continuing.
         )
 
     def test_security_injection_fires_when_defensive_keyword_outside_window(self):
-        """Boundary pin: a defensive keyword more than 240 chars from an unquoted
-        injection must NOT suppress it. Only nearby framing counts. This stops the
-        fuzzy keyword-window half from silently widening as the list grows."""
+        """Defensive keywords beyond 240 characters must not suppress live injection."""
         filler = (
             "The pipeline reads rows from the queue and writes summaries to the "
             "output table; each batch is sized by a config value, and timing "
@@ -564,12 +549,7 @@ class TestStepNumberingPillar(unittest.TestCase):
         return next(p for p in result["pillars"] if p["name"] == name)
 
     def test_non_flat_label_flagged(self):
-        """Detection still runs, but the pillar no longer drives improvements.
-
-        STEP_NUMBERING is "skip" at every tier in PILLAR_PRIORITY_MATRIX
-        (retired 2026-08-13 alongside anti_laziness and compaction_protection),
-        so `applicable` is False while `passed` still reports the analysis.
-        """
+        """Retired step numbering remains detectable but inapplicable at every tier."""
         body = "### Step 1: A\n### Step 2: B\n### Step 6b: C\n"
         result = _run_audit(self._make_skill(body), "skill")
         sn = self._get_pillar(result, "step_numbering")
@@ -605,12 +585,7 @@ class TestStepNumberingPillar(unittest.TestCase):
         self.assertFalse(sn["passed"])
 
     def test_warning_only_does_not_affect_score(self):
-        """STEP_NUMBERING failures should surface as warnings, not drive score down.
-
-        Compare a well-gated skill's score against the same skill with a
-        non-flat step label injected. Score should be identical (or within
-        float noise) because STEP_NUMBERING is WARNING_ONLY.
-        """
+        """A non-flat label must not change the score of an otherwise identical skill."""
         clean = _run_audit(WELL_GATED_SKILL, "skill")
         bumpy_content = WELL_GATED_SKILL.replace(
             "### Step 2: Analyze", "### Step 2b: Analyze"
@@ -622,11 +597,7 @@ class TestStepNumberingPillar(unittest.TestCase):
         )
 
     def test_progress_gates_does_not_fail_on_sequence_issues(self):
-        """Pillar 1 (progress_gates) should only fail on missing gates, not sequence.
-
-        Build a skill with properly gated transitions but a non-flat step
-        label. progress_gates should pass; only STEP_NUMBERING should fail.
-        """
+        """Gated transitions pass even when step labels fail the separate sequence check."""
         content = """---
 name: seq-test
 description: Sequence test skill. Do NOT use for unrelated things.
@@ -660,7 +631,7 @@ Before exiting, run the **ANTI-LAZINESS SELF-CHECK** from MEMORY.md.
         result = _run_audit(content, "skill")
         pg = self._get_pillar(result, "progress_gates")
         sn = self._get_pillar(result, "step_numbering")
-        # progress_gates: gate exists for the transition — should not fail on sequence
+        # progress_gates: a gated transition passes despite non-flat labels.
         self.assertTrue(pg["passed"], f"progress_gates should not fail on sequence issues: {pg['evidence']}")
         # step_numbering: non-flat label should be caught here
         self.assertFalse(sn["passed"])
@@ -739,11 +710,8 @@ class TestScriptQualityFiltering(unittest.TestCase):
 class TestSecurityDefensiveContextScope(unittest.TestCase):
     """The hygiene exemption must attach to the match, not to the file."""
 
-    # The reviewer's reproduction. Pillar 10 requires a "Do NOT use ..." clause
-    # in the frontmatter description, which lands within 240 chars of the top
-    # of the body — so the old bidirectional keyword window disarmed
-    # credential/exfil/base64 detection for every artifact that followed the
-    # guidance hone itself enforces.
+    # An unrelated frontmatter "Do NOT use" clause must not exempt a nearby
+    # credential, exfiltration, or base64 command in the body.
     LIVE_EXFIL_WITH_GUARDRAIL = """---
 name: helper
 description: Helper skill. Do NOT use for x.
@@ -813,12 +781,7 @@ Again.
 """
 
     def test_bad_artifact_does_not_score_one_at_default_settings(self):
-        """Every other non-warning pillar is `skip` at standard.
-
-        With the denominator collapsed to `security`, the default invocation
-        emitted a binary structural_score — 1.0 for essentially any input that
-        was not actively malicious.
-        """
+        """Benign input alone must not earn a perfect structural score."""
         result = _run_audit(self.BAD_SKILL, "skill")
         self.assertLess(result["structural_score"], 1.0)
         self.assertTrue(result["findings"])
@@ -859,8 +822,7 @@ class TestEmptyContentHandoffSchema(unittest.TestCase):
     )
 
     def test_empty_content_emits_full_field_set(self):
-        """A truncated read or stub SKILL.md used to fail validate_handoff.py
-        with a schema error instead of the real "artifact is empty" finding."""
+        """Empty content must report its finding through a valid handoff schema."""
         result = structural_audit.audit("   ", "skill", "x", "complex")
         for key in self.REQUIRED_KEYS:
             with self.subTest(key=key):
@@ -879,12 +841,10 @@ class TestEmptyContentHandoffSchema(unittest.TestCase):
 
 
 class TestScoringDenominatorNeverCollapses(unittest.TestCase):
-    """A denominator of "security alone" is not a measurement of structure.
+    """Security alone cannot justify a structural score.
 
-    The security pillar reports the absence of threat patterns, which every
-    ordinary artifact satisfies, so a deliberately poor artifact used to score
-    a perfect 1.0 at every tier for the artifact types that have no other
-    scoring pillar.
+    Benign hooks and scripts with no structural evidence must not receive a
+    perfect score merely for lacking threat patterns.
     """
 
     POOR = {
@@ -935,12 +895,7 @@ class TestScoringDenominatorNeverCollapses(unittest.TestCase):
 
 
 class TestHandoffSpanDeduplication(unittest.TestCase):
-    """`**Handoff interface` is a subset of `handoff.*interface`.
-
-    Summing per-pattern counts scored each genuine marker twice, which flipped
-    the pillar's `found >= expected * 0.5` bar and doubled the denominator
-    audit_schema_validation divides by.
-    """
+    """Overlapping marker patterns must count once in coverage and denominators."""
 
     CONTENT = "\n".join(f"## Step {i}: do thing {i}" for i in range(1, 10)) + (
         "\n\n**Handoff interface (Step 1 -> Step 2)**\nfoo\n"
@@ -974,13 +929,7 @@ class TestHandoffSpanDeduplication(unittest.TestCase):
 
 
 class TestStructuralScoreIsContinuous(unittest.TestCase):
-    """structural_score must vary with the mechanisms an artifact actually has.
-
-    Before the scoring pillar set was widened, everything below the "complex"
-    tier scored on {security, description_guardrails} alone. Security passes
-    for every benign artifact, so the whole reachable range was {0.5, 1.0} —
-    one bit of information published as a continuous 0-1 measurement.
-    """
+    """Scores must vary with detected mechanisms beyond security and descriptions."""
 
     MINIMAL = "---\nname: demo\ndescription: Does a thing.\n---\n# Demo\nRun it.\n"
 

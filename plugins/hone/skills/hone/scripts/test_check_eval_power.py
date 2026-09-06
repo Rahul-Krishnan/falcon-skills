@@ -20,11 +20,8 @@ def _results(scores):
     return {"test_results": [{"test_id": k, "score": v} for k, v in scores.items()]}
 
 
-# The scorer identity every deterministic_scores.json written by the current
-# score_execution.py carries (metadata.scorer_fingerprint). Fixtures that mean
-# "two rounds scored the same way" have to say so now: absence of the field is
-# an unknown scorer, and check_compare refuses to rule on one. Tests about the
-# fingerprint itself set their own values.
+# Fixtures comparing the same scorer record its fingerprint explicitly.
+# Missing fingerprints mean unknown scoring logic; identity tests set their own.
 SAME_SCORER = "ast1:0000000000000000"
 
 
@@ -133,10 +130,7 @@ class TestCompare(unittest.TestCase):
         self.assertEqual(report["wins"], 2)
 
     def test_scorer_per_test_list_shape_is_paired(self):
-        # score_from_results emits per_test as a LIST of records keyed by
-        # test_id/composite, and that payload is what --before/--after are
-        # pointed at. Treating per_test as a mapping only sent it down the
-        # raw-results branch, which paired nothing.
+        # Accept the scorer's list of test_id/composite records.
         def scored(scores):
             return {
                 "composite_score": 0.5,
@@ -223,9 +217,7 @@ class TestSizingHonoursAlpha(unittest.TestCase):
                             loose["min_discordant_for_significance"])
 
     def test_a_stricter_alpha_raises_the_floor_and_the_verdict(self):
-        """Reporting the alpha floor is not enforcing it: five cases at
-        alpha 0.01 need seven discordant votes, so no arrangement of wins can
-        reach significance and `powered` was arithmetically false."""
+        """At alpha 0.01, five cases cannot meet the seven-discordant-vote floor."""
         from check_eval_power import check_sizing
 
         criteria = {"test_cases": [
@@ -252,9 +244,7 @@ class TestSizingHonoursAlpha(unittest.TestCase):
 
 
 class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
-    """Phase 2 decides on the deterministic composite, so the sign test must
-    run over that file and not over results.json, which carries a per-test
-    `score` only when an LLM judge ran."""
+    """Compare deterministic composites, the scores Phase 2 acts on."""
 
     def _round(self, tmp, name, results, deterministic=None):
         import json
@@ -314,11 +304,7 @@ class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
             self.assertEqual(source, "results")
 
     def test_an_all_null_round_is_still_the_deterministic_scorer(self):
-        """A round where every composite came back null is the signature of a
-        catastrophic regression, not a missing scorer. Inferring the source
-        from the score map being truthy called it `results`, so pairing it
-        against a normal round reported a scorer swap that never happened and
-        buried the real finding."""
+        """All-null composites mean lost evidence, not a switch to judge scoring."""
         import tempfile
 
         from check_eval_power import _load_round, _scores_by_id
@@ -364,9 +350,7 @@ class TestRoundLoaderPrefersDeterministicScores(unittest.TestCase):
 
 
 class TestRoundPathsMustBeFiles(unittest.TestCase):
-    """`--before r1` resolves to `<parent-of-r1>/deterministic_scores.json`:
-    either an unhelpful "Is a directory", or both flags silently reading the
-    same file for an all-ties `underpowered`."""
+    """Reject directory paths before sibling lookup can read the wrong round."""
 
     def test_a_directory_is_a_usage_error(self):
         import tempfile
@@ -407,8 +391,7 @@ class TestRoundPathsMustBeFiles(unittest.TestCase):
 
 
 class TestSizingLinePrintsTheEnforcedFloor(unittest.TestCase):
-    """The human-readable line and the error must not disagree about which
-    floor is in force: alpha can raise the floor above --min-stimuli."""
+    """Print the alpha-adjusted floor actually enforced."""
 
     def test_the_printed_floor_is_the_effective_one(self):
         import json
@@ -445,8 +428,7 @@ class TestSizingLinePrintsTheEnforcedFloor(unittest.TestCase):
 
 
 class TestSizingCountsOnlyScorableCases(unittest.TestCase):
-    """The floor has to count the cases compare mode can actually pair, or
-    Step 6b certifies a suite Step 9a can never rule on."""
+    """Size only cases eligible for deterministic pairing."""
 
     def _criteria(self, scorable, unscorable):
         cases = [
@@ -459,9 +441,7 @@ class TestSizingCountsOnlyScorableCases(unittest.TestCase):
         return {"test_cases": cases}
 
     def test_unscorable_cases_do_not_clear_the_floor(self):
-        # The reported case: 6 cases, 3 of them knowledge_extraction. Sizing
-        # said `powered`, the comparison could only ever pair 3, and returned
-        # `underpowered` on a clean sweep forever.
+        # Six cases, three unscorable: sizing must not certify all six as pairable.
         report = check_sizing(self._criteria(3, 3), 5, 1)
         self.assertEqual(report["verdict"], "underpowered")
         self.assertEqual(report["distinct_cases"], 6)
@@ -494,8 +474,7 @@ class TestSizingCountsOnlyScorableCases(unittest.TestCase):
 
 
 class TestZeroPairingIsNotATieHeavyRound(unittest.TestCase):
-    """`underpowered` sent the agent to Step 6b's remedy, which cannot fix a
-    test-id mismatch or an absent deterministic_scores.json."""
+    """Report input mismatches separately from insufficient discordant votes."""
 
     def test_no_shared_ids_is_not_measurable(self):
         report = check_compare(
@@ -599,9 +578,7 @@ class TestSizingOverridesAreStated(unittest.TestCase):
         self.assertFalse(comparison["warnings"])
 
     def test_a_hidden_not_measurable_says_the_remedy_differs(self):
-        """Step 9a records the surface verdict, and `underpowered`'s remedy is
-        "add test cases" -- which cannot fix the input problem behind a
-        `not_measurable` comparison."""
+        """A hidden input problem needs repair, not more test cases."""
         from check_eval_power import _combined_verdict
 
         comparison = {"verdict": "not_measurable", "warnings": []}
@@ -615,10 +592,7 @@ class TestSizingOverridesAreStated(unittest.TestCase):
 
 
 class TestArtifactTypeScopesTheProfileExclusion(unittest.TestCase):
-    """score_execution.py's `hook` and `script` branches score the same
-    dimensions for every profile (the profile only moves the critical-dim cap),
-    so excluding `knowledge_extraction` there reported a fully pairable suite
-    `underpowered` with a warning that was false."""
+    """Hooks and scripts can score knowledge_extraction and must count those cases."""
 
     CRITERIA = {"test_cases": [
         {"id": f"TC-{i}", "test_profile": "knowledge_extraction"}
@@ -655,10 +629,7 @@ def _deterministic(scores, inconclusive=()):
 
 
 class TestInconclusiveCasesAreNotSilentlyDropped(unittest.TestCase):
-    """A case that scored last round and produced no evidence this round is a
-    finding. `load_deterministic_scores` drops it from the score map, so the
-    comparison used to rule on the survivors: eight cases at 0.7, then five at
-    0.8 and three inconclusive, read `improved` with exit 0 and no warning."""
+    """Cases losing evidence must block comparison over the surviving scores."""
 
     def _rounds(self, tmp):
         import json
@@ -738,10 +709,7 @@ class TestInconclusiveCasesAreNotSilentlyDropped(unittest.TestCase):
 
 
 class TestTieClassificationSurvivesFloatRepresentation(unittest.TestCase):
-    """`0.85 - 0.80` is 0.04999999999999993 and `0.55 - 0.50` is
-    0.050000000000000044, so an unrounded comparison against TIE_EPSILON
-    called the same nominal movement a tie in one suite and a win in the
-    other, flipping the round's verdict."""
+    """Equal nominal deltas must classify alike despite floating-point noise."""
 
     def _shift(self, start, end, n=8):
         before = _deterministic({f"t{i}": start for i in range(n)})
@@ -773,9 +741,7 @@ class TestTieClassificationSurvivesFloatRepresentation(unittest.TestCase):
 
 
 class TestTwoJudgeRoundsAreNotCompared(unittest.TestCase):
-    """Both sides falling back to results.json agree on a scorer, but not on
-    the one Phase 2 acts on. Judge 0.2 -> 0.9 on six ids used to read
-    `improved` with exit 0 and a text report that never named the scorer."""
+    """Matching judge sources still cannot justify action on deterministic scores."""
 
     def _judge_round(self, tmp, name, score, n=6):
         import json
@@ -830,9 +796,7 @@ class TestTwoJudgeRoundsAreNotCompared(unittest.TestCase):
 
 
 class TestProfileMirrorsTheScorer(unittest.TestCase):
-    """`category` is a required enum with a different value set from
-    `test_profile`, and the scorer maps only `error_handling` from it. Falling
-    back to it wholesale counted five categories as five profiles."""
+    """Only error_handling maps from category to profile; other categories are not diversity."""
 
     CATEGORIES = ("invocation", "execution", "edge_case", "task_completion", "error_handling")
 
@@ -921,10 +885,7 @@ def _write_criteria(tmp, cases):
 
 
 class TestCompareModeReadsTheRecordedArtifactType(unittest.TestCase):
-    """score_execution.py records `metadata.artifact_type` in every
-    deterministic_scores.json. Sizing off the flag alone buried a hook suite's
-    genuine `improved` under `underpowered` whenever the flag was left off, and
-    Step 9a records the top-level verdict."""
+    """Size using recorded scorer metadata when the caller omits artifact type."""
 
     CASES = [{"id": f"t{i}", "test_profile": "execution"} for i in range(4)] + [
         {"id": "t4", "test_profile": "knowledge_extraction"}
@@ -990,9 +951,7 @@ class TestCompareModeReadsTheRecordedArtifactType(unittest.TestCase):
 
 
 class TestACorruptDeterministicFileIsAUsageError(unittest.TestCase):
-    """hone_common's loaders swallow a JSONDecodeError to `{}`, which reported
-    a truncated deterministic file as a zero-pair criteria mismatch that never
-    named the file."""
+    """Report corrupt deterministic JSON before tolerant loaders hide it as empty."""
 
     def test_invalid_json_exits_2_and_names_the_file(self):
         import tempfile
@@ -1020,9 +979,7 @@ class TestACorruptDeterministicFileIsAUsageError(unittest.TestCase):
 
 
 class TestAMissingBaselineIsNamedAsSuch(unittest.TestCase):
-    """Every --before case inconclusive and every --after case scored is a
-    round with no baseline, not a criteria mismatch; the mismatch message sent
-    the agent to check paths and test ids that were fine."""
+    """An inconclusive before-round has no baseline, even if test ids match."""
 
     def test_all_recovered_cases_name_the_missing_baseline(self):
         before = _deterministic({}, inconclusive=[f"t{i}" for i in range(5)])
@@ -1043,11 +1000,7 @@ class TestAMissingBaselineIsNamedAsSuch(unittest.TestCase):
         self.assertIn("no test id is present in both rounds", report["errors"][0])
 
     def test_one_new_after_case_does_not_suppress_the_diagnosis(self):
-        # r4-N1. `no_baseline` was gated on `not unpaired_after`, so a single
-        # genuinely new case in the after round handed a collapsed baseline
-        # back to the generic mismatch text, sending the agent to check paths
-        # and test ids that match. The new id is a second fact about the same
-        # round, so it is named rather than allowed to change the diagnosis.
+        # New after-only ids must not hide an inconclusive baseline for matching ids.
         before = _deterministic({}, inconclusive=[f"t{i}" for i in range(5)])
         after = _deterministic({f"t{i}": 0.9 for i in range(5)} | {"new1": 0.9})
         report = check_compare(before, after, 0.05, "deterministic", "deterministic")
@@ -1078,9 +1031,7 @@ class TestIdsAreComparedAsStrings(unittest.TestCase):
 
 
 class TestProfileDiversityIsNotAskedOfHooksAndScripts(unittest.TestCase):
-    """The hook and script scoring paths score the same dimensions for every
-    profile, so the min-profiles warning pointed those suites at a remedy that
-    changes no measured property."""
+    """Profile changes do not change the dimensions measured for hooks and scripts."""
 
     CASES = [{"id": f"t{i}"} for i in range(5)]
 
@@ -1119,12 +1070,7 @@ class TestResultsFallbackSharesHoneCommonsShape(unittest.TestCase):
 
 
 class TestFalsyIdsSurviveTheResultsFallback(unittest.TestCase):
-    """r4-N2. `_scores_by_id` resolved the id with an `or` chain over
-    `test_id`/`id`/`name`, which drops an integer `0`. `check_sizing._case_id`
-    already handled that case deliberately, so a round carrying `"test_id": 0`
-    was counted by sizing and silently unpaired by the comparison: the pair
-    vanished from `paired_cases` and appeared in neither unpaired list, which
-    is the one report that would have surfaced it."""
+    """Preserve numeric id 0 in both sizing and raw-result pairing."""
 
     def test_an_integer_zero_id_pairs(self):
         before = {"test_results": [{"test_id": 0, "score": 0.4},
@@ -1156,12 +1102,11 @@ class TestFalsyIdsSurviveTheResultsFallback(unittest.TestCase):
 
 
 class TestUnderpoweredSizingIsAdvisoryNotAHalt(unittest.TestCase):
-    """Step 6b runs on every route and is not skippable, but below the floor
-    it warns rather than halting. hone's own generation minimums (2 cases on
-    the lightweight tier, 3 at the Step 3/5 gates, 4 standard) certify suites
-    under any floor this script can enforce; a blocking floor made those tiers
-    unrunnable, and the only escape was padding the suite with near-duplicates,
-    which is the anti-pattern Step 6b warns against."""
+    """Suites below the power floor may continue with a warning.
+
+    The generator permits 2-4 cases; requiring statistical power at this gate
+    would block valid suites or encourage duplicate padding.
+    """
 
     def _write(self, tmp, cases):
         import json
@@ -1238,9 +1183,7 @@ class TestUnderpoweredSizingIsAdvisoryNotAHalt(unittest.TestCase):
         self.assertEqual(report["advisories"], [])
 
     def test_duplicate_ids_still_block_and_exit_one(self):
-        """Not every sizing finding went advisory. Duplicate ids break the
-        identity the next round pairs on, so carrying that forward is not
-        safe the way a small-but-honest suite is."""
+        """Duplicate ids break pairing and remain blocking despite advisory sizing."""
         import json
         import tempfile
 
@@ -1255,8 +1198,7 @@ class TestUnderpoweredSizingIsAdvisoryNotAHalt(unittest.TestCase):
         self.assertTrue(any("duplicate" in e for e in report["errors"]))
 
     def test_a_genuine_input_error_still_exits_two(self):
-        """The advisory exit must not swallow the error exits: a bad path, an
-        unreadable file, and a non-object root are all still failures."""
+        """Advisory sizing must preserve path, read, and root-shape errors."""
         import os
         import tempfile
 
@@ -1282,15 +1224,10 @@ class TestUnderpoweredSizingIsAdvisoryNotAHalt(unittest.TestCase):
 
 
 class TestAdvisoryHoldsInBothDirections(unittest.TestCase):
-    """Making Step 6b advisory routes under-floor suites into Phase 3 as the
-    common path instead of halting them at Phase 1. Phase 3 step 5 keys its
-    auto-revert off the power verdict, so the verdict an underpowered round
-    hands it must never read `regressed` -- otherwise the change just feeds an
-    auto-revert that Step 9a calls unjustified."""
+    """Underpowered suites justify neither promotion nor auto-revert in Phase 3."""
 
-    # Four scorable cases against a floor of five, so sizing reads
-    # `underpowered`, while all five ids pair and sweep one way, so the
-    # comparison nominally reads `regressed`. This is the reviewer's scenario.
+    # Sizing sees four scorable cases below a floor of five, even when all
+    # five score ids happen to pair and produce a nominal regression.
     CASES = [
         {"id": f"TC-00{i}", "test_profile": "execution"} for i in range(1, 5)
     ] + [{"id": "TC-005", "test_profile": "knowledge_extraction"}]
@@ -1373,14 +1310,7 @@ class TestAdvisoryHoldsInBothDirections(unittest.TestCase):
 
 
 class TestTheAdvisoryLineIsSizingOnly(unittest.TestCase):
-    """r5-B2. The text report's advisory line was gated on `not blocking and
-    verdict != "powered"`. In compare mode `blocking` is `verdict !=
-    "improved"`, so the one compare verdict that reached the line was
-    `improved`: a 6W/0L/0T comparison (p=0.0156, exit 0) printed "it justifies
-    neither a promotion nor a revert", the exact opposite of Step 9a's rule
-    for `improved` ("Act on it"). The JSON was always right; the operator
-    reading the terminal was told to ignore the result the run exists to
-    produce."""
+    """An improved comparison must not print the underpowered sizing warning."""
 
     CASES = [{"id": f"t{i}", "test_profile": "execution"} for i in range(6)]
     ADVISORY = "justifies neither a promotion nor a revert"
@@ -1443,15 +1373,10 @@ class TestTheAdvisoryLineIsSizingOnly(unittest.TestCase):
 
 
 class TestTheScorerThatProducedEachRoundIsChecked(unittest.TestCase):
-    """A comparison is only a comparison when one scorer produced both sides.
+    """Compare scorer fingerprints, regardless of how the scorer change landed.
 
-    The rule Phase 3 had was provenance: re-score the previous round "when the
-    scorer itself changed this round", meaning when a hone run edited
-    score_execution.py. A scorer change landing through a merged PR fired it
-    for nobody. PR #16 moved the gate_compliance mean 0.859 -> 0.713 on a
-    dimension weighted 0.151, against a 0.1 auto-revert threshold, and the 144
-    stored baselines carried nothing that revealed it. The trigger is now
-    evidence: `metadata.scorer_fingerprint`, compared.
+    A merged scorer change can alter old baselines just as a local edit can.
+    The round metadata must reveal that mismatch.
     """
 
     CASES = [{"id": f"t{i}", "test_profile": "execution"} for i in range(6)] + [
@@ -1500,9 +1425,7 @@ class TestTheScorerThatProducedEachRoundIsChecked(unittest.TestCase):
         self.assertIn("Re-score", said)
 
     def test_a_baseline_with_no_fingerprint_is_not_assumed_unchanged(self):
-        # The 144 stored baselines: no metadata.scorer_fingerprint at all.
-        # Reading that as "same scorer" is what let a merged scorer change
-        # auto-revert a round's working edits on its first re-evaluation.
+        # Baselines without fingerprints require re-scoring before comparison.
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1568,11 +1491,7 @@ class TestTheScorerThatProducedEachRoundIsChecked(unittest.TestCase):
         )
 
     def test_a_real_scorer_change_is_visible_end_to_end(self):
-        """The gap, closed: score the same results.json under two scorers.
-
-        Byte-identical executor output, one constant moved, and the
-        comparison sees a scorer rather than a round.
-        """
+        """Identical executor results scored under changed logic must expose a scorer mismatch."""
         import json
         import os
         import shutil

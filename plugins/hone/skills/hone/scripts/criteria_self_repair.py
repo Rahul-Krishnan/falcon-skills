@@ -75,21 +75,13 @@ def _check_recursive_timeout(test_result: dict) -> bool:
     """Test timed out because it launched a recursive evaluation run."""
     details = get(test_result, "details", {})
     timeout_analysis = get(details, "timeout_analysis", "")
-    # expected=(int, float): get() normalizes an explicit null but not a wrong
-    # type, so a stringified "1200" from the LLM-assembled results.json reached
-    # the `>= 600` comparison below and raised out of match_patterns before it
-    # returned — one malformed field killed the repair pass for every test in
-    # the file. bool is an int subclass, hence the extra check.
+    # Reject non-numeric durations before comparison; bool needs a separate guard.
     duration = get(test_result, "duration_seconds", 0, expected=(int, float))
     if isinstance(duration, bool):
         duration = 0
     score = get(test_result, "score", 1.0)
 
-    # Gate on the failing threshold, not exactly 0.0: on deterministic-only
-    # rounds match_patterns normalizes result["score"] to the deterministic
-    # composite, and score_execution clamps every dimension to a small floor
-    # before the weighted sum, so a floored total failure scores ~0.05 and a
-    # `score > 0.0` bail made this pattern unreachable on those rounds.
+    # Use the failing threshold because deterministic failures bottom out near 0.05.
     if score >= CRITERIA_BUG_THRESHOLD:
         return False
 
@@ -278,11 +270,7 @@ def match_patterns(results_path: str) -> dict:
 
     results = data.get("results", [])
     det_scores = load_deterministic_scores(results_path)
-    # Inconclusive tests were never measured, so they are not failures. Without
-    # this, resolve_score's 0.0 default put every one of them in `unmatched`
-    # with recommendation "human_review". Not a rare shape: score_execution
-    # marks every knowledge-extraction test inconclusive unconditionally, so it
-    # fired on ordinary runs. analyze_results excludes them the same way.
+    # Exclude unmeasured tests from failures, matching analyze_results.
     inconclusive_ids = load_inconclusive_ids(results_path)
     matched = []
     unmatched = []
@@ -293,18 +281,10 @@ def match_patterns(results_path: str) -> dict:
         if test_id in inconclusive_ids:
             inconclusive.append({"test_id": test_id, "reason": "never_measured"})
             continue
-        # Canonical fallback chain (score / final_score / deterministic
-        # composite / 0.0), preferring the result's own score: deterministic-only
-        # rounds carry no per-test score in results.json, and defaulting a
-        # still-missing score to 1.0 made every scoreless failing test look
-        # passing and silently no-opped self-repair.
+        # Resolve scores through the shared fallback chain. A missing score must
+        # not default to passing and silently suppress repair.
         score = resolve_score(result, det_scores, prefer_deterministic=False)
-        # Normalize once: condition functions read result["score"] directly.
-        # Overwrite anything non-numeric, not just None. resolve_score already
-        # treats a stringified "0.85" or a list as absent and falls through, so
-        # leaving the raw value in place let it reach `score >= THRESHOLD` and
-        # raise TypeError. results.json is assembled by an LLM subagent, so
-        # this type slop is the shape hone_common already defends against.
+        # Normalize scores before condition functions compare them numerically.
         stored = result.get("score")
         if not isinstance(stored, (int, float)) or isinstance(stored, bool):
             result["score"] = score

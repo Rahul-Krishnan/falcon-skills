@@ -27,13 +27,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-# Null-tolerant dict access (same-directory flat import). State files under
-# validation are exactly where present-but-null keys show up; a raw
-# state.get("steps", {}) returns None for {"steps": null} and crashes.
-# The run-shape table (RUN_SHAPE_ACTIVE_STEPS / derive_run_shape) is the
-# authoritative statement of which steps run in each documented run shape
-# (normal, fix-only, no-improvement); see hone_common's module docstring.
-# Both --step and --all consult it via _input_expected below.
+# Use shared null-safe access and run-shape rules for both --step and --all.
 from hone_common import RUN_SHAPE_ACTIVE_STEPS, derive_run_shape
 from hone_common import get as null_safe_get
 
@@ -63,17 +57,8 @@ def _str(required: bool = True, non_empty: bool = False,
 
 
 def _dir(migration: str) -> dict:
-    """A required non-empty string naming a DIRECTORY, not a file inside it.
-
-    `output_dir` changed meaning in the same change that made it required: it
-    held the path to results.json, it now holds the directory containing it.
-    An old value passes the non-empty check untouched and then resolves
-    `$PRIOR_OUTPUT_DIR/deterministic_scores.json` to
-    `.../results.json/deterministic_scores.json`, a path that cannot exist,
-    so the baseline reads as absent a phase later with nothing on stderr.
-    Here is the only place that can catch the old shape while it still knows
-    what the field means, and name the migration in the message.
-    """
+    """Require a directory path. Legacy output_dir values pointed at results.json;
+    reject that shape here with migration guidance before baseline lookup fails."""
     spec = _str(required=True, non_empty=True, migration=migration)
     spec["dir_path"] = True
     return spec
@@ -97,15 +82,8 @@ def _num(
 
 def _bool(required: bool = True, must_be_true: bool = False,
           false_message: str | None = None) -> dict:
-    """A boolean field. `must_be_true` makes the value, not the key, the gate.
-
-    Some of these fields record a check the run is required to have passed
-    before it may hand off at all. For those, requiring only that the key is
-    present validates the sentence "I checked, and it failed" as readily as
-    "I checked, and it passed" -- the read-back becomes a nudge with a schema
-    around it. `false_message` says what the false value means, so the error
-    names the halt rather than the type.
-    """
+    """Define a boolean field. must_be_true requires a successful check;
+    false_message explains the failure instead of reporting a type error."""
     spec: dict = {"type": "boolean", "required": required}
     if must_be_true:
         spec["must_be_true"] = True
@@ -163,32 +141,15 @@ def _baseline() -> dict:
 
 
 def _scorer_fingerprint() -> dict:
-    """`metadata.scorer_fingerprint` copied out of this round's scores.
-
-    Optional, because every state file written before score_execution.py
-    recorded one has no value to copy, and because step 5 already has a
-    mechanical guard: step 3a's `check_eval_power.py` reads the fingerprint
-    from each round's deterministic_scores.json and returns `not_measurable`
-    on a mismatch or an absence, which the power precondition turns into "do
-    not auto-revert". What this field adds is survival: after a compaction
-    the state file is what the next round re-reads, and a record that names
-    its own scorer can say whether its baseline is still comparable without
-    re-reading a directory that may have been pruned.
-    """
+    """Optional scorer fingerprint copied from this round's metadata for resumptions.
+    Legacy states may omit it. check_eval_power independently treats missing or
+    mismatched score-file fingerprints as not_measurable, blocking auto-revert."""
     return _str(required=False, non_empty=True)
 
 
-# Migration hints. `eval_results.output_dir` went optional -> required and
-# `power_verdict` was added as required in the same change, so a state file
-# written before it and resumed after it (SKILL.md's resume protocol keeps
-# runs alive across sessions) hard-stops at the mandatory pre-Phase-2 gate
-# with nothing but "required field missing" to act on. The gate is correct to
-# stop -- Phase 2 must not act on a composite with no power verdict beside
-# it -- but a hard stop that does not say how to move is a dead end, and the
-# validator is the only component that knows both the old shape and the new
-# one. These travel with the field specs so the message arrives at the field
-# that is missing. references/phase1-evaluation.md carries the same steps in
-# prose; keep the two in step.
+# Migration hints for newly required output_dir and power_verdict fields.
+# Attach remedies to field errors so older resumed states can be repaired.
+# Keep these instructions aligned with phase1-evaluation.md.
 OUTPUT_DIR_MIGRATION = (
     "state files written before the power and overfit gates landed either "
     "omit this field or carry the pre-change meaning, the path to "
@@ -196,14 +157,9 @@ OUTPUT_DIR_MIGRATION = (
     "results.json and deterministic_scores.json, and leave the file path "
     "itself in results_path"
 )
-# check_eval_power.py's positional argument is the EVAL CRITERIA FILE; the
-# round directories reach it through --before/--after, as paths to each
-# round's deterministic_scores.json. "Run it over this round's output_dir"
-# read as a remedy that takes the directory positionally, and a directory
-# there is an explicit exit-2 usage error -- a printed remedy that fails when
-# followed literally is worse than none. SKILL.md's resume section and
-# references/phase1-evaluation.md carry the same command; keep the three in
-# step.
+# check_eval_power takes the criteria file positionally and score-file paths
+# via --before/--after. Keep this command aligned with SKILL.md resume guidance
+# and phase1-evaluation.md; a directory argument exits 2.
 POWER_VERDICT_MIGRATION = (
     "state files written before the power and overfit gates landed omit this "
     "field. To migrate, run check_eval_power.py on the EVAL CRITERIA FILE "
@@ -217,14 +173,9 @@ POWER_VERDICT_MIGRATION = (
     "--before/--after) and records that verdict instead (powered or "
     "underpowered)"
 )
-# `applied_edits.edited_paths` arrived required and non-empty with the scope
-# guard, so a run that recorded its Phase 2 handoff before the guard landed and
-# resumed after it hits the mandatory pre-Phase-3 gate with nothing to act on.
-# Unlike the two above, the remedy is not a re-run of a script: the executor is
-# the only thing that knows which files it wrote, and the paths have to be
-# recovered rather than recomputed. Say so, and say what to do when they cannot
-# be. references/phase2-improvement.md Step 6 carries the same instruction;
-# keep the two in step.
+# Older states lack required edited_paths. Recover the executor's written
+# paths from its records; a script cannot infer authorship. Keep the recovery
+# and unrecoverable-case guidance aligned with phase2-improvement.md Step 6.
 EDITED_PATHS_MIGRATION = (
     "state files written before the Step 6a scope guard landed have no "
     "edited_paths, because nothing read it then. To migrate, list every file "
@@ -271,12 +222,9 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             ),
         },
     },
-    # Step 2 -> Phase 2 structural findings
-    # transitions/handoffs are optional: structural_audit.py computes gate and
-    # handoff coverage as document-wide aggregates, not per-transition, so the
-    # script cannot emit honest per-item entries. The model MAY enrich the
-    # handoff with them (validated against the item schemas when present).
-    # The has_*/*_needed booleans ARE emitted deterministically by the script.
+    # Step 2 -> Phase 2 structural findings. The script emits aggregate coverage
+    # and has_*/*_needed booleans. Optional per-item transitions/handoffs may be
+    # model-enriched and are validated when present.
     "structural_audit": {
         "fields": {
             # null when no scoring pillar beyond the security scan applies to
@@ -368,12 +316,8 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     "generated_criteria": {
         "fields": {
             "criteria_path": _str(non_empty=True),
-            # Absolute floor 2, not 3: the contract is "at least 3 test
-            # cases, 2 for the lightweight complexity tier"
-            # (references/phase1-evaluation.md, Step 5 -> Step 6 gate). This
-            # schema cannot see the tier, so it enforces the lower bound;
-            # the tier-aware floor lives in the doc gate, which carries the
-            # lightweight carve-out explicitly.
+            # Enforce the tier-independent floor of two. The doc gate requires
+            # three except for lightweight artifacts; this schema cannot see tier.
             "test_count": _num(min_value=2),
             "validation_passed": _bool(),
             "dimensions": _arr(items={"type": "string"}, non_empty=True),
@@ -441,14 +385,9 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             ),
         },
     },
-    # Phase 1 -> Phase 2
-    # score_execution.py deliberately emits composite_score: null with grade
-    # "INCONCLUSIVE" when no test is conclusive, and per-test status
-    # "inconclusive" (score null) / "score_error". The schema must be able to
-    # represent that output, or an all-inconclusive run has no legal encoding
-    # and the mandatory pre-Phase-2 gate hard-stops with nothing to fix.
-    # Documented in references/phase1-evaluation.md ("Handoff interface
-    # (Phase 1 -> Phase 2)"); keep the enums there in sync with these.
+    # Phase 1 -> Phase 2. Allow null/INCONCLUSIVE composites and inconclusive
+    # or score_error tests, matching scorer output. Keep these enums aligned
+    # with phase1-evaluation.md.
     "eval_results": {
         "fields": {
             # Directory holding results.json and deterministic_scores.json.
@@ -479,13 +418,9 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
                 non_empty=True,
             ),
             "actionable_failures": _num(min_value=0),
-            # Steps 6b and 9a (references/phase1-evaluation.md): the power
-            # verdict recorded beside the composite. `powered` and
-            # `underpowered` are the sizing values a first round writes; the
-            # other four come from the before/after comparison. Required,
-            # because a composite without it is the number Phase 2 must not
-            # act on: an eval_results that omits it fails this gate the same
-            # way one carrying a value outside the enum ("pass") does.
+            # Required power verdict beside the composite. First-round sizing yields
+            # powered/underpowered; comparisons yield the other values. Phase 2
+            # must not act on a composite without this verdict.
             "power_verdict": _enum(
                 ["powered", "underpowered", "improved", "regressed",
                  "inconclusive", "not_measurable"],
@@ -501,12 +436,9 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             "scorer_fingerprint": _scorer_fingerprint(),
         },
     },
-    # Phase 3 step 6 -> the next round's step 3a and step 5
-    # (references/phase3-reevaluation.md). Stored under `round_{N}_scores`,
-    # one key per round, so state keys matching ROUND_SCORES_KEY resolve to
-    # this schema and --handoff takes the concrete key. Without `output_dir`
-    # round N+1 falls back to Phase 1's baseline and credits round N's gain
-    # to itself.
+    # Phase 3 step 6 -> next round's baseline. Concrete round_<N>_scores keys
+    # resolve to this schema. output_dir prevents reuse of the Phase 1 baseline
+    # and double-counting the previous round's gain.
     "round_scores": {
         "fields": {
             "output_dir": _dir(OUTPUT_DIR_MIGRATION),
@@ -538,14 +470,8 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             "scorer_fingerprint": _scorer_fingerprint(),
         },
     },
-    # P2 Step 1 -> Step 1.7
-    # Inconclusive tests (analyze_results --triage: classification
-    # "inconclusive", score null) route to excluded[] with reason
-    # "inconclusive" — never actionable_failures. Same widening as
-    # eval_results above: without the slot an inconclusive run has no legal
-    # encoding and the pre-Phase-2 gate hard-stops. Documented in
-    # references/phase2-improvement.md ("Handoff interface (P2 Step 1 ->
-    # Step 2)"); update both together.
+    # P2 Step 1 -> Step 1.7. Inconclusive tests go to excluded[] with reason
+    # inconclusive and score null. Keep the Phase 2 handoff reference aligned.
     "triaged_results": {
         "fields": {
             "actionable_failures": _arr(
@@ -687,16 +613,8 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     "applied_edits": {
         "fields": {
             "edit_count": _num(min_value=1),
-            # True, not merely present. phase2-improvement.md calls the
-            # post-edit read-back "a gate, not a nudge" on the strength of
-            # this contract, and the step's gate checklist requires that the
-            # re-read confirm every planned edit. A run whose read-back did
-            # not confirm the edits has nothing to hand Phase 3: Phase 3
-            # compares before/after scores and auto-reverts from
-            # `artifact_before_snapshot`, both of which assume the edits are
-            # on disk. The documented failure path (the stale-write guard)
-            # STOPs without emitting this handoff at all, so no legitimate
-            # flow records false here.
+            # Read-back must confirm every planned edit before Phase 3 compares
+            # scores or auto-reverts. Failed verification halts without this handoff.
             "confirmed_on_disk": _bool(
                 must_be_true=True,
                 false_message=(
@@ -707,17 +625,11 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
             ),
             "artifact_before_snapshot": _str(non_empty=True),
             "syntax_check_passed": _bool(),
-            # The paths this round wrote, which is what the scope guard
-            # attributes from. No comparison of two tree states can tell this
-            # run's write from the user's editor saving the same file, so
-            # `check_scope.py --verify` reads the run's own declaration
-            # instead: a declared out-of-scope change is a violation it may
-            # revert, an undeclared one belongs to someone else and only gets
-            # reported. Required and non-empty, because `edit_count >= 1` is:
-            # a run that applied edits and cannot name a single file it wrote
-            # has nothing to hand the guard, and the guard's answer for a
-            # missing declaration is `not_measurable` -- a halt either way, so
-            # it fails here where the message says what is wrong.
+            # Declare this round's written paths for check_scope --verify. Tree diffs
+            # cannot distinguish executor writes from concurrent user edits. Declared
+            # out-of-scope writes may be reverted; undeclared changes are only reported.
+            # At least one path is required because edit_count >= 1; missing attribution
+            # otherwise yields not_measurable and halts the guard.
             "edited_paths": _arr(
                 items={"type": "string", "non_empty": True},
                 non_empty=True,
@@ -749,13 +661,8 @@ HANDOFF_SCHEMAS: dict[str, dict] = {
     # Hook pre-scan metadata (Step 1 discovery for hooks)
     "hook_metadata": {
         "fields": {
-            # Not an enum: the hook-event vocabulary belongs to the Claude
-            # Code harness, not this plugin. A hard-coded list went stale
-            # (SubagentStop, PreCompact, SessionEnd were rejected as
-            # invalid, blocking /hone on correct hooks) and every future
-            # harness event would need a plugin release. Any non-empty
-            # string is accepted; references/artifact-profiles.md documents
-            # the vocabulary as open.
+            # Accept any non-empty hook-event string. The harness owns this
+            # vocabulary; a plugin enum would reject newly added events.
             "event_type": _str(non_empty=True),
             "has_throttle": _bool(),
             "shebang": _str(),
@@ -804,15 +711,9 @@ STEP_CONTRACTS: dict[str, dict[str, list[str]]] = {
         "requires": ["eval_results"],
         "produces": ["improvement_findings", "improvement_plan", "applied_edits"],
     },
-    # A Phase 3 round's output is its score record, written by step 6 under
-    # `round_{N}_scores`. Declaring nothing here was the same class of hole
-    # `convergence` was in validate_gates.REQUIRED_STEPS: a mandatory record
-    # this script does not check is prose. A round that skipped step 6 passed
-    # `--all` clean, and the next round's step 3a then fell back to
-    # `eval_results.output_dir` -- Phase 1's baseline -- crediting round N's
-    # gain to round N+1. The concrete key carries a round number the schema
-    # table cannot name in advance, so the SCHEMA name stands in here and
-    # `_validate_round_scores` resolves it to whichever rounds are on disk.
+    # Phase 3 must produce a round_<N>_scores record. Use its schema name here;
+    # _validate_round_scores resolves concrete keys and catches missing records
+    # before the next round falls back to Phase 1's baseline.
     "phase3_reevaluate": {
         "requires": ["applied_edits", "eval_results"],
         "produces": [ROUND_SCORES_SCHEMA],
@@ -831,27 +732,12 @@ HANDOFF_PRODUCERS: dict[str, str] = {
 
 
 def _input_expected(steps: dict, handoff_name: str) -> bool:
-    """Whether a required input handoff must exist in this run shape.
+    """True when this run shape requires the handoff.
 
-    CONTRACT (the prose statement of hone_common's run-shape table, which
-    SKILL.md's run shapes defer to): a handoff is required exactly when the
-    step that produces it is active in the derived run shape AND actually
-    ran. Requiring inputs unconditionally forces the executor of a shape
-    that legitimately skips producers (fix-only skips all of Phase 1,
-    no-improvement skips Phases 2-3) to fabricate handoff blocks; requiring
-    only present keys lets a corrupt state file (no artifact_context, hence
-    no original_backup_path for Phase 3 auto-revert) sail through as a
-    vacuous ALL PASS. The table threads between the two, and it applies to
-    "done" consumers as much as "skipped" ones — a fix-only run's done
-    phase2_improve must not demand the eval_results that shape never
-    produces.
-
-    For handoffs produced by a tracked step (HANDOFF_PRODUCERS), the
-    producer must be active in the shape and "done". The untracked
-    producers (artifact_context, routing_decision, from Phase 1's Discover
-    and routing steps) run whenever Phase 1 runs at all, so they are
-    expected exactly when the shape activates Phase 1.
-    """
+    Tracked producers must be active and done. Untracked Phase 1 producers
+    (artifact_context and routing_decision) are expected whenever Phase 1 is
+    active. Apply this to done and skipped consumers alike: demand missing
+    outputs from steps that ran, but never fabricate inputs from skipped phases."""
     active = RUN_SHAPE_ACTIVE_STEPS[derive_run_shape(steps)]
     producer = HANDOFF_PRODUCERS.get(handoff_name)
     if producer is not None:
@@ -881,13 +767,7 @@ class ValidationResult:
 
 
 def _with_migration(message: str, spec: dict) -> str:
-    """`message`, plus the field's migration note when it carries one.
-
-    A field that became required, or changed meaning, after state files were
-    already on disk needs the remedy attached to the failure. "required field
-    missing" alone is a hard stop at a mandatory gate with no next move; see
-    OUTPUT_DIR_MIGRATION and POWER_VERDICT_MIGRATION.
-    """
+    """Append the field's migration note, if any, so older states get a repair path."""
     migration = spec.get("migration")
     return f"{message}. Migration: {migration}" if migration else message
 
@@ -953,13 +833,8 @@ def validate_value(
                 )
             )
         elif isinstance(value, float) and not math.isfinite(value):
-            # json.loads parses the nonstandard NaN/Infinity/-Infinity
-            # literals by default. Comparisons cannot reject NaN, and the
-            # min-only bounds below cannot reject +Infinity (inf >= 0), so
-            # downstream range/regression checks would silently bless
-            # either. Guarded to floats: ints are always finite, and
-            # math.isfinite raises OverflowError on ints too large for
-            # float.
+            # Reject nonstandard JSON NaN/Infinity values before range checks.
+            # Check floats only: ints are finite and huge ints overflow math.isfinite.
             errors.append(
                 ValidationError(
                     path, "NaN and Infinity are not valid numbers"
@@ -1085,13 +960,8 @@ def validate_fields(
 
 
 def _schema_name(handoff_name: str) -> str | None:
-    """The HANDOFF_SCHEMAS entry `handoff_name` validates against, or None.
-
-    Most handoffs are their own schema name. The per-round score records are
-    keyed `round_1_scores`, `round_2_scores`, ... and share one schema, so
-    the concrete key is what --handoff and the state file carry and the
-    pattern is what resolves it. `round_scores` itself is not a state key.
-    """
+    """Resolve a handoff key to its schema, or None. round_<N>_scores keys share
+    round_scores; that schema name itself is not a valid state key."""
     if handoff_name in HANDOFF_SCHEMAS and handoff_name != ROUND_SCORES_SCHEMA:
         return handoff_name
     if ROUND_SCORES_KEY.match(handoff_name):
@@ -1100,14 +970,8 @@ def _schema_name(handoff_name: str) -> str | None:
 
 
 def _valid_handoff_names() -> str:
-    """The names `--handoff` actually accepts, as a message fragment.
-
-    `round_scores` is a schema name, not a state key: `_schema_name` rejects
-    it by design, so `--handoff round_scores` exits 2. Every place that lists
-    valid names has to say so, or it advertises an argument that does not
-    work. `main()` carried the parenthetical and the two listings below did
-    not; they all go through here now.
-    """
+    """List accepted --handoff names, explaining that round_scores requires a
+    concrete round_<N>_scores key."""
     return (
         f"{', '.join(sorted(HANDOFF_SCHEMAS))} "
         f"({ROUND_SCORES_SCHEMA} is a schema name, addressed as "
@@ -1122,19 +986,10 @@ def _round_scores_keys(state: dict) -> list[str]:
 
 
 def _validate_round_scores(state: dict) -> list[ValidationResult]:
-    """Validate Phase 3's per-round records, demanding at least one.
-
-    The single place `round_{N}_scores` is checked, for both --step and --all,
-    because the two used to disagree: --all validated whichever round keys
-    happened to be present and --step demanded none at all, so a Phase 3 round
-    that never wrote its record was invisible to both. The record is what the
-    NEXT round reads (`output_dir` at step 3a, `per_test` at step 5); without
-    it that round silently re-baselines on Phase 1's numbers and reports this
-    round's gain as its own.
-
-    Missing is reported against the generic key name, since which round number
-    is missing is exactly what the state file does not say.
-    """
+    """Validate all round_<N>_scores records and require at least one.
+    Both --step and --all use this check. The next round reads output_dir and
+    per_test; missing records would reuse Phase 1's baseline and double-count
+    gains. Report absence under the generic key because the round is unknown."""
     keys = _round_scores_keys(state)
     if not keys:
         return [
@@ -1320,15 +1175,9 @@ def validate_step(
 
 
 def validate_all(state: dict) -> list[ValidationResult]:
-    """Validate every handoff that is present or expected by the run shape.
-
-    Consults the same run-shape table as --step (via _input_expected): a
-    handoff whose producing step is active in the derived shape and marked
-    "done" is validated even when absent, so a truncated state file cannot
-    vacuously ALL PASS; a handoff the shape never produces (all of Phase 1
-    on a fix-only run) is validated only when present. A fix-only run at
-    Phase 2 entry therefore legitimately yields zero results.
-    """
+    """Validate present handoffs and missing outputs from active, done producers.
+    Use the same run-shape rules as --step. A fix-only run at Phase 2 entry
+    may validly have no handoffs yet."""
     steps = null_safe_get(state, "steps", {}, expected=dict)
     results: list[ValidationResult] = []
     for handoff_name in HANDOFF_SCHEMAS:
@@ -1336,13 +1185,8 @@ def validate_all(state: dict) -> list[ValidationResult]:
             continue  # pattern-keyed; the concrete keys are collected below
         if handoff_name in state or _input_expected(steps, handoff_name):
             results.append(validate_handoff(state, handoff_name))
-    # Phase 3 writes one record per round under a key the schema table cannot
-    # name in advance. Same run-shape gate as every other produced handoff
-    # (`phase3_reevaluate` is its producer in STEP_CONTRACTS, so
-    # `_input_expected` resolves it): validate whichever rounds are present,
-    # and report the absence when the shape ran Phase 3 to "done" and wrote
-    # none. Validating only what was present is what let a round skip its
-    # record and still pass `--all`.
+    # Validate all present round records; require at least one when Phase 3 ran.
+    # The schema names the producer, while concrete state keys name each round.
     if _round_scores_keys(state) or _input_expected(steps, ROUND_SCORES_SCHEMA):
         results.extend(_validate_round_scores(state))
     return results

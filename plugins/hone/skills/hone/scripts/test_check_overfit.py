@@ -131,10 +131,7 @@ class TestCheckOverfit(unittest.TestCase):
         self.assertEqual(report["items_exempt_required_absent"], 1)
 
     def test_an_empty_artifact_is_not_measurable_rather_than_passing(self):
-        """Same hole as zero classifiable items, on the artifact side: with
-        nothing to compare against, every lift test is vacuous and every item
-        classifies `outcome` for ratio 0.0, clearing the mandatory gate on no
-        evidence."""
+        """No artifact words means no evidence for a passing overlap check."""
         criteria = {
             "skill_name": "demo",
             "test_cases": [{
@@ -211,12 +208,7 @@ class TestCriteriaRootShape(unittest.TestCase):
 
 
 class TestEnrichmentAnchorsAreVisible(unittest.TestCase):
-    """Step 6 enrichment appends artifact identifiers to `required_present`.
-
-    Those are the purest vocabulary lift there is, and the NGRAM_SIZE=6 prose
-    rule cannot see a single token, so they classified `outcome` and padded
-    the denominator: enriching a set used to *lower* its ratio.
-    """
+    """Artifact-derived identifiers must count as vocabulary, not dilute the ratio."""
 
     ARTIFACT = (
         "# Demo Skill\n"
@@ -242,10 +234,7 @@ class TestEnrichmentAnchorsAreVisible(unittest.TestCase):
         self.assertEqual(report["counts"]["outcome"], 1)
 
     def test_generic_markdown_syntax_is_not_a_lift(self):
-        """`##` is in every markdown artifact by construction, and
-        phase1-evaluation.md recommends it as the minimal structural check.
-        Flagging it made the classifier report its own documented practice as
-        recitation, on a rule with no collision guard of its own."""
+        """Generic markdown structure is a valid output check, not copied vocabulary."""
         report = self._report(["##", "---", "```"])
         self.assertEqual(report["counts"]["vocabulary"], 0)
 
@@ -270,9 +259,7 @@ class TestEnrichmentAnchorsAreVisible(unittest.TestCase):
         self.assertEqual(report["counts"]["vocabulary"], 0)
 
     def test_enrichment_can_no_longer_dilute_the_ratio(self):
-        """Adding artifact-derived anchors must not move the verdict toward
-        `within_threshold`; before the fix each one landed in the denominator
-        only."""
+        """Adding copied anchors must not lower the overfit ratio."""
         bare = self._report([])
         enriched = self._report(["validate_handoff", "gate_compliance", "##"])
         self.assertLess(bare["overfit_ratio"], enriched["overfit_ratio"])
@@ -285,16 +272,12 @@ class TestEnrichmentAnchorsAreVisible(unittest.TestCase):
         self.assertEqual(report["counts"]["vocabulary"], 0)
 
     def test_a_short_verbatim_prose_anchor_is_a_lift(self):
-        """The identifier/markup rule left the dilution loophole open one step
-        out: `before the gate` is prose, is under NGRAM_SIZE, is verbatim in
-        the artifact, and used to land in the denominator as `outcome`."""
+        """Literal anchors below the prose n-gram limit still count as copied wording."""
         report = self._report(["before the gate"])
         self.assertEqual(report["counts"]["vocabulary"], 1)
 
     def test_recitation_anchors_cannot_clear_the_gate(self):
-        """The reported exploit: appending verbatim anchors moved the ratio
-        *down*, so an overfitted set cleared the threshold by adding more
-        recitation checks."""
+        """Adding copied anchors must not turn an overfitted suite into a passing one."""
         bare = self._report([])
         padded = self._report(["before the gate", "start with", "in the report"])
         self.assertGreater(padded["overfit_ratio"], bare["overfit_ratio"])
@@ -305,7 +288,7 @@ class TestEnrichmentAnchorsAreVisible(unittest.TestCase):
         self.assertEqual(self._report(["gate-compliance"])["counts"]["vocabulary"], 1)
 
     def test_an_anchor_matches_across_a_line_break(self):
-        """An anchor that evades the check by wrapping is free denominator."""
+        """Line wrapping must not disguise copied wording as an outcome check."""
         criteria = {
             "skill_name": "demo",
             "test_cases": [{"required_present": ["before the gate"]}],
@@ -316,8 +299,7 @@ class TestEnrichmentAnchorsAreVisible(unittest.TestCase):
 
 
 class TestFlaggedItemsAreLocatable(unittest.TestCase):
-    """Step 6a says "rewrite flagged items", so a flagged item has to name the
-    test case and the field it came from, and must not arrive truncated."""
+    """Flagged items must identify their case and field without truncating the text."""
 
     def test_flagged_entries_carry_case_id_and_location(self):
         criteria = {
@@ -389,10 +371,7 @@ if __name__ == "__main__":
 
 
 class TestArtifactPathIsNeverGuessed(unittest.TestCase):
-    """`--artifact` is required. The old default of `~/.claude/skills/<name>/
-    SKILL.md` is the path phase1-evaluation.md says never to hardcode, and a
-    stale copy there returned within_threshold against a file that was not
-    the artifact under test, with nothing on stderr."""
+    """Require --artifact so a stale default path cannot clear the wrong artifact."""
 
     def test_omitting_the_artifact_is_a_usage_error(self):
         import os
@@ -421,10 +400,7 @@ class TestArtifactPathIsNeverGuessed(unittest.TestCase):
 
 
 class TestTechniquePatternsCoverTheWorkflowVocabulary(unittest.TestCase):
-    """The step rule stopped at a digit, so the lettered sub-steps this very
-    workflow uses (Step 6a, 9a, 3a) classified `outcome` and a recitation
-    check about them lowered the ratio instead of raising it; the script rule
-    was case-sensitive; the invocation rule only knew `invoked the skill`."""
+    """Detect lettered steps, capitalized script names, and skill-invocation variants."""
 
     def _class(self, text):
         return classify_item(text, set(), "")["class"]
@@ -468,11 +444,7 @@ class TestIntegerIdsAreIds(unittest.TestCase):
 
 
 class TestExemptAnchorsLeaveTheDenominator(unittest.TestCase):
-    """r3-B2. Generic-markdown anchors were exempt from the lift test but still
-    classified `outcome` and counted in `total`, so padding `required_present`
-    with `##`/`---`/`**` diluted the ratio and flipped `overfitted` to
-    `within_threshold`: the exact exploit the anchor rule exists to close,
-    reopened on the one anchor shape it exempts."""
+    """Generic markdown anchors must not dilute the ratio as outcome items."""
 
     ARTIFACT = (
         "# Title\n\nRun validate_handoff then gate_compliance.\n\n"
@@ -507,10 +479,7 @@ class TestExemptAnchorsLeaveTheDenominator(unittest.TestCase):
 
 
 class TestMalformedCriteriaFieldsAreNotScored(unittest.TestCase):
-    """r3-S4. A string `required_present` was iterated character by character
-    into one-char `outcome` items (sixteen of them cleared the gate at ratio
-    0.0), and the rubric's top band was `max` over keys that all tied at -1,
-    so a non-numeric rubric picked whichever key JSON order served first."""
+    """Reject malformed anchors and rubric bands instead of scoring their iteration artifacts."""
 
     ARTIFACT = "Run validate_handoff now and report the result."
 
@@ -556,11 +525,7 @@ class TestMalformedCriteriaFieldsAreNotScored(unittest.TestCase):
 
 
 class TestTechniqueRulesDoNotOverFire(unittest.TestCase):
-    """r3-S6. The script rule matched JavaScript technology names (`Node.js`)
-    as bundled scripts, and the single-word skill-name rule matched the name
-    as any path segment (`~/forge/output.md`), so a JS-oriented suite or a
-    skill whose name is a directory in its own output paths was pushed over
-    the threshold with nothing legitimately rewritable."""
+    """Technology names and output path segments must not count as internal procedures."""
 
     def _class(self, text, name=""):
         return classify_item(text, set(), name)["class"]
@@ -593,9 +558,7 @@ class TestTechniqueRulesDoNotOverFire(unittest.TestCase):
 
 
 class TestMixedCharacterMarkdownIsGeneric(unittest.TestCase):
-    """r3-N1. The exemption covered a run of ONE structural character, so the
-    table separator `|---|` built from the same characters as `---` was
-    flagged as a verbatim lift against any artifact with a table in it."""
+    """Mixed markdown syntax such as |---| shares the generic-markup exemption."""
 
     ARTIFACT = "| a | b |\n|---|---|\nStep 4 -> Step 5\n<!-- note -->\nBanner: ▓▒░\n"
 
@@ -615,20 +578,11 @@ class TestMixedCharacterMarkdownIsGeneric(unittest.TestCase):
 
 
 class TestEveryExemptCharacterReachesTheExemption(unittest.TestCase):
-    """r4-B1. Third appearance of the denominator-dilution exploit, and the
-    first test written against the whole exempt set rather than one example.
+    """Test every declared syntax character, including underscores.
 
-    `MARKUP_ANCHOR`/`BARE_MARKUP` used `[^\\w\\s]`, which never matches `_`
-    because `\\w` counts it as a word character. So `___` -- a markdown
-    horizontal rule, and `_` is a MARKDOWN_SYNTAX_CHARS member -- reached
-    neither pattern, never reached `_is_generic_markdown`, and was classified
-    `outcome`. 17 of them dropped a ratio-1.0 criteria set to 0.1053 and
-    cleared Step 6a's mandatory gate on no evidence.
-
-    Two earlier fixes each closed one door on this exploit and left another
-    open, so this asserts the property per character, driven off the set
-    itself: a character added to MARKDOWN_SYNTAX_CHARS that the patterns
-    cannot reach fails here rather than at the gate."""
+    A character-specific detector must not bypass the exemption and admit
+    wordless anchors into the denominator.
+    """
 
     ARTIFACT = (
         "# Title\n\nRun validate_handoff then gate_compliance.\n\n"
@@ -671,12 +625,8 @@ class TestEveryExemptCharacterReachesTheExemption(unittest.TestCase):
         self.assertEqual(padded["overfit_ratio"], 1.0)
 
     def test_decoration_outside_the_set_scores_only_when_it_is_a_lift(self):
-        # The set decides RECITATION, not denominator membership. Decoration
-        # reproduced verbatim from the artifact is a lift and stays in the
-        # scored set (numerator and denominator alike); decoration that is not
-        # in the artifact measures nothing and leaves the set, rather than
-        # taking a denominator seat as `outcome` -- which is how "█" and
-        # "▓ ▒ ░" diluted the ratio before.
+        # Copied wordless decoration counts in both parts of the ratio; unmatched
+        # decoration is exempt and cannot dilute it.
         absent = self._report(["validate_handoff", "▓▒░"])
         self.assertEqual(absent["items_exempt_contentless"], 1)
         self.assertEqual(absent["items_classified"], 1)
@@ -693,28 +643,11 @@ class TestEveryExemptCharacterReachesTheExemption(unittest.TestCase):
 
 
 class TestContentlessItemsNeverSitInTheDenominator(unittest.TestCase):
-    """r5-B1. Fourth appearance of the denominator-dilution exploit, and the
-    first test written against the INVARIANT instead of a list of shapes.
+    """Wordless items count as vocabulary when copied; otherwise they are exempt.
 
-    History: the rule was closed "by construction" three times and reopened
-    three times -- identifier-shaped anchors, then short verbatim prose, then
-    underscore runs -- because each fix matched a decoration SHAPE and the
-    next shape walked around it. The fourth door was internal whitespace:
-    `"| --- |"`, `"- - -"` and `"** **"` matched neither the exemption
-    (`BARE_MARKUP`, whitespace-free) nor the lift test (`MARKUP_ANCHOR`,
-    whitespace-free), normalised to zero words so MIN_ANCHOR_WORDS never
-    applied, and landed in the denominator as `outcome`; three of each turned
-    a ratio-1.0 criteria set into `within_threshold`, exit 0. Single-character
-    decoration (`"█"`) went through the same gap under MARKUP_ANCHOR's
-    two-character floor.
-
-    The invariant asserted here, and the only thing check_overfit.py promises:
-    an item that yields no normalised words never occupies a denominator seat
-    as `outcome`. It is either recitation (counted in both halves of the
-    ratio) or it leaves the scored set. The corpus below is deliberately
-    open-ended -- ASCII markdown, box drawing, CJK punctuation, bare
-    whitespace -- because the point is that no fifth shape can exist, not that
-    these particular ten are handled."""
+    Test the invariant across markdown, Unicode decoration, punctuation, and
+    whitespace so new shapes cannot dilute the ratio as outcome items.
+    """
 
     ARTIFACT = (
         "# Demo\n\nRun validate_handoff then gate_compliance.\n\n"
@@ -800,10 +733,7 @@ class TestContentlessItemsNeverSitInTheDenominator(unittest.TestCase):
             self.assertFalse(_carries_content(char), repr(char))
 
     def test_one_word_is_enough_to_be_scored(self):
-        # The other side of the invariant: `_carries_content` is a floor at
-        # one word, not a licence to drop short items. A one-word anchor is
-        # below MIN_ANCHOR_WORDS so it is not a LIFT, but it still occupies a
-        # denominator seat, because it does measure something.
+        # One-word anchors still measure content, even below the vocabulary-match floor.
         report = self._report(present=["gate_compliance", "ok"])
         self.assertEqual(report["items_classified"], 2)
         self.assertEqual(report["counts"]["outcome"], 1)
@@ -811,12 +741,7 @@ class TestContentlessItemsNeverSitInTheDenominator(unittest.TestCase):
 
 
 class TestANonStringSkillNameIsAUsageError(unittest.TestCase):
-    """r5-B4. `criteria.get("skill_name") or ""` accepted any truthy value and
-    a non-string one reached `re.escape` in `_names_the_artifact`: an uncaught
-    TypeError, traceback on stderr, exit 1. Step 6a reads exit 1 as
-    `overfitted` and halts the run blaming the criteria set, when the fault is
-    a malformed field. Every other malformed-input path in this script exits 2
-    and names what is wrong."""
+    """Reject non-string skill_name as exit 2 before it reaches regex matching."""
 
     def _run(self, criteria_json):
         import json

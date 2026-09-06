@@ -1,17 +1,16 @@
 # Verify and decide
 
-Run the fixed cases against the candidate under the same model, effort, harness,
-fixtures, permissions, and relevant context as the baseline. Check frozen identities
-before comparing. A changed task or environment needs a new baseline. Different
-measurement methods, unknown model substitutions, missing outputs, and simulations
-versus executions cannot form an outcome delta.
+Run frozen cases under the baseline's model, effort, harness, fixtures, permissions,
+and context. Verify identities before comparison; changed tasks or environments
+need a new baseline. Do not calculate outcome deltas across different measurement
+methods, unknown model substitutions, missing outputs, or simulation/execution modes.
 
 ## Judge the result
 
-Apply deterministic assertions to the actual outputs and independent semantic
-judgment where necessary. Hide version labels and editor explanations from the
-semantic judge. Supply the frozen requirements and evidence. Ties and unknowns
-are valid, and disagreements need inspection rather than forced numeric averaging.
+Apply deterministic assertions to outputs and independent semantic judgment where
+needed. Give judges frozen requirements and evidence, withholding version labels
+and editor explanations. Allow ties and unknowns; inspect disagreements rather
+than averaging them away.
 
 Inspect critical failures immediately. If a candidate demonstrably violates a
 required invariant, reject it even when the suite is small. Confirm that the failure
@@ -39,11 +38,10 @@ the scope protocol in [improvement](phase2-improvement.md). Re-read the files, r
 relevant validators/tests, and verify scope after the last write. Do not install,
 publish, push, or edit a second copy unless the user's task authorizes that action.
 
-Continue only when a specific unresolved defect has a supported next change and
-the recorded budget permits it. Stop on a clean result, no justified edit, exhausted
-budget, a required permission/capability gap, or an unresolved scope conflict. Keep
-state and evidence for recovery. There is no grade target, momentum threshold, or
-requirement to spend all available rounds.
+Continue only for a specific unresolved defect with a supported next change and
+remaining budget. Stop when clean, no edit is justified, budget is exhausted, or
+permissions, capabilities, or scope conflicts block progress. Retain state and
+evidence. Do not chase a grade or spend rounds without a reason.
 
 Use these verdicts with explicit scope:
 
@@ -55,11 +53,10 @@ Use these verdicts with explicit scope:
 | inconclusive | Available evidence cannot settle the proposed change, including an exhausted budget with unresolved quality questions |
 | blocked | Required input, permission, capability, or safe edit conditions are unavailable |
 
-List which models and cases were actually exercised. A simulation can establish a
-bounded decision result but cannot establish successful edits, safe runtime behavior,
-or end-to-end performance. An untested target stays untested. Separate an observed
-maintenance improvement, such as fewer redundant instructions, from measured task
-quality, latency, and token usage.
+List tested models and cases. Simulations measure decisions, not successful edits,
+runtime safety, or end-to-end performance. Label untested targets. Distinguish
+maintenance improvements, such as fewer redundant instructions, from measured
+task quality, latency, and token usage.
 
 ## Durable outcome report
 
@@ -91,15 +88,13 @@ Write `outcome-report.json` in the exact run directory. It includes:
 }
 ```
 
-Populate placeholders from the run; empty arrays in this shape are illustrative,
-not evidence that evaluation happened. Each case records `id`, `target` (a target
-ID), `arm` (`current`, `candidate`, or `no_skill`), positive integer `trial`,
+Populate placeholders from the run; the example's empty arrays are not evaluation
+evidence. Each case records `id`, `target` (a target ID), `arm` (`current`, `candidate`, or `no_skill`), positive integer `trial`,
 `mode` (`simulation` or `execution`), and
 `checks`. Each check carries `id`, boolean `required`, `result` (`pass`, `fail`,
 `unmeasured`), `method` (`artifact`, `judgment`, or `trace`), and `evidence_paths`
-to independently inspected files. Record why evidence is
-missing. Separate a raw harness log, a deterministic assertion result, and a model
-judgment so readers can see what supports each conclusion.
+to independently inspected files. Explain missing evidence. Distinguish raw harness
+logs, assertion results, and model judgments.
 
 The artifact hashes describe the requested entry file at `artifact_path`. The
 source hashes describe the maintained-source snapshot rooted at `edit_path`,
@@ -116,18 +111,18 @@ may be `not_applicable`; identify the actual runtime and version as the harness.
 Unknown configuration values stay explicitly unknown, with a
 limitation; early blocked or inconclusive reports may have null hashes and empty
 cases/targets with the reason recorded. An improved report needs measured candidate
-cases, passing candidate required checks, complete comparable identities, and existing evidence
-files. Schema validation establishes structure, not the truth of those findings.
+cases, passing candidate required checks, complete comparable identities, and
+existing evidence files. Schema validation establishes structure, not the truth of those findings.
 Expected failures in the current or no-skill arms remain in the report and do not
 by themselves disqualify an improved candidate.
 Each comparison identifies its two arms,
 paired cases, observed benefit or failure, and uncertainty. Include actual timing
 and usage when available, otherwise null. Keep the report outside candidate writes.
 
-Before finalizing, verify that its run ID and artifact identity match state, all
-referenced files exist, and the stated verdict follows the observed outcomes and
-scope result. Write atomically and read it back. Callers must read this exact path
-and check `schema_version`, `measurement`, `run_id`, `artifact_path`, and `finished`.
+Before finalizing, match the run ID and artifact identity to state, confirm evidence
+files exist, and check the verdict against outcomes and scope. Write atomically and
+read back. Callers must read this exact path and check `schema_version`,
+`measurement`, `run_id`, `artifact_path`, and `finished`.
 They must not find an arbitrary newest `results.json`, derive a legacy grade, or
 compare old simulated-plan scores to this report.
 

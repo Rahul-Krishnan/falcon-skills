@@ -174,9 +174,7 @@ class TestFrontmatterParsing(unittest.TestCase):
 
 
 class TestSelfNameExclusionForPipelineSkills(unittest.TestCase):
-    """The artifact under test is the eval's entry point, so its own name must
-    never be sandboxed. Applied to the unknown loop only, the known-skill loop
-    told the executor to simulate the very invocation being measured."""
+    """Keep the artifact's own invocation executable in both delegation loops."""
 
     def test_pipeline_skill_evaluating_itself_is_not_sandboxed(self) -> None:
         # Directory-name shape: ~/.claude/skills/quench/SKILL.md
@@ -218,8 +216,7 @@ class TestSelfNameExclusionForPipelineSkills(unittest.TestCase):
 
 
 class TestDestructivePatternDetection(unittest.TestCase):
-    """A skill whose job is deletion used to scan clean, so an unattended eval
-    of it got a sandbox block with no commands in it."""
+    """Detect deletion commands and include their simulation instructions."""
 
     def _labels(self, text: str) -> list[str]:
         return scan_artifact(text)["bash_commands"]
@@ -284,9 +281,7 @@ class TestDestructivePatternDetection(unittest.TestCase):
 
 
 class TestDeclaredDestructiveScopes(unittest.TestCase):
-    """scan_artifact only sees prose. A cleanup skill describes what it deletes
-    without spelling the command out, so its declared Bash scope is the only
-    signal that it deletes at all."""
+    """Detect destructive Bash scopes even when prose omits the command."""
 
     def test_rm_scope_detected(self) -> None:
         self.assertEqual(
@@ -332,9 +327,7 @@ class TestSandboxContextSections(unittest.TestCase):
 
 
 class TestEmptyIntersectionFallback(unittest.TestCase):
-    """The guard must never write allowed_tools: [] — the criteria schema
-    declares the field non_empty, so an empty list fails the very next
-    mandatory validation step with no backup to restore."""
+    """Keep allowed_tools nonempty as required by the criteria schema."""
 
     def test_empty_intersection_falls_back_to_declared_tools(self) -> None:
         criteria = {"test_cases": [{"allowed_tools": ["Bash", "Write"]}]}
@@ -368,8 +361,7 @@ class TestEmptyIntersectionFallback(unittest.TestCase):
 
 
 class TestPublishingCommandDetection(unittest.TestCase):
-    """The sandbox block is a closed enumeration, so a publishing command it
-    omits reads as permission to run that command for real."""
+    """Include publishing commands in the sandbox's explicit simulation list."""
 
     def _labels(self, text: str) -> list[str]:
         return scan_artifact(text)["bash_commands"]
@@ -388,9 +380,7 @@ class TestPublishingCommandDetection(unittest.TestCase):
 
 
 class TestMcpBlocklistCoverage(unittest.TestCase):
-    """Coverage, not mechanism: substring matching against tool names was
-    already correct, but the list named three chat tools, so every other
-    write tool in the environment survived into the eval's allowed_tools."""
+    """Cover write-tool families beyond the original chat-specific names."""
 
     WRITE_TOOLS = [
         "mcp__falcon-memory__memory_delete",
@@ -494,10 +484,7 @@ print("nothing to see here")
 
 
 class TestBundledScriptScan(unittest.TestCase):
-    """The standard skill layout keeps the executable work in scripts/, so a
-    scan of SKILL.md and references/*.md read none of it: a SKILL.md whose
-    body was `python3 scripts/purge.py` scanned clean and its unattended eval
-    ran holding a real rm -rf."""
+    """Scan bundled code so entry-file delegation cannot hide destructive operations."""
 
     def _fixture(self, root: Path, script_body: str) -> tuple[Path, Path]:
         skill_dir = root / "skills" / "purger"

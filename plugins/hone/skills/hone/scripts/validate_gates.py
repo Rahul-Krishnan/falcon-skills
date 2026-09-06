@@ -1,48 +1,16 @@
 #!/usr/bin/env python3
-"""Validate the gates[] array in a hone workflow state file.
+"""Validate gate schema, required events, and failure handling in workflow state.
 
-Gate emission is fully verifiable from the state file, so it belongs in a check
-rather than in prose. Four separate warnings in SKILL.md ("Common Executor
-Mistakes" #7 and #9, the Mechanical Exit Gate paragraph, and the Gate Events
-table) all describe constraints this script enforces mechanically.
+Validate types and enums against gate-event-schema.json, including explicit
+nulls on optional fields. Derive the event set from steps{}; warn when --mode
+contradicts it. Applied edits require scope_verify; resumed=true requires
+resume, and --resumed may only add that requirement.
 
-What it checks:
-  1. Schema: every event has step, judge, result; judge is in the
-     references/gate-event-schema.json enum; result is exactly "pass" or
-     "fail"; step/ts are strings, findings is an array of strings, and
-     rubric items carry severity/item/result with the schema's enums and a
-     string item. A present key holding null violates the schema exactly
-     as a wrong type does (draft-07 rejects null for a declared
-     string/array). Violations of the published schema are errors —
-     this script is the deterministic compliance check the schema promises,
-     so it must not bless a state file the schema rejects.
-  2. Completeness: the expected event set for the run mode is present. The
-     mode is derived from the state file's steps{} map via hone_common's
-     run-shape table (fix-only / no-improvement / normal, plus error-halt
-     when non-done, non-skipped steps remain) — the executor does not get
-     to pick the gate set it is graded against. --mode is an explicit
-     override; a contradiction with the derived mode draws a warning.
-     `scope_verify` is required when the state file records applied edits
-     (applied_edits.edit_count > 0), matching SKILL.md's "mandatory when
-     edits were applied"; `resume` is required exactly when the state file
-     records `"resumed": true`. Both conditions are read off the state file,
-     so neither can be switched off by the caller; --resumed can only turn
-     the resume requirement on.
-     The one exemption is an error halt that crashed between the edit and
-     the verify, and it is guarded on both sides (scope_verify_exempt): it
-     reads the steps{}-derived mode and never --mode, and it is refused
-     unless gates[] itself shows a halt the run could have died in. An
-     exemption a run can claim for itself is an off switch.
-  3. Fail semantics: a "fail" event is legitimate when it is terminal —
-     the pipeline halted there, followed at most by the mandated final
-     workflow_exit event(s) — or when a later "pass" for the same step
-     records the repair. A "fail" followed by unrelated forward progress
-     is flagged.
+A scope-check exemption requires a derived error-halt and gate evidence of
+a crash before verification. Failure handling uses hone_common.fail_is_accounted.
 
-Exit codes: 0 valid, 1 validation failure, 2 usage error.
-
-Stdlib only. Invoke as: python3 <skill-dir>/scripts/validate_gates.py <state> --json
-"""
+Exit codes: 0 valid, 1 validation failure, 2 usage error. Stdlib only.
+Usage: python3 <skill-dir>/scripts/validate_gates.py <state> --json"""
 
 from __future__ import annotations
 
@@ -93,20 +61,9 @@ def _load_valid_judges() -> tuple[str, ...]:
 
 VALID_JUDGES = _load_valid_judges()
 
-# Events required for each run mode. Handoff events (handoff_<name>) are
-# emitted per validation attempt and are not part of a fixed expected set.
-#
-# `convergence` sits in the two modes that reach Phase 3. SKILL.md's gate
-# table marks it mandatory, and a gate the table calls mandatory that this
-# script does not check is prose: nothing stops a run from omitting it.
-#
-# These are MEMBERSHIP sets, not sequences -- the check below is "was this
-# step emitted at all". They are nonetheless listed in the documented emission
-# order (`phase3_exit` at Phase 3 step 6, then `convergence` at step 7),
-# because a reader who takes the tuple order for the emission order gets the
-# halt shape backwards. That misreading is exactly how `hone_common`'s halt
-# tail came to reject the documented auto-revert halt. The one authoritative
-# statement of the order is `hone_common.PHASE3_HALT_SEQUENCE`.
+# Required event membership by mode, excluding per-attempt handoff events.
+# Modes reaching Phase 3 require convergence. Tuple order follows the docs
+# for readability; hone_common.PHASE3_HALT_SEQUENCE defines halt ordering.
 REQUIRED_STEPS = {
     "normal": (
         "phase1_to_phase2", "phase2_to_phase3", "phase3_exit",
@@ -175,42 +132,13 @@ PAST_PHASE2 = ("phase2_to_phase3", "phase3_exit", "convergence")
 
 
 def scope_verify_exempt(mode: str, gates: list | None = None) -> bool:
-    """Whether this run may omit `scope_verify` after applying edits.
+    """True when a derived error-halt may omit scope_verify after edits.
 
-    `error-halt` is the only mode that can, and only when it is a real halt.
-    That mode means the run stopped mid-flight, and Phase 2 writes
-    `edit_count` at Step 6 while `scope_verify` is emitted at Step 6a, so a
-    crash between the two is a legitimate halt that would otherwise be
-    reported as a missing required event -- an error, on a run whose whole
-    point is that it did not finish. SKILL.md's resume note says the same
-    thing ("the derived mode is error-halt, and its only required event is the
-    workflow_exit").
-
-    An exemption that a run can claim for itself is not an exemption, it is an
-    off switch, and this one was reachable two ways. `--mode error-halt` set
-    it straight from a caller flag: main() now passes the *derived* mode here
-    and never the override, and when `steps{}` is missing, empty, or not a
-    dict -- the cases `derive_gate_mode` cannot derive a mode from -- it
-    passes `normal` rather than falling back to the flag, so the flag can no
-    longer reach it by either route. The exemption is a claim about `steps{}`,
-    and a `steps{}` nobody can read is not evidence for it. The second way
-    needed no flag at all -- leave one entry of `steps{}` at `in_progress` and
-    `derive_gate_mode` returns `error-halt` on its own. `gates[]` closes that
-    one, because a run claiming it died mid-flight has to look like it:
-
-      * it must record an actual failure. Every gate passing is a run that
-        finished, whatever `steps{}` says about itself, and a run that
-        finished ran Step 6a.
-      * it must not record an event only a run past Step 6a could emit. A
-        `phase2_to_phase3`, `phase3_exit`, or `convergence` beside the claim
-        says the run reached Phase 3, so Step 6a was behind it.
-
-    Both are cheap for an honest halt to satisfy (SKILL.md's halt shape is
-    already `<step>:fail` then `workflow_exit:fail`) and expensive for a
-    complete run to fake, because faking them means filing itself as a failed
-    run. `gates=None` keeps the old mode-only answer for a caller that has no
-    gate list to offer.
-    """
+    A crash can occur between Phase 2 edit recording and scope verification.
+    Require a failing gate and no event from after verification. Derive mode
+    from steps{}, never --mode; unusable steps default to normal in main().
+    This blocks completed runs from claiming exemption via a flag or stale status.
+    For callers without a gate list, gates=None retains the mode-only check."""
     if mode != "error-halt":
         return False
     if gates is None:
@@ -227,25 +155,9 @@ def _expected_steps(
     edits_applied: bool = False,
     exempt: bool = False,
 ) -> tuple[str, ...]:
-    """Expected event set for a mode, plus the two conditional events.
-
-    Resumption is orthogonal to mode (any mode can be resumed), so it is a
-    flag rather than a fifth mode. `scope_verify` is the same shape: SKILL.md
-    marks it mandatory "when edits were applied", which is a property of the
-    run, not of its mode.
-
-    Both are derived from the state file in main(), never read off a caller
-    flag that could switch them off -- an executor allowed to declare "no
-    edits applied" or "not a resume" would turn off the checks that catch its
-    out-of-scope edits and its unrecorded resumption. `--resumed` survives
-    only as a one-way override: it can add the requirement, never remove one
-    the state file established.
-
-    `exempt` comes from `scope_verify_exempt`, which is where the one
-    exemption and its two guards live. The absence is not ignored even then:
-    validate_gates() downgrades it to a warning, so an error halt that skipped
-    its scope check is still visible in the report.
-    """
+    """Return required events for mode, resumption, and applied edits.
+    main derives the latter two from state; --resumed can only add a requirement.
+    A scope_verify exemption still produces a warning when the event is absent."""
     steps = REQUIRED_STEPS.get(mode, ())
     if edits_applied and not exempt:
         steps = steps + ("scope_verify",)
@@ -255,16 +167,8 @@ def _expected_steps(
 
 
 def derive_resumed(state: object) -> bool:
-    """Whether the run resumed from an existing state file, per the state file.
-
-    Reads `resumed`, which SKILL.md's resume protocol sets alongside the
-    `resume` gate event. Deriving it here is what makes the requirement
-    enforceable: the exit gate runs `validate_gates.py` with no flags, so a
-    resumption recorded only by a caller-supplied `--resumed` was never
-    checked at the one point where checking is mandatory. Two records of the
-    same fact also means dropping either one is a detectable error rather
-    than a silent one.
-    """
+    """Read the resumed flag set by SKILL.md alongside the resume event. This lets
+    the mandatory exit check require resume without relying on CLI flags."""
     return isinstance(state, dict) and state.get("resumed") is True
 
 
@@ -292,17 +196,11 @@ def validate_gates(
     edits_applied: bool = False,
     derived_mode: str | None = None,
 ) -> dict:
-    """Return a report dict describing schema, completeness, and fail-semantics.
+    """Report schema, completeness, and failure-handling findings.
 
-    `derived_mode` is the run shape read off the state file's `steps{}`, which
-    is the only mode the `scope_verify` exemption is allowed to consult.
-    `mode` may be a caller's `--mode` override, and an override that could
-    switch a safety requirement off is not an override, it is a way around the
-    requirement. Leave it None and `mode` is treated as the derived one, which
-    is what an in-process caller with no state file is saying. main() never
-    leaves it None: a state file it cannot derive a mode from gets `normal`,
-    because the alternative is the override reaching the exemption after all.
-    """
+    Only derived_mode may grant a scope-check exemption. None treats mode as
+    derived for in-process callers; main always passes a value and uses normal
+    when steps{} is unusable, preventing --mode from granting the exemption."""
     errors: list[str] = []
     warnings: list[str] = []
     exempt = scope_verify_exempt(
@@ -333,15 +231,8 @@ def validate_gates(
         for key in ("step", "judge", "result"):
             if key not in gate:
                 errors.append(f"gates[{index}] missing required key '{key}'")
-        # Enforce the types gate-event-schema.json declares, not just key
-        # presence and enum membership: a list-valued step crashed the
-        # emitted-set build below, and null step / numeric ts / dict
-        # findings were blessed as VALID against the published schema.
-        # Optional fields (ts, findings, rubric) gate on key presence, not
-        # `is not None`: draft-07 rejects an explicit null for a declared
-        # string/array, so a present null is a schema error too. (judge and
-        # result need no separate check — enum membership already rejects
-        # any non-string.)
+        # Validate optional fields when present, including nulls. Enum membership
+        # already checks judge/result types; other fields need explicit type checks.
         step = gate.get("step")
         if "step" in gate and not isinstance(step, str):
             errors.append(
@@ -367,57 +258,14 @@ def validate_gates(
                             f"gates[{index}] findings[{finding_index}] is "
                             f"not a string"
                         )
-        # `reason` is validated because a settlement predicate KEYS on it
-        # (hone_common.HALT_REASONS). No value buys an outcome there -- a
-        # declaration only ever rules a settlement out -- but the field is
-        # still executor-written, so an arbitrary string must not do better
-        # than the truth here either. A declaration outside the closed
-        # vocabulary is an error, and it is ALSO read as "not declared" by
-        # the predicate, which is the strictest branch there is. Failing both
-        # ways is the point: junk cannot beat a vocabulary value here or in
-        # `hone_common`, so on the events a correct run emits, declaring the
-        # truth scores at least as well as anything else it could write.
+        # Require string reasons everywhere and closed vocabulary values on failing
+        # steps listed in HALT_REASONS. Unknown values are errors and also lose retry
+        # and restart credit. Other steps retain free-form annotations.
         #
-        # The type check is not scoped to the vocabulary steps, because
-        # gate-event-schema.json declares `reason` a string for every event;
-        # the enum check is, because `reason` is free-form annotation
-        # elsewhere (SKILL.md's `corrupt_state_file` on a `workflow_exit`,
-        # "prior evaluation reused" on a `fixonly_entry`).
-        #
-        # THE ENUM CHECK IS A DELIBERATE BREAKING CHANGE, not an oversight,
-        # and it is deliberately an ERROR rather than a migration-window
-        # warning. `reason` was in no `properties` block and was read by
-        # nothing before this change, so a free-form value on a failing
-        # `convergence` -- `"escalate: f1,f2 open 4 rounds"` -- was legal and
-        # now exits this script non-zero at the mechanical exit gate. Three
-        # reasons to take that rather than warn:
-        #
-        #   1. THERE IS NO CORPUS TO MIGRATE. The state file is a per-run
-        #      artifact at /tmp/workflow-${RUN_ID}.json (SKILL.md line 230),
-        #      written and validated inside the same run. The next run writes
-        #      a fresh one under the new rules, so the only file this can
-        #      break is an archived one being re-validated by hand, which is
-        #      a diagnostic, not a gate on live work.
-        #   2. NOTHING EVER TOLD AN EXECUTOR TO WRITE THAT VALUE. The only
-        #      `reason` the docs ever mandated on a `convergence:fail` was the
-        #      literal `ledger_missing`, which is in the vocabulary and still
-        #      validates. The free-form uses the docs DO name sit on
-        #      `workflow_exit` and `fixonly_entry`, which this check does not
-        #      touch. So the breaking case is legal-but-undocumented rather
-        #      than a shape the skill produced.
-        #   3. A MIGRATION WINDOW HAS NO WAY TO CLOSE. Nothing in the state
-        #      file records a schema version, so a warning added "for a
-        #      window" is a warning forever, and a near miss like `"Capped"`
-        #      -- a typo, not a legacy value -- would be downgraded along
-        #      with it. An error is what makes a typo visible.
-        #
-        # The absent case stays a WARNING, and the asymmetry with the
-        # out-of-vocabulary case is not an inconsistency: absence is what
-        # every pre-`reason` state file actually contains, junk is what none
-        # of them contain. Neither buys anything either way -- both resolve to
-        # `None` and reach the same settlements (`hone_common`'s
-        # `declared_halt_reason`) -- so this file is free to report them
-        # differently without either one outscoring the truth.
+        # Absent reasons warn for legacy states; invalid values error. There is no
+        # schema version to bound a migration window, and warning on invalid values
+        # would hide typos indefinitely. Previously documented ledger_missing remains
+        # valid; formerly legal free-form convergence reasons now require migration.
         if "reason" in gate and not isinstance(gate["reason"], str):
             errors.append(
                 f"gates[{index}] reason must be a string, got "
@@ -431,11 +279,8 @@ def validate_gates(
             vocabulary = tuple(sorted(HALT_REASONS[step]))
             reason = gate.get("reason")
             if "reason" not in gate:
-                # A WARNING, not an error, and only because state files
-                # written before the declaration existed carry no `reason`.
-                # They keep validating; what they lose is settlements, not
-                # validity, and they lose the same ones every other
-                # non-answer loses.
+                # Warn for missing legacy reasons; they remain valid but lose
+                # retry and restart credit.
                 warnings.append(
                     f"gates[{index}] step '{step}' failed without declaring a "
                     f"reason; one of {vocabulary} is expected, and an "
@@ -464,31 +309,9 @@ def validate_gates(
         if "rubric" in gate:
             errors.extend(_rubric_errors(index, gate["rubric"]))
 
-    # Fail semantics: terminal, repaired by a later pass for the same step,
-    # or superseded by a later attempt at it. "Terminal" means the pipeline halted at that fail: SKILL.md
-    # mandates a final workflow_exit event before ANY exit, so a legitimate
-    # halt (error halt, regression auto-revert) is followed by the rest of
-    # the halt sequence, never by unrelated forward progress. Requiring the
-    # literal last index flagged every documented halt shape and invited the
-    # executor to append a fabricated repair pass to silence the warning.
-    # `workflow_exit` is the whole of that tail: it is the only event SKILL.md
-    # mandates after the failure that stopped the run, so the failing step
-    # goes to the helper along with the tail. Both files call
-    # hone_common.fail_is_accounted, so "the same shape" is now one function
-    # rather than two hand-copied conditions that had already drifted apart.
-    # It carries two cases the hand-copies missed. An authorized restart: the
-    # run halted, recorded `workflow_exit`, and a `resume` records the human
-    # granting more rounds, which only a fail declaring `capped` may claim.
-    # And a documented in-place retry: the exit-2 ledger repair emits
-    # `convergence:fail` and then a second `convergence` that may fail too, so
-    # a correct repair has no later `pass` and is not its own halt tail. That
-    # retry is reachable only for a fail that declared `"ledger_missing"`, the
-    # one failure the docs re-attempt; every other declaration and every
-    # non-declaration forfeits it, and the retry that remains still has to sit
-    # inside the halt, because `reason` is executor-written and nothing here
-    # corroborates it. What the helper deliberately does NOT accept is a later
-    # `pass` for a gate whose `fail` was a halt order, which is how a run that
-    # ignored an `escalate` and did another round used to score clean.
+    # Share failure handling with the scorer. A halt, authorized restart, or
+    # documented retry may account for failure; later progress alone cannot.
+    # Convergence reasons restrict these options; they never corroborate a claim.
     for index, gate in enumerate(gates):
         if not isinstance(gate, dict) or gate.get("result") != "fail":
             continue
@@ -636,16 +459,8 @@ def main() -> None:
 
     edits_applied = derive_edits_applied(state)
     resumed = derive_resumed(state) or args.resumed
-    # `derived_mode` is passed separately, and deliberately: `mode` above may
-    # be the caller's --mode, and the scope_verify exemption must never be
-    # reachable from a flag. `--mode error-halt` on a completed run that
-    # applied edits used to turn the missing scope check into a warning.
-    #
-    # An underivable mode is passed as "normal" rather than as None, which
-    # validate_gates reads as "treat `mode` as derived" and which would hand
-    # the exemption straight back to --mode for any state file with a missing,
-    # empty, or non-dict steps{}. The run shape used for the expected event
-    # set keeps its own fallback above; only the exemption's input is pinned.
+    # Keep derived_mode separate from --mode. Use normal when steps{} cannot
+    # yield a mode; None would let the override grant a scope-check exemption.
     report = validate_gates(
         state.get("gates", []), mode, resumed, edits_applied,
         derived_mode=derived_mode if derived_mode is not None else "normal",

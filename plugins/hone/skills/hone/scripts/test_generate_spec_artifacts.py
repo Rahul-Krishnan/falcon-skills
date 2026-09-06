@@ -29,9 +29,7 @@ CRITERIA = {
 
 
 class TestGenerateEvalsNullTolerance(unittest.TestCase):
-    """`raw_semantic_scores: null` is a documented shape from a judge that
-    returned no per-question scores. generate_grading already tolerated it;
-    generate_evals used a raw dict.get and handed the None to enumerate()."""
+    """Null semantic-score mappings must be safe in both eval and grading generation."""
 
     def _evals(self, result: dict) -> dict:
         return generate_evals(
@@ -99,9 +97,7 @@ class TestLoadCriteria(unittest.TestCase):
 
 
 class TestCriteriaLoadFailureExits(unittest.TestCase):
-    """An unreadable --criteria used to write evals.json with zero evals and
-    exit 0, so Step 10's "evals.json exists and is valid JSON" gate passed on
-    a file whose grading.json referenced eval_ids defined nowhere."""
+    """Unusable criteria must stop generation before grading references undefined evals."""
 
     def _run(self, criteria_path: str, out_dir: str) -> subprocess.CompletedProcess:
         with open(os.path.join(out_dir, "results.json"), "w") as f:
@@ -166,8 +162,7 @@ class TestCriteriaLoadFailureExits(unittest.TestCase):
 
 
 class TestGenerateGradingTypeSlop(unittest.TestCase):
-    """main() builds all four artifacts before writing any of them, so one
-    malformed per-check score cost the entire Step 10 set."""
+    """Malformed per-check scores must not abort generation of the artifact set."""
 
     def _grading(self, result: dict) -> dict:
         return generate_grading({"results": [result]}, None)
@@ -209,8 +204,7 @@ class TestGenerateGradingTypeSlop(unittest.TestCase):
 
 
 class TestBenchmarkScoreTypeSlop(unittest.TestCase):
-    """compute_summary filtered on `is not None`, so a stringified score
-    reached sum() and raised before any artifact was written."""
+    """Non-numeric scores must not reach summary arithmetic."""
 
     def _summary(self, results: list) -> dict:
         out = generate_benchmark({"results": results}, None, None, None)
