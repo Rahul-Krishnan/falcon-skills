@@ -1,269 +1,138 @@
-## Phase 3: Re-Evaluate (MANDATORY after improvement)
+# Verify and decide
 
-**Re-evaluation is not optional.** Every improvement round MUST end with a re-evaluation using the same eval criteria as Phase 1. This produces the after_score that gets compared to the before_score. Without re-evaluation, improvements are ungraded assertions, not measured results. The `--rounds N` flag controls how many improve-then-reevaluate cycles to run, but there is always at least one re-evaluation after improvement. Setting `--rounds 0` would mean evaluate-only (dry run, no improvement).
+Run the fixed cases against the candidate under the same model, effort, harness,
+fixtures, permissions, and relevant context as the baseline. Check frozen identities
+before comparing. A changed task or environment needs a new baseline. Different
+measurement methods, unknown model substitutions, missing outputs, and simulations
+versus executions cannot form an outcome delta.
 
-If `{current_round} >= {max_rounds}`, go to Final Output (but only AFTER the re-evaluation for this round is complete).
+## Judge the result
 
-**CRITICAL: Anti-bias protocol for re-evaluation.** The re-evaluation after improvement is the highest-risk point for self-confirmation bias. The agent that made the improvements is now asking itself whether the improvements worked. Three mandatory countermeasures:
+Apply deterministic assertions to the actual outputs and independent semantic
+judgment where necessary. Hide version labels and editor explanations from the
+semantic judge. Supply the frozen requirements and evidence. Ties and unknowns
+are valid, and disagreements need inspection rather than forced numeric averaging.
 
-1. **Blind evaluation.** The re-evaluation judge prompt MUST NOT mention: that improvements were made, what was changed, what round this is, or any before/after framing. The judge receives ONLY (response_text, rubrics). It scores a response, not an improvement. This prevents anchoring bias.
+Inspect critical failures immediately. If a candidate demonstrably violates a
+required invariant, reject it even when the suite is small. Confirm that the failure
+comes from the candidate rather than a broken fixture. Restore only this run's
+attributable maintained-source edits, after checking for concurrent changes, and
+verify the restoration. A suspected but unmeasured regression is not permission
+to overwrite files. Prefer leaving an uncertain candidate separate from the original.
 
-2. **Multi-perspective judge panel.** For the 1-2 test cases with scores in the 0.4-0.7 ambiguous zone (or the lowest-scoring test if all pass), do not accept a single judge's number. Spawn 3 subagents in parallel, one each with the Pragmatist, Skeptic, and Systems Thinker roles, each scoring the blind judge prompt independently, then average their composites. Perspective diversity is the point here: a lone judge scoring output from its own session is the weakest link in the loop. There is no silent fallback to a single judge.
+For stochastic quality changes, use the predetermined paired trial budget and
+report individual wins, losses, ties, and unmeasured cases. A few passes can establish
+that a known defect was repaired; they cannot establish general non-inferiority.
+Do not add cases merely to clear a significance floor, selectively retry losses,
+or treat an insignificant difference as proof of equivalence.
 
-   Give each role the same blind prompt:
-   ```
-   Score this response on the rubric below. Do not mention improvements or what round this is.
-   Response: [agent_response for {test_id}]
-   Rubric checks: [checks array from eval criteria for {test_id}]
-   Return: score (1-5 per check), one-sentence rationale per check, composite (0.0-1.0).
-   ```
+After selecting the final candidate using development cases, run acceptance cases
+that the editor has not seen. If their results inform more editing, they are now
+development cases. State that limitation and reserve fresh acceptance cases before
+making a broader generalization claim. Run description checks when routing changed,
+using [trigger testing](description-trigger-testing.md).
 
-   Average the panel composite with the standard judge score and log `"cross_model_judge": "inline_3role"` in the workflow state.
+## Apply and stop
 
-   If you have a cross-model consensus command installed (one that fans the same question out to several model CLIs), use it here instead and log `"cross_model_judge": "cross_model"`. Genuinely different models disagree in more useful ways than three roles on one model, but the 3-role panel is the portable default and is what runs unless you wire something else in.
+For a supported candidate, apply the minimal diff to the maintained source under
+the scope protocol in [improvement](phase2-improvement.md). Re-read the files, run
+relevant validators/tests, and verify scope after the last write. Do not install,
+publish, push, or edit a second copy unless the user's task authorizes that action.
 
-3. **Same criteria, same judge framing.** Use identical eval criteria and identical judge system prompt as Phase 1. The only variable is the executor output. This makes before/after scores directly comparable.
+Continue only when a specific unresolved defect has a supported next change and
+the recorded budget permits it. Stop on a clean result, no justified edit, exhausted
+budget, a required permission/capability gap, or an unresolved scope conflict. Keep
+state and evidence for recovery. There is no grade target, momentum threshold, or
+requirement to spend all available rounds.
 
-**Pre-re-evaluation: Refresh enrichment (skills and commands only).** Phase 2 may have modified the artifact, making `required_present` entries from Phase 1 Step 6 stale (referencing identifiers no longer in the artifact). Before re-running eval runner, re-run enrichment to refresh:
+Use these verdicts with explicit scope:
 
-```bash
-python3 <skill-dir>/scripts/enrich_programmatic_checks.py \
-  --artifact-path {artifact_path} \
-  --criteria-path {eval_criteria_path} \
-  --json
-```
+| Verdict | Meaning |
+|---|---|
+| improved | A named defect was fixed or a justified simplification was verified on the reported cases, with required checks satisfied |
+| regressed | The candidate caused a confirmed outcome failure; state whether it was rejected or safely restored |
+| unchanged | Checks completed and no supported change was needed or selected |
+| inconclusive | Available evidence cannot settle the proposed change, including an exhausted budget with unresolved quality questions |
+| blocked | Required input, permission, capability, or safe edit conditions are unavailable |
 
-This is idempotent: it strips stale identifier-shaped `required_present` entries (no longer occurring in the artifact — hand-written phrases are untouched) and adds any new identifiers introduced by Phase 2 edits, so a Phase 2 rename cannot leave a permanently-MISSING check behind.
+List which models and cases were actually exercised. A simulation can establish a
+bounded decision result but cannot establish successful edits, safe runtime behavior,
+or end-to-end performance. An untested target stays untested. Separate an observed
+maintenance improvement, such as fewer redundant instructions, from measured task
+quality, latency, and token usage.
 
-**Then re-run the overfit gate (Phase 1 Step 6a), because the refresh re-derives anchors from the current artifact.** An identifier Step 6a had you remove as a `vocabulary` lift is still in the artifact and still in the check text, so the refresh adds it back, and without a gate here Phase 3 scores the recitation anchors Step 6a rejected:
+## Durable outcome report
 
-```bash
-python3 <skill-dir>/scripts/check_overfit.py {eval_criteria_path} --artifact {artifact_path} --json
-```
-
-Apply Step 6a's rule unchanged: rewrite flagged items, `vocabulary` anchors first, until the verdict is `within_threshold`, and do not touch a set that already reports it. Do this before re-running eval runner, so the after-round is scored against the same kind of criteria the before-round was.
-
-**A criteria edit invalidates the prior round's scores, exactly as a scorer edit does.** The refresh and the overfit rewrites both change the criteria file, and `score_execution.py`'s `quality_checks` dimension is `passed / total` over `required_present`: remove three anchors the before-round output was missing and every composite rises with byte-identical executor output, which step 3a then reads as a clean sweep and reports `improved`. So, once the refresh and the overfit gate are done, compare the criteria file against the copy that scored the prior round (the `.pre-enrich` backup the refresh wrote, or a hash of the file recorded with that round's scores). If anything changed, re-score the prior round's `results.json` against the *current* criteria before step 3a runs, the same way the scorer-change rule in step 5 re-scores it against a changed scorer.
-
-**A scorer change invalidates the prior round's scores the same way, and it does not need this run to have caused it.** The criteria check above compares files, not provenance, because a criteria edit that happened is a criteria edit whoever made it. The scorer needs the same reading. `score_execution.py` records `metadata.scorer_fingerprint` in every `deterministic_scores.json` it writes: a digest over the executable content of `score_execution.py` and `hone_common.py` with comments and docstrings normalized away, so it moves when scoring logic or a scoring constant moves and stays put when only prose does. Compare the prior round's against this round's:
-
-```bash
-python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['metadata'].get('scorer_fingerprint'))" \
-  $PRIOR_OUTPUT_DIR/deterministic_scores.json
-```
-
-- **They match.** The two rounds are comparable. Nothing to do.
-- **They differ.** The scoring code changed between the rounds, whoever changed it. Re-score the prior round before comparing.
-- **The prior round records none.** Every `deterministic_scores.json` written before this field existed is in this state. Absence means the scorer is *unknown*, not unchanged, so it gets the same treatment as a mismatch: re-score before comparing. Reading absence as "unchanged" is the failure this check exists to prevent — `GATE_EVIDENCE_FLOOR` landed through a merged PR and moved the `gate_compliance` mean by 0.146, past the 0.1 that auto-reverts a round, while every stored baseline still looked untouched.
-
-Re-score on mismatch or absence without first judging whether the change "could have moved a dimension". That judgement needs a reading of the scorer diff, which is exactly the kind of call the mechanical gate exists to replace, and it is asymmetric: the re-score is one deterministic local run over a `results.json` that is already on disk, while getting it wrong discards a round of working edits on a measurement artefact. The fingerprint is already narrowed to executable content, so a mismatch means the scoring code genuinely differs.
-
-```bash
-python3 <skill-dir>/scripts/score_execution.py $PRIOR_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_before_snapshot} --criteria-path {eval_criteria_path} --require-timeline --json
-```
-
-Record `baseline_original` and `baseline_adjusted` exactly as the criteria case does, and record the new fingerprint as `scorer_fingerprint` in the same round record (an optional field on both `eval_results` and `round_scores` in `scripts/validate_handoff.py`) so the round after this one can read it without re-opening the output directory.
-
-**When the prior round has no `results.json` to re-score**, nothing can make its numbers comparable. Report the round's composite with `power_verdict` beside it, do not treat any dimension drop as a regression, and do not auto-revert; step 3a returns `not_measurable` on exactly this input and the power precondition in step 5 already withholds the restore. Treat this round's scores as the new baseline and say so in the final output.
-
-**Re-score against the artifact the prior round ran against, not the current one.** `--artifact-path` is not a formality here: `score_workflow_sequence` and `score_output_structure` derive the expected steps and headings from that file, so passing the post-Phase-2 artifact re-measures the baseline against a step list its executor never saw. A `## Step N` heading Phase 2 added is then counted as a step the baseline skipped, its composite drops, and step 3a reports `improved` on byte-identical executor behaviour, which is the measurement change this re-score exists to remove. Phase 2 Step 6 wrote the pre-edit content to `applied_edits.artifact_before_snapshot` in the state file; on round 1 it is the same content as `artifact_context.original_backup_path`. Read the path from the state file and pass it:
-
-```bash
-python3 <skill-dir>/scripts/score_execution.py $PRIOR_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_before_snapshot} --criteria-path {eval_criteria_path} --require-timeline --json
-```
-
-The only input that differs between this re-score and the prior round's original scoring is the criteria file. Everything else (trace, artifact, scorer) is held fixed, so the delta is the criteria change alone.
-
-That rewrites `$PRIOR_OUTPUT_DIR/deterministic_scores.json`, which is the file step 3a's `--before` reads. Step 5's per-dimension regression check reads something else, `eval_results.per_test` or `round_{N-1}_scores.per_test` in the state file, and those still hold the scores the retired criteria produced. Leaving them there gives the two checks two different baselines: 3a compares against the adjusted one while step 5 compares against the stale one, so a criteria change that moved `quality_checks` either masks a real drop or fires a phantom regression that survives resampling (the criteria delta is deterministic) and auto-reverts working edits. So, before overwriting the deterministic file, record two fields inside the prior round's own record in the state file (`eval_results` on round 1, `round_{N-1}_scores` after that; both schemas in `scripts/validate_handoff.py` carry them as optional fields):
+Write `outcome-report.json` in the exact run directory. It includes:
 
 ```json
-"baseline_original": {"composite_score": 0.71, "per_test": [...]},
-"baseline_adjusted": {"composite_score": 0.74, "per_test": [...]}
+{
+  "schema_version": 3,
+  "measurement": "outcomes",
+  "run_id": "the-resolved-run-id",
+  "artifact_path": "/canonical/path/to/the/artifact",
+  "edit_path": "/canonical/path/to/maintained/source",
+  "finished": true,
+  "verdict": "inconclusive",
+  "identity": {
+    "artifact_before_sha256": "digest",
+    "artifact_after_sha256": "digest",
+    "source_before_sha256": "digest",
+    "source_after_sha256": "digest",
+    "criteria_sha256": "digest",
+    "grader_sha256": "digest",
+    "targets": []
+  },
+  "cases": [],
+  "comparisons": [],
+  "edited_paths": [],
+  "limitations": [],
+  "evidence_paths": []
+}
 ```
 
-`baseline_original` copies the record's own `composite_score` and `per_test`; `baseline_adjusted` carries the same two fields from the re-score, with `per_test` in the shape step 6 writes (each entry's `dimension_scores` included). Step 5 reads `baseline_adjusted.per_test` when it is present and the record's own `per_test` otherwise; both rounds are then compared against one criteria set on every check, and the sign test and the regression check measure the artifact change alone. `check_eval_power.py` cannot detect a criteria change for you: `deterministic_scores.json` records the artifact type that scored it, not the criteria that did.
+Populate placeholders from the run; empty arrays in this shape are illustrative,
+not evidence that evaluation happened. Each case records `id`, `target` (a target
+ID), `arm` (`current`, `candidate`, or `no_skill`), positive integer `trial`,
+`mode` (`simulation` or `execution`), and
+`checks`. Each check carries `id`, boolean `required`, `result` (`pass`, `fail`,
+`unmeasured`), `method` (`artifact`, `judgment`, or `trace`), and `evidence_paths`
+to independently inspected files. Record why evidence is
+missing. Separate a raw harness log, a deterministic assertion result, and a model
+judgment so readers can see what supports each conclusion.
 
-Steps:
-1. Re-read artifact and eval criteria from disk (compaction protection).
-2. Re-run eval runner with `--reuse-criteria`.
-3. Run deterministic scoring on re-eval results:
-   ```bash
-   python3 <skill-dir>/scripts/score_execution.py $REEVAL_OUTPUT_DIR/results.json --type {artifact_type} --artifact-path {artifact_path} --criteria-path {eval_criteria_path} --require-timeline --json
-   ```
-3a. **Power verdict (Phase 1 Step 9a).** The composite from step 3 is a number, not a result, until the sign test says whether the round's movement is distinguishable from noise. Run the comparison Step 9a specifies, with `$PRIOR_OUTPUT_DIR` read from the workflow state file, never from memory: on round 1 it is `eval_results.output_dir` (Phase 1's baseline); on round N >= 2 it is `round_{N-1}_scores.output_dir`, which step 6 records for exactly this purpose. Comparing round 2 against Phase 1's baseline would credit round 1's gain to round 2. Point `--after` at this round:
-   ```bash
-   python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} --artifact-type {artifact_type} --before $PRIOR_OUTPUT_DIR/deterministic_scores.json --after $REEVAL_OUTPUT_DIR/deterministic_scores.json --json
-   ```
-   `check_eval_power.py` enforces the fingerprint comparison mechanically: it reads `metadata.scorer_fingerprint` from both rounds' `deterministic_scores.json` and returns `not_measurable`, naming both fingerprints, when they differ or when either is absent. That is the same treatment it already gives a deterministic/judge scorer swap, for the same reason — two numbers on the same 0-1 scale that no single measurement produced. If it fires, do the re-score the pre-re-evaluation section describes and run this command again; the verdict it returns after the re-score is the one to record.
+The artifact hashes describe the requested entry file at `artifact_path`. The
+source hashes describe the maintained-source snapshot rooted at `edit_path`,
+including the entry file and relevant companion files through a frozen manifest
+of canonical paths and content hashes. Retain both manifests as evidence. When
+only source is edited, the requested installation's hashes can remain identical;
+that does not establish that the installation was updated. Run candidate trials
+from the identified source snapshot and label any unsynchronized installation.
 
-   Record `power_verdict` (the top-level `verdict`), `power_p_improved` (`comparison.p_improved`), and `power_discordant` (`comparison.discordant`) beside this round's composite in the state file, and read the verdict as Step 9a does: `underpowered` and `not_measurable` are neither a pass nor a regression, and neither is ever reported as an improvement. The per-dimension comparison and regression check below still run; the power verdict is recorded alongside them, and the Final Output reports it with the grade.
+Each target records `id`, resolved `model`, `effort`, `harness`, `harness_version`,
+`tools` (a list), `permissions` (a description), `environment_sha256`, and
+`context_sha256`. For direct deterministic hook/script checks, model and effort
+may be `not_applicable`; identify the actual runtime and version as the harness.
+Unknown configuration values stay explicitly unknown, with a
+limitation; early blocked or inconclusive reports may have null hashes and empty
+cases/targets with the reason recorded. An improved report needs measured candidate
+cases, passing candidate required checks, complete comparable identities, and existing evidence
+files. Schema validation establishes structure, not the truth of those findings.
+Expected failures in the current or no-skill arms remain in the report and do not
+by themselves disqualify an improved candidate.
+Each comparison identifies its two arms,
+paired cases, observed benefit or failure, and uncertainty. Include actual timing
+and usage when available, otherwise null. Keep the report outside candidate writes.
 
-   **`underpowered` and `not_measurable` gate the auto-revert in step 5.** Phase 1 Step 6b is advisory below its floor, so an under-floor round no longer halts at Phase 1 — it arrives here. Step 9a's rule ("never let it justify a promotion or a revert") has to hold in both directions or making 6b non-blocking would just route more runs into a revert the same rule calls unjustified. Concretely: on either verdict, step 5 does not auto-revert and this round claims no improvement. Record the composite with the verdict beside it as the qualifier, report a suspected regression as suspected, and leave the call to the human.
+Before finalizing, verify that its run ID and artifact identity match state, all
+referenced files exist, and the stated verdict follows the observed outcomes and
+scope result. Write atomically and read it back. Callers must read this exact path
+and check `schema_version`, `measurement`, `run_id`, `artifact_path`, and `finished`.
+They must not find an arbitrary newest `results.json`, derive a legacy grade, or
+compare old simulated-plan scores to this report.
 
-   **On a `--fix-only` run there is no baseline on round 1.** That run shape skips Phase 1 entirely (`eval_results` is never written, and Step 6b never ran either), so `$PRIOR_OUTPUT_DIR` is empty and the comparison has nothing to pair; pointing `--before` at `/deterministic_scores.json` is a usage error (exit 2), not a verdict. On the first Phase 3 round of a fix-only run, run the sizing half alone and record its verdict, which is the same thing Phase 1 records on a first round with nothing to compare against:
-   ```bash
-   python3 <skill-dir>/scripts/check_eval_power.py {eval_criteria_path} --artifact-type {artifact_type} --json
-   ```
-   Record `power_verdict` as `powered` or `underpowered` with no `power_p_improved` or `power_discordant`; this round's scores are the baseline, not a delta, and steps 4 and 5 below have no previous round to compare against, so skip them and write step 6's record. The comparison starts on round 2, against `round_1_scores.output_dir`.
-4. Compare scores: before/after table per-dimension using deterministic scores from workflow state file (`baseline_adjusted.per_test` when the pre-re-evaluation section recorded it, the prior round's own `per_test` otherwise).
-5. **Regression check (rubric):** Re-read previous scores from the workflow state file (`eval_results.per_test` or last round's recorded scores). Do NOT use in-memory scores from earlier in the conversation. If the pre-re-evaluation section recorded `baseline_adjusted` for the prior round, its `per_test` is the previous score: it is the same criteria set this round was scored against, and the file step 3a compared against. For each dimension, compare new score to previous score read from the state file. If ANY dimension dropped by more than 0.1, flag as regression, then run the variance control below before reverting anything.
-
-   **Resolution precondition for `gate_compliance`.** This dimension is a ratio over the gate events a run emitted, and the measured corpus (289 scored records) has a mean of 3.00 events per test with 30.6% at exactly one. A ratio over one to three events does not have 0.1 of resolution, so `score_execution.py` divides by at least `GATE_EVIDENCE_FLOOR` (4) events and counts the shortfall as neutral; the dimension's `evidence` string names the padding when it applied ("2 of the 4-event evidence floor, 2 counted neutral"). That bounds a single event's re-reading at 0.25, so it does not put a thin `gate_compliance` delta under the 0.1 threshold on its own. **When a flagged `gate_compliance` drop comes from a test whose evidence string shows padding, the delta rests on at most three observed events and the variance control below is not optional** — one resample is the difference between a real regression and one gate the executor emitted differently. Report the event counts on both sides alongside the delta.
-
-   **Power precondition (checked before any revert, including after resampling).** If step 3a recorded `power_verdict` as `underpowered` or `not_measurable`, do NOT auto-revert, whatever this check and the resampling below conclude. Record the flagged dimensions, the medians, and the power verdict; report "Round N shows a suspected regression in {dimensions}, unverifiable at this suite size ({power_verdict}); edits left in place for review" and halt the improvement loop for the human rather than restoring the snapshot. The regression check and the sign test measure different quantities, so they are not statistically contradictory, but the evidence standard is the same one: a suite too small to promote on is too small to revert on, and reverting on it discards working edits on evidence Step 9a says cannot carry a verdict. The remedy is the one Step 6b names — add cases that discriminate a different property — not a revert. Everything below still runs and is still recorded; only the restore is withheld.
-
-   **Before believing any before/after delta, bound it.** Run-to-run variance in agentic evals is large enough to swamp a small-N comparison, and a chunk of it is infrastructure rather than the artifact. Bootstrap a confidence interval over the per-test scores on each side and compare intervals, not point estimates. A delta whose interval straddles zero is not a result in either direction, and neither improving nor reverting on it is justified.
-
-   **Comparability check (before treating any drop as a regression).** Re-scoring fixes a changed *formula*; it cannot fix a changed *input*. If the previous round's records lack a field the current round's records carry (most often `execution_timeline`), every dimension reading that field was unmeasured before and measured now, and will appear to collapse because the absent-evidence path returns a vacuous pass. Classify each regressed dimension as **comparable** (reads only fields present in both rounds) or **not comparable**. Auto-revert only on a comparable drop. Report a not-comparable dimension as a first measurement, never as a delta.
-
-   **Variance control (required before auto-revert).** One re-eval run is a single sample per test, and executor behavior varies across runs on anything that depends on tool availability (whether an executor reached for `AskUserQuestion` before falling back to text, whether it emitted a structured gate event). A single noisy sample must not discard working improvements.
-
-   - Identify which tests feed the regressed dimension. Re-run only those tests, twice more, using identical criteria and the same blind framing.
-   - Recompute the dimension from the **median** of the three samples per test.
-   - If the median still shows a drop > 0.1: the regression is real. Auto-revert and halt — unless the power precondition above withheld the revert, in which case halt and report without restoring.
-   - If the median clears the threshold: record `"variance_confirmed": true` with the per-sample scores in the state file and continue. Do not revert.
-
-   Record the attribution alongside the decision: which edits this round touched the sections or scripts that feed the regressed dimension. A regressed dimension with no edit touching its inputs is evidence for variance, but it does not replace the resampling. Resampling is the operative test, because attribution reasoning is exactly the kind of judgment call the mechanical gate exists to constrain.
-
-   When the regression survives resampling and the power precondition allows a revert, auto-revert edits from the last round (restore from the pre-edit re-read) and report "Round N caused regression in {dimensions}; changes reverted." **After auto-revert, halt the improvement loop immediately — do not loop back to Phase 2.** A regression signals that the improvement direction was wrong; blindly retrying without understanding the failure would waste rounds. Present final output using pre-revert scores.
-
-   **When a different scorer produced the baseline**, re-score the previous round's `results.json` with the current scorer before comparing. The trigger is the fingerprint comparison the pre-re-evaluation section runs, not whether this run edited `score_execution.py`: a scorer change that arrives through a merged PR never touched this run and is exactly the case the old provenance rule missed. Otherwise the before/after delta mixes an artifact change with a measurement change, and improvements to the scorer read as improvements to the artifact. Record both the original and adjusted baseline in the state file, in the `baseline_original` / `baseline_adjusted` shape the pre-re-evaluation section defines, and re-score against the artifact the prior round ran against (`artifact_before_snapshot`), not the current one. A criteria change is the same kind of measurement change and gets the same treatment; the pre-re-evaluation section above says when and how.
-6. Write this round's scores to the workflow state file under `round_{N}_scores`, together with where they came from, so the next round can find its baseline after a compaction:
-   ```json
-   {"output_dir": "$REEVAL_OUTPUT_DIR", "composite_score": 0.82, "per_test": [...], "power_verdict": "improved", "power_p_improved": 0.0312, "power_discordant": 6}
-   ```
-   `output_dir` is the field step 3a reads on the following round; `per_test` is what step 5 reads (each entry carrying `test_id`, `score`, `status`, and `dimension_scores`, the shape `eval_results.per_test` uses). The record is validated against the `round_scores` schema in `scripts/validate_handoff.py`: `python3 <skill-dir>/scripts/validate_handoff.py $STATE_FILE --handoff round_{N}_scores`, and `--all` picks every `round_{N}_scores` key up on its own. The record is required, not optional: `phase3_reevaluate` declares it as its produced handoff, so a `done` Phase 3 round that wrote none fails `--step phase3_reevaluate` and `--all` rather than passing silently and leaving the next round to re-baseline on `eval_results.output_dir`. Also append a gate event to `gates[]`:
-   ```json
-   {"step": "phase3_exit", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
-   ```
-   Set `result` to `"fail"` if a regression was detected and edits were reverted. Append to `state["gates"]` — do not replace.
-7. **Convergence check.** Run the check over this round's ledger and emit its gate event. This is the `convergence` event the gate table marks mandatory; the run does not exit without it.
-
-   ```bash
-   python3 <skill-dir>/scripts/check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json
-   ```
-
-   **Branch on the JSON `verdict`, not the exit code.** Only `converged` exits 0, so `in_progress` — the ordinary "keep going" case — exits 1 alongside the two halt verdicts. Treat exit 1 as "not converged yet" and read the verdict. Only exit 2 (missing or unparseable ledger) is a real failure.
-
-   Append the gate event in every case, including the ordinary one:
-
-   ```json
-   {"step": "convergence", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
-   ```
-
-   Use `result: "pass"` for `converged` and for `in_progress`: the check ran and did not halt the loop. Use `result: "fail"` for `escalate` and for `capped`, then halt.
-
-   **A failing `convergence` MUST declare which failure it is, in a `reason` field carrying the script's own verdict:**
-
-   ```json
-   {"step": "convergence", "judge": "self-check", "result": "fail", "reason": "escalate", "ts": "<ISO timestamp>"}
-   {"step": "convergence", "judge": "self-check", "result": "fail", "reason": "capped", "ts": "<ISO timestamp>"}
-   ```
-
-   The vocabulary is closed -- `escalate`, `capped`, `ledger_missing` -- and `scripts/hone_common.py` (`HALT_REASONS`) is authoritative; `references/gate-event-schema.json` mirrors it. Copy the value out of the JSON you just branched on; there is nothing to compose. This matters because the three have opposite settlement rules and identical event shapes: only `capped` may be restarted by the `--confirm` grant below, only `ledger_missing` has an in-place re-run, and `escalate` has neither. `hone_common.fail_is_accounted` reads the field, and reads it in one direction only: a declaration can rule a settlement OUT, never in. Measured against the behaviour before the field existed, `escalate` forfeits both the retry and the restart, `ledger_missing` forfeits the restart, and `capped` forfeits the retry. An omitted, empty, misspelled, or invented reason reads as "not declared" and forfeits **both** -- the strictest reading there is, tied with `escalate` and below the other two -- because an event that cannot say which failure it was gets the answer "cannot tell", and "cannot tell" resolves to "refuse" everywhere in this pipeline. That second half matters as much as the first: were silence to keep a settlement a truthful `escalate` gives up, declaring the truth would cost you gate score, and the field would be a reason to stay quiet. `validate_gates.py` additionally reports an out-of-vocabulary value as an error. So nothing you can write here buys the run a settlement it did not already have, and nothing you can leave out beats a value from the vocabulary. Which means: **on the events your run actually emits, the truth scores at least as well as anything else you could put here, and usually better** -- the repair you really did emits the adjacent re-run, where only `ledger_missing` is accounted, and the `capped` you really hit emits the exit and the `resume`, where only `capped` is. Copy the verdict and move on.
-
-   - On `escalate` the loop is not converging (a finding open four rounds, a blocking count flat for four, or a finding closed in one file that reopens as a NEW finding in another; each is measured within the current run, not across the ledger's whole history). Two distinct findings that happen to share summary wording in different files are not a relocation: the destination has to be an id that was not already open before the close. Both counting bars sit one above the templated `max_rounds: 3`, so exhausting the budget alone reports `capped` and reaches the human gate below, while `escalate` means the loop is going nowhere with rounds still to spend. `scripts/check_convergence.py` is authoritative for the numbers. Halt and report the finding ids.
-   - On `capped` the round budget ran out with blocking findings still open. Report it as **capped, not converged**, list the open blocking findings, and halt. Never present a capped run as success.
-   - On `converged` or `in_progress`, continue to the mechanical exit gate below.
-   - **On exit 2** the ledger is missing or unparseable, which means Phase 2 Step 8 did not run or wrote a shape the script rejects. This is repairable, not fatal, and the run does not get to skip the gate because of it. Emit the event as a failure first, so the omission is on the record:
-
-     ```json
-     {"step": "convergence", "judge": "self-check", "result": "fail", "reason": "ledger_missing", "ts": "<ISO timestamp>"}
-     ```
-
-     Then write the ledger from this round's findings following Phase 2 Step 8 (`references/phase2-improvement.md`), resolving `max_rounds` to `iteration.target` and `run` to `${RUN_ID}`, and re-run the check ONCE. Its verdict drives the branches above, and the `convergence` event it emits closes the failed one. Emit nothing between the two: `convergence` is scored as a per-attempt gate, and a later attempt settles an earlier failure only across an empty gap or one that opens with `resume` (SKILL.md's Gate Events section states the rule). That is what makes the repair work even when the re-run itself returns `escalate` or `capped`, which produces a second `fail` and so no repair `pass` to close the first. The retry is constrained on the OTHER side too, and the declaration does not lift that: what follows the re-run must itself be the halt's tail. So a re-run that comes back `in_progress` and legitimately continues into more rounds leaves the first fail scored as not accounted, which costs gate score on a correct run. That cost is deliberate. The honest repair and the laundering of an ignored `escalate` emit the same steps with the same results in the same order, `reason` is written by the run being scored, and nothing available corroborates it -- so relaxing the rule on the strength of the declaration would make lying score better than telling the truth. The re-run's own event still has to account for itself -- it is a fresh verdict, with its own `reason` when it fails -- which is what stops a chain of fails from laundering each other. **Do not omit the `reason` on the first event and expect the repair to be credited anyway.** This retry is reachable only for a fail that declared `ledger_missing`; an undeclared exit-2 fail forfeits it exactly as `escalate` and `capped` do, so a state file written before this field existed loses the settlement on a repair that was correct. That is the migration cost, and it is the same trade as the restart: a correct run losing gate score is cheap, and a scheme where saying nothing beats saying `escalate` is not. Do not loop: a second exit 2 is an error halt. Report the ledger path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop rather than continuing without the check.
-
-   **`escalate` and `capped` outrank the mechanical exit gate's BLOCKED conditions.** They are a HALT verdict, not an input the gate weighs, and the gate's own precedence rule is written below to say so. Without that, the two decisions contradict each other in the ordinary case: on `escalate` with rounds remaining and score momentum, the gate's first BLOCKED condition (`iteration.current < iteration.target` AND score improved >= 0.02 AND composite < 0.9) is true, meaning "keep going" — the exact opposite of the halt this step just ordered. Momentum is precisely what a non-converging loop looks like from the score's point of view, which is why this check exists at all, so the halt wins and the loop stops.
-
-8. **Mechanical exit gate** (see Final Output below). The state file decides whether to continue or exit, not the LLM.
-9. If gate says CONTINUE: increment round, loop back to Phase 2.
-
-## Final Output
-
-
-**MECHANICAL EXIT GATE (replaces introspective anti-laziness checklist):**
-
-The prior approach was an LLM-evaluated checklist: the improving agent would ask itself "have I tried hard enough?" This is gameable — the same agent evaluating whether to continue has incentive to rationalize early exit. The mechanical gate replaces that checklist with a state-file-driven decision: the LLM reads objective data (scores, iterations, delta) and applies deterministic rules. The LLM can read the gate conditions but cannot override them.
-
-The state file decides when to exit. The LLM cannot override these checks. Re-read `/tmp/workflow-${RUN_ID}.json` and evaluate each condition:
-
-**PRECEDENCE: HALT is checked first, then BLOCKED, then ALLOWED.**
-
-1. **Exit FORCED (halt now)** when the step 7 convergence verdict is `escalate` or `capped`. Nothing below is consulted. "Nothing below" means the BLOCKED and ALLOWED condition lists; the `--confirm` human gate at the end of this section sits OUTSIDE the three-tier precedence and is described there.
-2. **BLOCKED** is checked next. If ANY BLOCKED condition is true, do NOT exit, regardless of ALLOWED conditions. This prevents the failure mode where "all individual test scores >= 0.8" triggers exit while momentum exists and rounds remain. (The 0.8 per-test bar mirrors `ACTIONABLE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative.)
-3. **ALLOWED** is checked only if no BLOCKED condition matched.
-
-`converged` and `in_progress` are NOT halt verdicts and do not enter tier 1. They are inputs the BLOCKED and ALLOWED lists weigh like any other state, so `converged` on round 2 of 3 with momentum still running is BLOCKED: the loop keeps going, because there are rounds left and the score is still moving. Reading `converged` as an exit order would put the verdict above the gate the section opens by calling authoritative. Step 9's "if the gate says CONTINUE, loop back" is the whole loop condition; the verdict is not a second one.
-
-**Exit FORCED (halt, do not loop back) when ANY are true** (checked FIRST):
-- [ ] Step 7's convergence verdict is `escalate` — the loop is spending rounds without converging. Report the finding ids. **Report the run as escalated, not as complete.**
-- [ ] Step 7's convergence verdict is `capped` — the round budget ran out with blocking findings still open. **Report the run as capped, never as success.**
-
-A halt verdict is not weighed against momentum; it overrides it. A non-converging loop looks exactly like momentum from the score's point of view — a rising composite while the same findings churn — so letting the momentum condition win would disable the convergence check in precisely the case it exists to catch. The `convergence` gate event carries `result: "fail"` in both cases, and `workflow_exit` still follows it (see SKILL.md's Gate Events table for the order).
-
-**Exit BLOCKED (keep going) when ANY are true** (checked only if no FORCED condition matched):
-- [ ] Any step is `"pending"` or `"in_progress"` in the state file
-- [ ] `open_questions` is non-empty
-- [ ] `iteration.current < iteration.target` AND score improved this round by >= 0.02 AND composite < 0.9 AND (`{target_score}` is unset OR composite < `{target_score}`) (momentum, not plateau — but grade A artifacts or target-met artifacts are allowed to exit early)
-- [ ] Any test has score < 0.5 AND `iteration.current < iteration.target` (significant failure with rounds remaining; the 0.5 bar mirrors `CRITERIA_BUG_THRESHOLD` in `scripts/hone_common.py`, which is authoritative)
-
-**Exit ALLOWED when ALL are true** (checked ONLY if no BLOCKED conditions matched):
-- [ ] All steps in `steps` object are `"done"` (no `"pending"` or `"in_progress"`)
-- [ ] `open_questions` array is empty (all tracked questions resolved)
-- [ ] Phase 3 re-evaluation completed for this round (`phase3_reevaluate` is `"done"`)
-- [ ] One of:
-  - `iteration.current >= iteration.target` (round budget exhausted), OR
-  - Composite score >= 0.9 (grade A, nothing left to improve). Note: this is the COMPOSITE score, not individual test scores. A composite of 0.87 with all tests above 0.8 is still grade B and should keep improving if rounds remain., OR
-  - `{target_score}` is set AND composite score >= `{target_score}` (user-specified convergence target met early), OR
-  - Score delta between last two rounds < 0.02 AND zero actionable failures remain (genuine plateau)
-
-**Forced exit with human gate (--confirm mode only):**
-- Only a halt whose `convergence` event declared `reason: "capped"` reaches this gate. Continuing after `escalate` is a fresh `/hone` invocation with the findings triaged by hand, not an extension of this one, and `hone_common.is_authorized_restart` enforces that from the declaration: a `resume` behind an `escalate`, or behind a `convergence:fail` that declared nothing, settles nothing.
-- If rounds exhausted but tests with score < 0.5 remain (0.5 mirrors `CRITERIA_BUG_THRESHOLD` in `scripts/hone_common.py`, which is authoritative): present the failures to the user and ask whether to add more rounds or accept the current state. In `--auto` mode: log `"exit_with_low_scores": true` and the test IDs in the state file, but do exit (the round budget is a hard cap in --auto to prevent infinite overnight loops).
-
-**Where this gate sits relative to the FORCED halt.** Outside it, and after it. The FORCED halt ends the automatic loop: the run stops, the `convergence` event carries `result: "fail"`, and the outcome is reported as escalated or capped. Asking the human is not the loop continuing, it is what happens once the loop has stopped, so the two do not contradict each other and the halt is never weighed against the answer.
-
-Which halt reaches the gate depends on what the halt says:
-
-- `capped` **does** reach it, in `--confirm` mode. `capped` means the budget ran out with work outstanding, which is the exact situation this gate exists for; without this the gate would be unreachable in every case where it mattered. If the human grants more rounds, raise BOTH `iteration.target` in the state file AND `max_rounds` in the ledger before resuming, then emit a `resume` gate event and re-enter Phase 2. Raising only `iteration.target` re-caps the run on its very next convergence check, because `capped` is read off the ledger's `max_rounds`. The `resume` event is not bookkeeping: the gate stream cannot otherwise tell an authorized restart from a run that ignored the `capped` halt and looped anyway, and without it the `convergence:fail` that halted the loop scores as an ignored halt (SKILL.md's Gate Events section). The order is `convergence:fail`, then the halt's own `workflow_exit`, then `resume` -- the halt has already happened by the time the human is asked, so its exit event is already on the record. That exit PASSES: `capped` is a clean stop carrying a bad verdict, and `workflow_exit: fail` is reserved for an error halt.
-- `escalate` does **not** reach it. More rounds is the wrong remedy for a loop that is not converging: the finding is stuck, the count is flat, or the problem is moving between files, and another round spends budget on the same shape. Report the finding ids and stop. If the human wants to continue anyway, that is a fresh `/hone` invocation with the findings triaged by hand, not an extension of this one.
-- In `--auto` mode neither reaches it, unchanged: the round budget is a hard cap.
-
-**Anti-gaming note:** `open_questions` is auto-populated from structural data (eval scores in 0.4-0.7, failed structural pillars, fresh-eyes disagreements) BEFORE the main thread touches the array. Auto-generated questions are tagged `"source": "auto"` and cannot be removed by the LLM. The main thread can add `"source": "manual"` questions but cannot delete auto-generated ones. The remaining trust surface is limited to: the LLM choosing not to add manual questions it should have. This is a narrower gap than the original (LLM populating the entire array), and is partially covered by fresh-eyes reconciliation surfacing findings the main thread missed.
-
-```
-═══════════════════════════════════════════════════
-Hone Complete: {type}/{name}
-
-  Rounds: {rounds_completed}
-  Grade:  {initial_grade} → {final_grade} ({initial_score} → {final_score})
-  Structure: {structural_score} ({ungated_count} ungated, {untyped_count} untyped handoffs)
-
-  Dimension Progress:
-    {dim1}:  {before} → {after}
-    {dim2}:  {before} → {after}
-    ...
-
-  Changes Applied: {count} edits ({structural_fixes} structural, {content_fixes} content)
-═══════════════════════════════════════════════════
-```
-
-## Common Executor Mistakes
-
-> **TOOL CALL REQUIRED, NOT TEXT OUTPUT:** When the STOP section says "Call `AskUserQuestion`", you MUST invoke the `AskUserQuestion` tool. The judge checks the execution trace for tool calls. Printing the question as assistant text is a gate failure even if the question text is correct.
-
-When executing this skill, avoid these patterns:
-
-1. **Printing text instead of using AskUserQuestion.** When the STOP section or argument validation says "Call AskUserQuestion", you must call the `AskUserQuestion` tool. Printing the question as assistant text does NOT satisfy the gate. The tool provides an interactive picker UI that text output cannot replicate.
-
-2. **Proceeding past a STOP gate.** When a gate says "STOP immediately", that means no further workflow steps should execute. Do not write the workflow state file, do not run structural audit, do not launch eval runner. Stop and address the gate failure.
-
-3. **Leaking workflow terms into error output.** When stopping on a validation error (invalid type, missing args, conflicting flags), your response must ONLY contain the error message and guidance. Do NOT describe what the skill would have done (phases, eval runner, structural audit, etc.). The `required_absent` checks in eval criteria will fail your response if workflow terms appear in error output.
-
-4. **Using workflow-internal terms in fallback output.** When AskUserQuestion is unavailable and the fallback fires, your output must contain ONLY the question and options — no references to Phase 1, structural audit, eval criteria, or any other hone-internal step. Leaking internal terms into a user-facing stop message is a hard failure even if the question itself is correct.
-
-5. **Sequential reads for independent files.** When a phase starts by reading multiple unrelated files (artifact, reference file, state file), issuing them one at a time is a latency violation. Batch all independent Read calls into a single parallel tool-use turn.
-
-## Context Compaction Protection
-
-This workflow runs 30+ minutes per eval round. After generating/editing eval criteria, re-read from disk. After each eval runner run, record output path and scores. After applying edits, re-read to confirm. Before re-evaluation, re-read both files.
+Legacy caches and workout versions that cannot consume this contract need an
+explicit integration update. Leave old evidence intact and report that legacy
+grades are stale. Do not rebuild a fresh-looking grade from old scores and new
+instruction hashes. An incompatible old state is preserved, never migrated by
+inventing missing observations.

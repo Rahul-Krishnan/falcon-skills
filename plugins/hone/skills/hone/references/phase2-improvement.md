@@ -1,530 +1,83 @@
-## Phase 2: Improve
+# Improve a candidate
 
-**Pre-phase validation:** Before starting Phase 2, run the comprehensive handoff validation:
+Read the frozen task requirements, baseline observations, and the relevant source.
+Classify each failure by inspecting evidence: artifact defect, fixture/grader defect,
+harness failure, or uncertain observation. This classification requires judgment;
+a numeric threshold cannot decide which component is wrong.
 
-```bash
-python3 <skill-dir>/scripts/validate_handoff.py \
-  /tmp/workflow-${RUN_ID}.json --all --json
+Fix an invalid experiment before comparing candidates. Version changed cases,
+fixtures, or graders and run both arms again under the corrected setup. Re-scoring
+old outputs is sufficient only when the measurement changes without changing the
+task or execution environment. Never silently relax a check to make the candidate win.
+
+## Plan a small coherent change
+
+For each proposed edit, state the task failure or maintenance problem it addresses,
+the requirement it preserves, and how it will be checked. Prefer a focused change
+to an unrelated cleanup. Do not change the product, user preferences, project
+settings, or companion skills just to improve a grade.
+
+Challenge instructions that duplicate model capabilities, repeat a check already
+enforced by tooling, or impose unnecessary decomposition. Remove a coherent group
+and compare against the frozen baseline. Preserve explicit user preferences and
+permission boundaries across arms. Absence of a failure in a small suite is limited
+evidence, not proof that an instruction is universally unnecessary.
+
+Keep deterministic helpers when they provide reliable useful work. Check callers
+before consolidating or retiring one. Add a validator only for an actual contract
+or demonstrated failure; do not compile every emphatic word into a new program.
+
+An independent reviewer receives task requirements, source, and raw failure evidence,
+without the editor's proposed answer. Review ambiguous or consequential changes;
+do not require a panel for every small correction. Resolve disagreement against
+sources or tests. Record unresolved judgment explicitly instead of averaging it away.
+
+## Protect the edit boundary
+
+Keep originals and trial candidates outside one another. Before any maintained-source
+write, snapshot the exact edit target using the existing guard:
+
+```sh
+python3 "$HONE_DIR/scripts/check_scope.py" --artifact "$EDIT_PATH" --type "$ARTIFACT_TYPE" --manifest "$RUN_DIR/scope.json" --snapshot --json
 ```
 
-This validates every handoff written during Phase 1 (`artifact_context`, `eval_results`, and optionally `structural_audit`, `reference_validation`). If any fail: fix the state file, re-validate, do not proceed. `--all` consults the run-shape table in `scripts/hone_common.py`: it checks every handoff that is present, plus any whose producing step the derived run shape activates and marks `done` — so a handoff a skipped step never produced (per scope_intent tier, or all of Phase 1 on a `--fix-only` run) is not demanded, and a `--fix-only` run at Phase 2 entry passes with zero handoff blocks.
+Resolve `HONE_DIR` from the host-injected skill directory, or the discovered actual
+hone directory. `EDIT_PATH` is maintained source, not the installed copy used for
+reading. The guard derives its watch root and artifact scope separately. Report
+narrowed coverage (`root_fallback`) instead of describing it as complete protection.
 
-### Step 1: Read and analyze results
+Preserve a byte-for-byte original snapshot of every file to be changed, including
+pre-existing uncommitted content. Record which paths did not exist. Before applying
+an edit, check that the live contents still match the expected pre-edit contents.
+If another actor changed the file, stop and reconcile; do not overwrite their work.
 
+Record every source or companion-file write in `applied_edits.edited_paths` in v3
+state. Trial artifacts and run records live separately and are not source edits.
+After edits, run:
 
-Run deterministic failure triage:
-
-```bash
-python3 <skill-dir>/scripts/analyze_results.py $OUTPUT_DIR/results.json --triage
+```sh
+python3 "$HONE_DIR/scripts/check_scope.py" --manifest "$RUN_DIR/scope.json" --verify --declared-file "$STATE_FILE" --json
 ```
 
-Parse JSON output. The script classifies each test as `criteria_bug`, `variance`, `real_issue`, or `pass`. When `deterministic_scores.json` exists alongside results.json (from Step 8), the script uses deterministic scores for classification.
-
-**Persist triage output to disk** (compaction protection):
-```bash
-python3 <skill-dir>/scripts/analyze_results.py $OUTPUT_DIR/results.json --triage > $OUTPUT_DIR/triage.json
-python3 <skill-dir>/scripts/analyze_results.py $OUTPUT_DIR/results.json > $OUTPUT_DIR/analysis.txt
-```
-
-Also run the human-readable analysis for context:
-
-```bash
-python3 <skill-dir>/scripts/analyze_results.py $OUTPUT_DIR/results.json
-```
-
-Route based on triage classifications:
-- `criteria_bug` count > 0 → proceed to Step 2 (Criteria Self-Repair)
-- `variance` → exclude from analysis
-- `real_issue` → actionable improvement opportunity (Step 4)
-- All `pass` → skip Phase 2
-
-### Step 2: Criteria Self-Repair (V1: pattern table only)
-
-
-**Skip this step if no `criteria_bug` classifications in triage.** Proceed to Step 4.
-
-This step applies deterministic fixes to eval criteria when tests fail due to test design issues (not skill quality). It uses a pattern table, not an LLM, to avoid self-gaming. The pattern table is append-only during runs; new patterns require human review between runs.
-
-**Anti-gaming boundary:** This step modifies eval criteria, not the artifact. It can only tighten tests (remove tools, add required_absent, clarify runner_context). It cannot weaken tests (lower rubrics, remove `checks` entries, add tools). The `checks` array and rubric scores are untouchable.
-
-**Flow:**
-
-1. **Run pattern matcher:**
-   ```bash
-   python3 <skill-dir>/scripts/criteria_self_repair.py {results_path} --json
-   ```
-   Parse JSON output. The script matches each failing test against known criteria bug patterns (recursive timeout, empty response, tool access errors) and outputs proposed fixes.
-
-2. **For each matched fix, apply via Edit tool:**
-   - `allowed_tools` with `action: "remove"`: remove the specified tools from the test's `allowed_tools` list
-   - `required_absent` with `action: "add"`: add the specified strings to the test's top-level `required_absent` list (create the list if it doesn't exist; `required_present`/`required_absent` live at the top level of the test case, per the criteria schema)
-   - `runner_context` with `action: "append"`: append the text to the end of the test's `runner_context` field
-   - `allowed_tools` with `action: "add_if_missing"`: add only if the tool isn't already in the list (used sparingly, only for AskUserQuestion on error-handling tests)
-
-3. **Validate repaired criteria:**
-   ```bash
-   python3 <skill-dir>/scripts/validate_eval_criteria.py {eval_criteria_path}
-   ```
-   If validation fails, revert the criteria file from backup and skip this step.
-
-4. **Post-fix verification (per-test):** Re-run eval runner on ONLY the repaired tests. To isolate specific tests, create a temporary criteria file containing just the repaired test cases (a JSON object with only the target test entries), run eval runner against it, then delete the temp file. Use the same `--workers` and `--judge-rounds` settings.
-   - If score >= 0.65: fix accepted. Update the test's triage classification from `criteria_bug` to `pass`. (The 0.65 bar mirrors `ACCEPTANCE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative.)
-   - If score < 0.65: revert that test's criteria changes. Reclassify as `real_issue` (the pattern table was wrong; this is a skill problem, not a test problem). Log: "Pattern {pattern_name} did not fix {test_id} (post-fix score: {score}). Reclassified as real_issue."
-
-5. **Log unmatched failures:** For any `criteria_bug` tests that didn't match a pattern, log to workflow state as `unmatched_criteria_bugs`. These go to a human review queue (reported in Final Output). Do NOT attempt LLM-based fixes in V1.
-
-6. **Update triage results:** After all repairs, rebuild the `triaged_results` handoff with updated classifications. Tests that were repaired and passed verification move to `excluded` (with reason `criteria_repaired`). Tests that failed verification move to `actionable_failures`.
-
-**Safety constraints (NON-NEGOTIABLE):**
-- NEVER edit the `checks` array or `rubric` fields. These define the quality bar.
-- NEVER edit `prompt` fields. These define what's being tested.
-- NEVER add tools to `allowed_tools` (except `AskUserQuestion` for error-handling tests via `add_if_missing`).
-- NEVER remove items from `required_absent`.
-- Pattern table updates happen between runs (human-gated), not during runs.
-
-**Gate: Step 2 → Step 3 (checklist)**
-- [ ] Pattern matcher ran and produced valid JSON
-- [ ] All matched fixes were applied via Edit tool
-- [ ] Repaired criteria passed validation
-- [ ] Post-fix verification ran for each repaired test
-- [ ] Tests with score >= 0.65 accepted; tests < 0.65 reverted and reclassified (0.65 mirrors `ACCEPTANCE_THRESHOLD` in `scripts/hone_common.py`, which is authoritative)
-- [ ] Unmatched criteria bugs logged for human review
-- [ ] Triage results updated with new classifications
-
-**Handoff interface (Step 2 → Step 3):**
-```
-criteria_repair: {
-  pattern_matched: number,              // tests fixed by pattern table
-  pattern_verified: number,             // fixes that passed post-fix threshold (0.65; mirrors ACCEPTANCE_THRESHOLD in scripts/hone_common.py)
-  pattern_reverted: number,             // fixes that failed verification, reclassified
-  unmatched: number,                    // criteria bugs with no matching pattern
-  unmatched_test_ids: string[],         // for human review queue
-  repairs_applied: [{
-    test_id: string,
-    pattern: string,
-    post_fix_score: number,
-    status: "accepted" | "reverted"
-  }]
-}
-```
-Write to workflow state file. Step 2 reads the updated `triaged_results` which now reflects post-repair classifications.
-
-**Handoff interface (P2 Step 1 → Step 2):**
-```
-triaged_results: {
-  actionable_failures: [{test_id: string, score: number, failure_type: "real_issue"}],
-  excluded: [{test_id: string, reason: "criteria_bug" | "variance" | "criteria_repaired" | "inconclusive"}],
-  structural_findings: string[]   // from structural_audit, carried forward
-}
-```
-Reason routing: `criteria_repaired` is set by Step 1.5 when a criteria fix was verified; `inconclusive` covers tests that `analyze_results.py --triage` classified as inconclusive (score null, no execution evidence) — they are excluded, never coerced into `actionable_failures`. This enum mirrors the `triaged_results` schema in `scripts/validate_handoff.py`, which is authoritative; update both together.
-
-**Gate: P2 Step 1 → Step 3 (checklist)**
-- [ ] Results file was read and parsed successfully (not empty, valid JSON)
-- [ ] Each failure has been classified as `criteria_bug`, `variance`, or `real_issue`
-- [ ] `structural_findings` array is populated from workflow state (may be empty if structural audit found no issues)
-- [ ] If zero actionable failures AND zero structural findings: skip to Final Output
-
-**Auto-populate `open_questions` (BEFORE Step 3):**
-
-Extract questions mechanically from data already in the workflow state file. These are written to `open_questions` before the main thread or fresh-eyes subagent runs, so the LLM cannot omit them. The main thread may ADD more questions but cannot REMOVE auto-generated ones.
-
-Sources:
-1. **From eval results:** For each test with score in 0.4-0.7 (ambiguous zone), auto-generate: `"Is {test_id} (score: {score}) failing due to artifact quality or test design?"`
-2. **From structural audit:** For each pillar with `applicable: true` AND `passed: false`, auto-generate: `"Structural gap '{pillar_name}' was not addressed. Intentional skip or oversight?"`
-3. **From fresh-eyes reconciliation (post-Step 3):** For each finding with `agreement: "single_source"` from the fresh-eyes side, auto-generate: `"Fresh-eyes proposed '{description}' but main thread did not. Was this considered?"`
-4. **From fresh-eyes reconciliation (post-Step 3):** For each finding with `agreement: "contradiction"`, auto-generate: `"Main thread and fresh-eyes contradict on '{section}'. Which direction is correct?"`
-
-Source 1-2 are written before Step 3. Sources 3-4 are appended after Step 3 reconciliation completes (in Step 2).
-
-Each auto-generated question is tagged `"source": "auto"` in the state file. LLM-added questions are tagged `"source": "manual"`. The exit gate treats both equally (all must be resolved), but the tags enable audit: if a run exits with zero manual questions but multiple auto questions were resolved, that's a signal the LLM wasn't self-reporting.
-
-Questions are resolved by:
-- The improvement in Phase 2 directly addressing the issue (link the finding ID)
-- An explicit decision logged in the state file: `"resolved": true, "resolution": "addressed by F3"` or `"resolved": true, "resolution": "intentional: {reason}"`
-
-### Step 3: Fresh-Eyes Analysis
-
-**Purpose:** The same agent that will apply improvements should not be the sole judge of what to improve. This step spawns a clean-context subagent that independently analyzes failures and proposes improvements, providing a second perspective before the main thread commits to an improvement direction. It exists because an agent cannot reliably judge its own work.
-
-**Skip this step if zero actionable failures AND zero structural findings** (nothing to analyze).
-
-**Dispatch in parallel:**
-
-1. **Fresh-eyes subagent** (Task agent, no `model` pin, inherits the session model per improvement preference #1; this is a high-judgment step where proposal quality matters more than fan-out latency): receives ONLY the artifact content, the failing test cases with scores and error output, structural audit findings, and the 18 improvement preferences. It does NOT receive: knowledge of prior hone rounds, what was already tried, the main thread's analysis, any "before" state or change history, or the workflow state file. Its prompt:
-
-   > You are analyzing a Claude Code {artifact_type} that scored below threshold on evaluation. Below is the artifact, the failing tests with their scores and error output, and structural findings. Propose specific improvements: for each, cite the test case or structural finding that motivates it, identify the exact section to edit, and describe the change. Prioritize structural fixes over content fixes. Follow these improvement preferences: [inject ALL rules from SKILL.md's "Improvement Preferences (Non-Negotiable)" section verbatim — do not truncate the list or cite a fixed count, since the list grows]. If the artifact has a `scripts/` directory, also read [references/script-quality-checklist.md](references/script-quality-checklist.md) and check each bundled script against the 5 LLM-judged quality criteria.
-
-2. **Main thread analysis** (existing Step 2 logic): runs concurrently with the subagent.
-
-**Net latency impact:** ~0 seconds. Both analyses run in parallel and take roughly the same amount of time. The reconciliation adds ~10-15 seconds.
-
-**Gate: P2 Step 3 → Step 4 (checklist)**
-- [ ] Fresh-eyes subagent returned proposals (non-empty response)
-- [ ] Main thread analysis completed (existing Step 2 logic ran)
-- [ ] Both proposal sets are available for reconciliation
-
-**Handoff interface (Step 3 → Step 4):**
-```
-fresh_eyes: {
-  proposals: [{
-    id: string,                            // eg "FE-1"
-    section: string,                       // artifact section to edit
-    description: string,                   // what to change
-    source_test: string,                   // test case ID or "structural_audit"
-    fix_type: "structural" | "content"
-  }]
-}
-```
-Write to workflow state file. Step 4 reads both `fresh_eyes` and its own analysis for reconciliation.
-
-**Persist fresh-eyes proposals to disk** (compaction protection):
-```bash
-python3 -c "
-import json
-state = json.load(open('/tmp/workflow-${RUN_ID}.json'))
-json.dump(state.get('fresh_eyes', {}), open('$OUTPUT_DIR/fresh_eyes.json', 'w'), indent=2)
-"
-```
-
-### Step 4: Reconcile + Analyze + Performance Audit
-
-**Pre-step validation:** Verify `triaged_results` from Step 1: `actionable_failures` is an array (may be empty), each entry has `test_id` and `score` fields. `structural_findings` is an array. If Step 3 ran, verify `fresh_eyes.proposals` is an array. If shape is malformed: STOP, report "P2 Step 4 handoff validation failed."
-
-**Main thread analysis:** For 3+ failing tests, fan out to parallel subagents (inheriting the session model, reduced effort: per-test analysis is bounded work against a single failure). For 1-2, analyze inline. Map each failure to a specific section of the artifact. Classify fix type.
-
-**Reconciliation (when fresh-eyes ran):** Compare the main thread's findings against `fresh_eyes.proposals`:
-
-| Scenario | Action |
-|---|---|
-| Both propose the same fix for the same section | High confidence. Include in findings. Tag `agreement: "both"`. |
-| Both identify the same problem but propose different fixes | Flag. In `--confirm`: present both to user with evidence. In `--auto`: pick the one citing more specific evidence (file line, test output, pattern name). Tag `agreement: "different_fix"`. |
-| One proposes a fix the other missed | Include it, but tag `agreement: "single_source"`. Lower confidence. |
-| They contradict (one says add X, other says remove X) | In `--confirm`: present both to user. In `--auto`: skip the edit entirely, log as `agreement: "contradiction"`. |
-
-**Performance audit** (same pass): parallelization opportunities, model selection, script candidates, caching, output quality. One pass, under 60 seconds.
-
-**Gate: P2 Step 4 → Step 5 (checklist)**
-- [ ] At least one actionable finding is mapped to a specific section of the artifact
-- [ ] Each finding has a fix type classification (content fix, structural fix, criteria fix)
-- [ ] Reconciliation completed (if fresh-eyes ran): each finding tagged with agreement level
-- [ ] If zero actionable findings after analysis: skip to Final Output (all failures were criteria bugs or variance)
-
-**Handoff interface (P2 Step 4 → Step 5):**
-```
-improvement_findings: {
-  findings: [{
-    id: string,                          // eg "F1"
-    fix_type: "structural" | "content" | "criteria",
-    section: string,                     // artifact section to edit
-    description: string,                 // what to change
-    source: string,                      // test case ID or "structural_audit" or "performance_audit"
-    priority: "HIGH" | "MED" | "LOW",
-    agreement: "both" | "different_fix" | "single_source" | "contradiction" | null
-  }],
-  reconciliation_summary: {
-    total_proposals_main: number,        // findings from main thread
-    total_proposals_fresh: number,       // findings from fresh-eyes
-    agreed: number,                      // both proposed same fix
-    different_fix: number,               // same problem, different solution
-    single_source: number,              // only one side proposed
-    contradictions: number,             // opposing proposals, skipped in --auto
-    skipped_contradictions: string[]    // finding IDs skipped due to contradiction
-  }
-}
-```
-
-### Step 5: Generate improvement plan
-
-**Pre-step validation:** Verify `improvement_findings` from Step 4: `findings` is a non-empty array, each entry has `id`, `fix_type`, `section`, and `description` fields. If shape is malformed: STOP, report "P2 Step 5 handoff validation failed."
-
-Present a table of proposed changes with fix type, section, change description, and what motivated it (test case or performance audit). Structural fixes first, then content fixes.
-
-In `--auto` mode: apply all. In `--confirm` mode: ask which to apply.
-
-**Persist improvement plan to disk** (compaction protection):
-```bash
-python3 -c "
-import json
-state = json.load(open('/tmp/workflow-${RUN_ID}.json'))
-json.dump(state.get('improvement_findings', {}), open('$OUTPUT_DIR/improvement_plan.json', 'w'), indent=2)
-"
-```
-
-**Gate: P2 Step 5 → Step 6 (checklist)**
-- [ ] Improvement plan table was generated with at least one entry
-- [ ] Each entry has: fix type, target section, change description, source
-- [ ] Structural fixes are listed before content fixes
-- [ ] In `--confirm` mode: user has selected which fixes to apply
-
-**Handoff interface (P2 Step 5 → Step 6):**
-```
-improvement_plan: {
-  edits: [{
-    id: string,                          // matches finding ID
-    target_section: string,              // section heading or line range
-    change: string,                      // description of the edit
-    approved: boolean                    // true in --auto, user-selected in --confirm
-  }],
-  total_approved: number
-}
-```
-
-### Step 5a: Scope Snapshot (before any edit)
-
-Preference 11 stops hone clobbering someone else's change; nothing stops hone changing a file nobody asked it to touch. Hand the script `{edit_path}` and its type, and it derives the guarded tree itself:
-
-```bash
-python3 <skill-dir>/scripts/check_scope.py \
-  --artifact "{edit_path}" --type <skill|command|hook|script> \
-  --manifest /tmp/scope-${RUN_ID}.json --snapshot --json
-```
-
-**`{edit_path}`, not `{artifact_path}`.** Phase 1 Step 1 sets both, and for a marketplace or plugin skill they name different files: `{artifact_path}` is the installed copy under `~/.claude/skills/` that hone reads, `{edit_path}` is the repo source that Step 6 below actually writes. Both root and scope derive from whichever path is passed, so snapshotting the read path watches a tree nothing writes to and `--verify` returns `clean` no matter what the checkout did, sibling-artifact edits included. When the two paths are the same file the argument is the same either way, so there is no case where `{artifact_path}` is the better one to pass here.
-
-The watch root and the permitted scope are separate knobs and pull in opposite directions, so neither is a `dirname` of the other. A skill at `plugins/p/skills/s/` gets a watch root of the whole repository -- otherwise an edit to `plugins/p/commands/`, a sibling plugin, or a repo-root `scripts/` is invisible and `--verify` reports `clean` however much was changed -- and a scope of just its own directory. A single-file artifact (command, hook, or script) gets the narrower pair: the install directory as the watch root, and that one file as the scope, so the sibling hooks in `~/.claude/hooks/` are neither ignored nor editable. Hone discovers artifacts under `~/.claude/skills/`, `$CLAUDE_PLUGIN_ROOT/skills/`, `~/.claude/plugins/*/skills/`, and the other roots in `references/artifact-profiles.md`; the derivation covers all of them.
-
-Watching a repository root is affordable because the snapshot hashes only what git cannot attribute -- files already dirty and files untracked. If that workload is larger than `--max-files` (default 20000) the watch narrows to the install directory and the report carries a `root_fallback` field saying so; treat that as a real gap in coverage, not a clean bill of health. Where narrowing is not available -- an explicit `--root`, or an install directory that already is the repository root -- the snapshot bails with exit 2 instead, because a budget that is silently ignored on the outer tree and still enforced on nested subtrees reports `not_measurable` for the small thing while the large one went unchecked.
-
-**Which directory is watched is decided by where the artifact is installed, not by where a symlink points.** `~/.claude/skills/{name}` is routinely a symlink into a checkout. The root is derived from `~/.claude/skills` so that the sibling artifacts installed beside it are watched; the artifact's own directory is still watched through the symlink, and the rest of the checkout on the far side is a different tree that this run has no path into. An install directory that is itself inside a repository (a dotfiles checkout, say) still widens to that repository.
-
-### Step 6: Apply Edits
-
-**Pre-step validation:** Verify `improvement_plan` from Step 5: `edits` is a non-empty array, each entry has `id`, `target_section`, and `change` fields, `total_approved >= 1`. If shape is malformed: STOP, report "P2 Step 6 handoff validation failed."
-
-**Stale-write guard (MANDATORY before editing):**
-
-Re-read the artifact from disk and compare its content to the `artifact_content` snapshot saved in Step 1. If the content differs, another session (or the user) has modified the file since hone started.
-
-- **If content changed:** STOP. Do NOT apply edits. Log: `"stale_write_guard_triggered": true, "reason": "artifact modified externally since discovery"` in workflow state. Report: "Artifact was modified by another session since hone started. Edits not applied to avoid overwriting concurrent changes. Re-run `/hone` to evaluate the updated version."
-- **If content matches:** Proceed with edits.
-
-This prevents the exact failure mode where two CC sessions edit the same artifact and last-write-wins silently destroys the other session's work.
-
-Edit the artifact at `{edit_path}`. After all edits, re-read each edited file from disk and confirm the changes are present, then record the outcome as `applied_edits.confirmed_on_disk` in the handoff below. `validate_handoff.py` requires that field to be `true`, so this read-back is a gate, not a nudge: a handoff recording `false` fails validation. If the re-read does not confirm every planned edit, STOP and report which edits are missing.
-
-**Record the paths you wrote, in `applied_edits.edited_paths`.** You are already re-reading every edited file to confirm it landed, so you have the list; write it down. Step 6a's scope guard attributes from it and from nothing else, because no comparison of two tree states can tell your write from the user's editor saving the same file mid-round. Absolute paths, one entry per file, and **every** file this round wrote -- the artifact, a generated companion validator, anything else. The field is required and non-empty alongside `edit_count >= 1`: a round that applied edits and cannot name one file it wrote has nothing to hand the guard, whose answer to a missing declaration is `not_measurable` and a halt. Do not hand off to Phase 3 -- it compares before/after scores and auto-reverts from `artifact_before_snapshot`, both of which assume the edits are on disk.
-
-**Migrating a state file written before `edited_paths` was required.** A run whose Phase 2 handoff was recorded before the Step 6a scope guard landed, and resumed after it, fails the mandatory pre-Phase-3 `validate_handoff.py` gate with `required field missing`. The gate is right to stop, and the repair is to fill the field in rather than to relax the schema: list every file the round wrote, as absolute paths, which is the same list the Step 6 read-back already walked. If those edits cannot be recovered, do **not** invent the list and do **not** substitute `--declared-none` at Step 6a. Re-run Step 5a for a fresh snapshot, or halt. A missing declaration costs a round; a wrong one points a revert instruction at the wrong file. `validate_handoff.py` prints this remedy alongside the failure -- `EDITED_PATHS_MIGRATION` in that script is the same text, and the two are kept in sync.
-
-**Validator Generation (multi-phase skills and commands only):**
-
-If this hone pass added or modified handoff interface blocks in the artifact, and the artifact has 2+ phases with inter-step data flow, generate a companion validator script. This is not optional. Schema without validator is documentation, not a contract.
-
-1. **Extract schemas from the artifact.** Parse each `Handoff interface (Step N → Step M):` block. For each, extract field names, types (`string`, `number`, `boolean`, `enum`, `array`, `object`), required vs optional markers, and enum values.
-
-2. **Generate `validate_handoffs.py`** in the artifact's directory (eg `~/.claude/skills/{name}/validate_handoffs.py` or `~/.claude/commands/{name}-validator/validate_handoffs.py`). Both locations are inside the permitted scope, so declaring the generated file in `edited_paths` is correct and Step 6a will pass: a skill's scope is its own directory, and for a command `check_scope.permitted_scopes` admits the `{name}-validator/` sibling alongside the command file for exactly this step. Do not put the validator anywhere else -- anywhere else is out of scope, and Step 6a would read the file this step just required as a violation and order it deleted. The script:
-   - Takes a state file path and a `--handoff <name>` argument
-   - Checks required fields exist with correct types
-   - Validates enum values against allowed lists
-   - Exits 0 (pass), 1 (validation failure with details), 2 (usage error)
-   - Uses only Python stdlib (json, sys, argparse). No dependencies.
-   - Typically 30-60 lines. Proportional to the schema count, not the skill's line count.
-
-3. **Add invocation instructions to the artifact.** After each handoff interface block, add:
-   ```
-   Validate: `python3 {validator_path} $STATE_FILE --handoff <handoff_name>`
-   ```
-
-4. **Verify the generated script.** Run `python3 -c "import ast; ast.parse(open('{validator_path}').read())"` to confirm valid Python syntax.
-
-**Skip validator generation when:**
-- The artifact is single-phase (no inter-step handoffs to validate)
-- The artifact is a hook or script (tested via direct Bash invocation, not state files)
-- The artifact already has a validator (check for existing `validate_handoffs.py` in the directory)
-
-**Gate: P2 Step 6 → Step 7 (checklist)**
-- [ ] All planned edits were applied (re-read from disk confirms changes present)
-- [ ] Every path written this round is recorded in `applied_edits.edited_paths` (Step 6a attributes from that list and from nothing else)
-- [ ] No syntax errors introduced (for scripts/hooks: `bash -n` check; for skills/commands: markdown structure intact)
-- [ ] Edit count matches improvement plan count (no silently skipped edits)
-- [ ] If handoff schemas were added to a multi-phase artifact: companion validator script was generated and syntax-checked
-
-**Handoff interface (P2 Step 6 → Step 7):**
-```
-applied_edits: {
-  edit_count: number,                    // number of edits applied
-  confirmed_on_disk: boolean,            // re-read confirms changes present; must be true
-  artifact_before_snapshot: string,      // pre-edit content path (for revert)
-  syntax_check_passed: boolean,          // bash -n or markdown structure ok
-  edited_paths: string[]                 // every file this round wrote; the scope
-                                         // guard attributes from this and nothing
-                                         // else. Required, non-empty.
-}
-```
-Write `artifact_before_snapshot` (pre-edit file content) to the workflow state file before applying edits. Phase 3 reads this for auto-revert on regression.
-
-### Step 6a: Scope Verify (after edits)
-
-```bash
-python3 <skill-dir>/scripts/check_scope.py \
-  --manifest /tmp/scope-${RUN_ID}.json --verify --json \
-  --declared-file $STATE_FILE
-```
-
-Nothing from Step 5a needs reproducing: the manifest records the root and the scope, and `--verify` reads them back out. That is deliberate. Step 5a and Step 6a are separate Bash tool calls, shell state does not persist between them, and a re-derived `$SCOPE_ROOT` that disagrees with the snapshotted one compares two unrelated trees.
-
-**`--declared-file $STATE_FILE` is what makes the verdict mean anything.** It reads `applied_edits.edited_paths` -- the list Step 6 just recorded -- and that list is the only thing in the system that can attribute a change to this run. A snapshot proves a file changed *during* the round; it can never prove *you* changed it, because the user's editor and a second session in the same checkout leave identical marks. Attributing from the diff instead got it backwards in both directions at once: an out-of-scope file the run really did edit came back `not_measurable`, while a file the user was editing themselves came back `scope_violation` with a `git checkout` instruction pointed at their uncommitted work.
-
-Three spellings, and the difference between the last two is load-bearing:
-
-| form | meaning |
-|---|---|
-| `--declared-file <json>` | read the paths from `applied_edits.edited_paths` (a bare list or `{"edited_paths": [...]}` also work) |
-| `--declared <path>` | one path, repeatable |
-| `--declared-none` | this run wrote nothing -- an explicit, checkable claim |
-| *(omitted)* | **not a claim at all.** The verify returns `not_measurable` and exits 3 |
-
-An empty `edited_paths` list is rejected as a usage error rather than read as `--declared-none`: the one reading of a declaration that must never be inferred is "wrote nothing".
-
-**Emit the `scope_verify` gate event on every path.** The clean path is the one that gets forgotten, and a check that only records itself when it fails is indistinguishable from a check that never ran:
-
-```json
-{"step": "scope_verify", "judge": "automated", "result": "pass", "ts": "<ISO timestamp>"}
-```
-
-**Branch on the exit code.** The verdict prose follows it, but the exit code is what a Bash call gives you without parsing anything, and there are four of them:
-
-| exit | `verdict` | what happened | what to do |
-|---|---|---|---|
-| 0 | `clean` | the tree was read and holds no out-of-scope change | emit `result: "pass"` and continue |
-| 1 | `scope_violation` | an out-of-scope change this round DECLARED writing, so it is attributable to this round | undo **only** the paths under `violations`, then halt |
-| 2 | (none; the report is on stderr) | the check never ran: the manifest is missing or unreadable, or the declaration was malformed. `/tmp` cleared between rounds, a `${RUN_ID}` unrecoverable after compaction, or Step 5a skipped | revert nothing, then halt |
-| 3 | `not_measurable` | the check ran and could not answer. `not_measurable_reasons` says which: git stopped answering, a nested repository or submodule could not be hashed, a path under the watch root could not be read or classified (an unlistable directory, a dangling symlink, a symlink loop, a socket or fifo), an out-of-scope file changed that this round did not declare, an in-scope change was left undeclared, or no declaration was supplied at all | revert nothing, then halt |
-
-**Only exit 0 is a `pass`.** Exit 2 and exit 3 are the cases this table exists for. Neither is a clean tree; both are the guard saying it does not know, and emitting `result: "pass"` on either records a scope check over a tree nothing looked at. That is strictly worse than having no guard, because the run's gate log then carries positive evidence for a claim nobody verified.
-
-**Halting has a gate shape, and this is it.** `scope_verify` is not in `hone_common.VALIDATION_FAIL_PREFIXES`, so `fail_orders_halt` reads its `fail` as an order to stop the run, and nothing a later round emits can settle it. "Halt the round" therefore means halt the run: emit the failing `scope_verify`, then `workflow_exit`, and stop.
-
-```json
-{"step": "scope_verify", "judge": "automated", "result": "fail", "ts": "<ISO timestamp>"}
-{"step": "workflow_exit", "judge": "self-check", "result": "fail", "ts": "<ISO timestamp>"}
-```
-
-That pair is a valid halt tail (`hone_common.is_halt_tail`), so a run that halts as instructed scores as compliant. Emitting `phase2_to_phase3` after the failing `scope_verify` is the shape that draws the `validate_gates.py` warning and the `score_gate_compliance` penalty, and it describes a run that carried on past its own halt order. Put the paths from `violations`, `unattributed_out_of_scope`, and `not_measurable_reasons` in the run summary so the human has something to act on.
-
-**Revert nothing listed under `preexisting_dirty_out_of_scope` or `unattributed_out_of_scope`.** Neither is attributable to this run.
-
-- `preexisting_dirty_out_of_scope` was already uncommitted when the run started and is byte-identical to the snapshot, so this run did not touch it. Git reports a file dirty relative to HEAD; the manifest reports it relative to this run's start.
-- `unattributed_out_of_scope` did change during the round, but this round did not declare writing it, so a concurrent session, the user's editor, or a build step is what changed it. Reverting it destroys uncommitted work this run never created, which is the one outcome a safety check must not cause. It is a separate list from `violations` for exactly that reason, and its presence is what makes the verdict `not_measurable` rather than `clean` -- the change is reported and the round halts, but no destructive instruction rides on a guess.
-- `undeclared_in_scope` is the mirror of it: a change inside the permitted scope that the declaration omitted. Nothing needs reverting, but the declaration is demonstrably incomplete, so what it omits *outside* scope is unknown and the verdict is `not_measurable`. Fix the record and re-run rather than proceeding.
-
-**Undo a violation the right way.** `git checkout -- <path>` restores a file that was clean and tracked when the run began. It is wrong for anything else: on a file already uncommitted at snapshot it discards the user's earlier work along with this round's, and on a file this round created it does nothing. `violations_manual_revert` lists the subset in that state -- undo those edits by hand, or delete the file if this round created it.
-
-### Step 7: Description Trigger Testing (skills and commands only)
-
-**Skip this step if:**
-- The artifact is a hook or script (no triggering descriptions)
-- `--skip-trigger-test` flag is set
-- The artifact's description was not modified in Step 4 edits AND no body improvements could affect trigger relevance
-
-**Purpose:** After improving the skill's body content, verify that its description still triggers correctly on relevant prompts. A skill with great body content but a bad description never gets activated. This step follows the methodology from the Agent Skills spec's "Optimizing descriptions" guide, documented in [references/description-trigger-testing.md](references/description-trigger-testing.md).
-
-**Flow:**
-
-1. **Generate trigger eval queries.** Read the artifact's current description and body content. Generate:
-   - 8-10 should-trigger queries (realistic user prompts that should activate this skill)
-   - 8-10 should-not-trigger queries (near-miss prompts that share keywords but need a different skill)
-   - Follow the guidelines in [references/description-trigger-testing.md](references/description-trigger-testing.md)
-
-2. **Collect competing descriptions.** Read `name` and `description` from all skills in the discovery paths (see artifact-profiles.md). This creates the catalog the LLM uses to decide which skill to activate.
-
-3. **Test trigger rates.** For each query, present it alongside the full skill catalog and ask (as a lightweight LLM call, not eval runner): "Which skill(s) would you activate for this query? List skill names only." Run 3 times per query.
-
-4. **Score results.**
-   - Should-trigger: trigger rate > 0.5 = PASS
-   - Should-not-trigger: trigger rate < 0.5 = PASS
-   - Overall accuracy = total passes / total queries
-
-5. **Improve description if needed.** If overall accuracy < 0.8:
-   - Identify failure patterns (too narrow → missed triggers, too broad → false triggers)
-   - Propose description improvements: generalize from failures (don't add specific keywords from failed queries), add specificity about what the skill does NOT do
-   - Ensure description stays under 1024 characters (Agent Skills spec limit)
-   - Apply the improved description via Edit tool
-   - Re-test with improved description to verify improvement
-
-6. **Store queries.** Write to `{artifact_dir}/{name}-evals/trigger_queries.json` for reuse on subsequent hone rounds.
-
-**Gate: P2 Step 7 → Step 8 (checklist)**
-- [ ] Trigger queries were generated (or reused from prior round)
-- [ ] Trigger test completed with accuracy score
-- [ ] If accuracy < 0.8: description was improved and re-tested
-- [ ] Queries saved to `trigger_queries.json`
-
-**No gate event here.** Phase 2 does not end at this step. Go to Step 8 next — including when this step was skipped — and emit `phase2_to_phase3` there.
-
-**Handoff interface (Step 7 → Step 8):**
-```
-trigger_test: {
-  accuracy: number,                      // 0.0-1.0
-  should_trigger_pass_rate: number,      // fraction of should-trigger queries that passed
-  should_not_trigger_pass_rate: number,  // fraction of should-not-trigger queries that passed
-  description_improved: boolean,         // true if description was modified
-  queries_path: string                   // path to trigger_queries.json
-}
-```
-
-After writing the handoff, set `steps.phase2_trigger_test` to `"done"` in the workflow state file (`"skipped"` when `--skip-trigger-test` is set) — the key is seeded as `"pending"` by the SKILL.md state template and the Mechanical Exit Gate checks it.
-
-### Step 8: Ledger Append
-
-**Not optional, and not skippable.** Phase 3 step 7 runs `check_convergence.py` on every round and the `convergence` gate event is mandatory, so a round that ends without a ledger produces an exit-2 failure and a state file `validate_gates.py` rejects. This is the last Phase 2 step, and it owns the `phase2_to_phase3` gate event — no earlier Phase 2 step emits it. When Step 7 is skipped (hooks, scripts, `--skip-trigger-test`), this step still runs and still emits it.
-
-**What to write.** Append this round's findings to `~/skill-eval/{name}/findings-ledger.json`, creating the file on round 1 of the first run. The ledger is the artifact's memory across rounds AND across runs: a resumed run reloads it instead of re-deriving findings, and a rejection recorded here is not re-litigated without new evidence.
-
-```json
-{
-  "artifact": "{name}",
-  "max_rounds": <max_rounds>,
-  "rounds": [
-    {"round": 1,
-     "run": "${RUN_ID}",
-     "findings": [
-       {"id": "F1", "severity": "critical", "file": "SKILL.md",
-        "summary": "Step 4 has no stated exit condition", "status": "open"}
-     ]}
-  ]
-}
-```
-
-- `severity` is `critical`, `major`, or `minor`. `critical` and `major` are the blocking ones the convergence check counts; a `minor` left open never blocks convergence.
-- `status` is `open`, `fixed`, or `rejected`. Only an explicit `fixed` or `rejected` counts as a close: a finding simply absent from a round reads as an unreported round, not a repair, and it stays in `open_blocking` until a close is recorded. This is why Step 8 restates every still-live finding: omitting one does not converge the run, it just makes the round's entry wrong.
-- `max_rounds` is **this run's** `--rounds N` budget, the same value as `iteration.target` in the state file. Do not hardcode it. `check_convergence.py` reads it to decide `capped`, and `capped` is a forced halt, so a stale `3` stops a `--rounds 6` run at round 3. Resolve the placeholder to a number: `"max_rounds": "<max_rounds>"` is valid JSON holding an unparseable int, and `check_convergence.py` exits 2 on it rather than running with `capped` quietly switched off.
-- `run` is the resolved `${RUN_ID}` string, identical on every round of this invocation. It is what tells the check where one invocation's rounds end and the next begins, and it is the **only** thing that does: there is no fallback inference, because the one candidate signal (a repeated round number) already means "compaction re-append" to the same script. Omit it and the whole ledger reads as a single run, so the run-scoped signals (streak, stall window, relocation trail, round budget) read the previous runs' history as this run's and `capped` arrives early. `check_convergence.py` reports `run_scoping: "absent"` when that happens.
-- `id` is unique **within the artifact's whole ledger**, not within this run. `F1` above is round 1 of the first run; a later run's first finding is the next unused number, not `F1` again. The reopen counter is cross-run by design, and reusing ids makes two unrelated findings look like one that keeps coming back. `check_convergence.py` defends itself by pairing the id with the finding's summary wording, so a reused id is safe rather than fatal — but the pairing depends on summaries staying verbatim across restatements, and unique ids are what make it exact.
-- Each round **appends a new entry** and restates every finding still live, carried-over ones included. That repetition is what lets the check see a finding stay open across rounds; it is also why those signals are scoped to the current run rather than the whole file.
-- Findings go **inside** the round entry. A bare array, or findings at the top level, is rejected with exit 2.
-- Record each constraint ablation (SKILL.md Phase 2 Step 6b) and its outcome here too, as a finding whose `status` is `fixed` (constraint removed, nothing regressed) or `rejected` (restored because a test regressed). Both outcomes wrote to disk, and both landed after Step 6a ran, so an ablated round owes a second Step 6a verify with those paths added to `applied_edits.edited_paths`.
-
-**When `check_convergence.py` exits 2.** Exit 2 means the ledger is missing or unparseable, and it is the one exit code that is a real failure rather than a verdict. It is repairable, and the repair belongs to this step:
-
-1. Phase 3 emits `{"step": "convergence", "judge": "self-check", "result": "fail", "reason": "ledger_missing", ...}` so the omission is recorded rather than skipped.
-2. Come back here, write the ledger from this round's findings in the shape above, and re-run the check once.
-3. The re-run's verdict drives Phase 3 step 7 normally, and the `convergence` event it emits closes the failed one. Emit it with **no gate event in between**: this is an in-place retry, and an empty gap is what tells `validate_gates.py` the repair was a re-run rather than another round. The re-run's event may itself be a `fail` (the verdict coming back `escalate` or `capped`), which settles the first one just as a `pass` would; what does not settle it is a `convergence` emitted after another round of work. See SKILL.md's Gate Events section.
-4. A second exit 2 is an error halt, not a third attempt. Report the ledger path and the script's stderr, emit `workflow_exit` with `result: "fail"`, and stop. Never continue past a convergence check that could not run.
-
-**Gate: P2 Step 8 -> Phase 3 (checklist)**
-- [ ] A round entry for this round was appended (not overwritten)
-- [ ] It carries `run` = `${RUN_ID}` and the ledger carries `max_rounds` = this run's budget
-- [ ] Every still-live finding is restated in this round's entry
-- [ ] `python3 <skill-dir>/scripts/check_convergence.py ~/skill-eval/{name}/findings-ledger.json --json` parses the file (exit 0 or 1, never 2)
-
-**Gate event (write to `gates[]` in workflow state before entering Phase 3):**
-```json
-{"step": "phase2_to_phase3", "judge": "self-check", "result": "pass", "ts": "<ISO timestamp>"}
-```
-Append to `state["gates"]` (do not replace). This is the only place Phase 2 emits it. Set `result` to `"fail"` only if Phase 2 could not complete: the trigger test failed and the description could not be improved, or this round's ledger entry could not be written.
-
-## Context Compaction Protection (Phase 2)
-
-Phase 2 runs 20-40 minutes. Compaction will happen. After compaction:
-
-1. **Re-read this file** (`references/phase2-improvement.md`)
-2. **Re-read the workflow state file** (`/tmp/workflow-${RUN_ID}.json`) to determine current step
-3. **Re-read persisted analysis from `$OUTPUT_DIR/`:**
-   - `triage.json` -- failure classifications from Step 1
-   - `analysis.txt` -- human-readable analysis from Step 1
-   - `fresh_eyes.json` -- fresh-eyes proposals from Step 3
-   - `improvement_plan.json` -- reconciled findings from Step 4
-4. **Re-read the artifact** from `artifact_context.artifact_path` in the state file
-5. **Resume from the first non-done step** in the state file
+Interpret exit codes exactly:
+
+- `0`: clean within the reported coverage.
+- `1`: a declared scope violation. Halt and undo only attributable edits using the
+  original snapshots, provided the live contents still match this run's last write.
+- `2`: invalid inputs or a check that could not run. Halt; revert nothing blindly.
+- `3`: not measurable, including concurrent/unattributed changes. Halt and preserve
+  other work. A check unable to answer is not a pass.
+
+Never revert `preexisting_dirty_out_of_scope` or `unattributed_out_of_scope` paths.
+A source file already dirty at the start must be restored to the saved contents,
+not to its committed version. Remove only this run's newly created files, using the
+host's reversible deletion mechanism. Run the guard again after any later writes,
+including restored ablations. Candidate-only work still needs isolated permissions;
+the post-hoc scope guard does not make an unrestricted executor safe.
+
+## Handoff to verification
+
+Save the candidate identity, exact edits, active scope manifest, current file hashes,
+and the checks to rerun. Re-read changed files to confirm the edit landed. Update
+state to `verify`; do not record a successful outcome until the candidate's actual
+results have been inspected.

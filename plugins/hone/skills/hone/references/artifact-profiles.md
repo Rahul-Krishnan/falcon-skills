@@ -1,52 +1,55 @@
-# Artifact Profiles
+# Artifact profiles
 
-Each artifact type has a profile that configures the shared hone loop.
+## Discovery
 
-## skill
+Honor an explicit path. Otherwise inspect the host's actual skill catalog and the
+configured directories for the named type. Resolve symlinks before deciding whether
+two matches are duplicates. In Claude Code, common paths are `.claude/skills/`,
+`.claude/commands/`, `.claude/hooks/`, and `.claude/scripts/`; shared skills may resolve
+through `.agents/skills/` or a plugin checkout. Do not assume any path is universal.
 
-| Property | Value |
-|----------|-------|
-| **Discovery** | `~/.claude/skills/{name}/SKILL.md` (also checks `~/.agents/skills/`, `~/.local/share/ai-skills/`, `~/.codex/skills/`, plugin installs at `$HONE_DIR/../{name}/` and `~/.claude/plugins/*/skills/{name}/` or `~/.claude/plugins/*/*/skills/{name}/`) |
-| **Eval criteria path** | Resolution order: `{artifact_dir}/evals/eval_criteria.json` → `{artifact_dir}/{name}-evals/eval_criteria.json` → `~/skill-eval/{name}/eval_criteria.json`. The first is **canonical for writes**. If more than one candidate exists, report all of them with their test counts before choosing: divergent suites accumulate at these paths, and scoring against a stale one grades tests the artifact was never evaluated on. |
-| **Edit target** | SKILL.md file |
-| **Default dimensions** | task_completion (0.3), invocation (0.2), efficiency (0.2), best_practices (0.15), business_impact (0.15) |
-| **Eval generator** | Generate inline (same pattern as commands, with skill-specific dimensions and test case types) |
-| **Spec compliance** | Agent Skills open standard (see [agent-skills-spec.md](agent-skills-spec.md)) |
+An installed plugin may have a different maintained source. Read its metadata and
+repository context, then identify `artifact_path` (what runs) and `edit_path` (what
+is maintained). Stop if the source cannot be identified confidently. Never overwrite
+an installation and call that a durable source change. Consult project instructions
+and check for uncommitted work before editing. Discovery grants no write permission.
 
-## command
+Prior tests may be in `evals/`, `<name>-evals/`, or `~/skill-eval/<name>/`. Inspect
+version and intent before reusing them. Prefer the artifact's maintained suite;
+duplicate or divergent suites need an explicit choice. Do not silently choose the
+one with the best grade. New run observations live in an exact, unique run directory.
 
-| Property | Value |
-|----------|-------|
-| **Discovery** | `~/.claude/commands/{name}.md` |
-| **Eval criteria path** | `~/.claude/commands/{name}-evals/eval_criteria.json` |
-| **Edit target** | The command `.md` file |
-| **Default dimensions** | task_completion (0.3), invocation (0.2), efficiency (0.2), best_practices (0.15), output_quality (0.15) |
-| **Eval generator** | Generate inline (commands are simpler, no need for skill-evaluator) |
+## Skills and commands
 
-## hook
+Execute representative requests through the intended host using the artifact.
+Verify actual artifacts and task outcomes. An explanation of the skill's steps is
+only a knowledge test. Test description routing separately when applicable. Add
+resume, missing-tool, and permission cases for workflows that depend on those
+properties. Do not impose handoffs, gates, or state on an attended task by default.
 
-| Property | Value |
-|----------|-------|
-| **Discovery** | `~/.claude/hooks/{name}.sh` or hook entry in `~/.claude/settings.json` |
-| **Eval criteria path** | `~/.claude/hooks/{name}-evals/eval_criteria.json` |
-| **Edit target** | The hook script file |
-| **Default dimensions** | trigger_accuracy (0.55, crash-rate proxy — absorbed the former false_positive_rate dimension, which computed the same quantity), performance (0.2), output_structure (0.15), error_handling (0.1) — mirrors `HOOK_WEIGHTS` in `scripts/score_execution.py`, which is authoritative |
-| **Eval generator** | Generate inline with hook-specific test patterns (test inputs, expected triggers, expected non-triggers) |
+## Hooks
 
-**Hook pre-scan (run during Step 1 discovery, before criteria generation):** When discovering a hook, extract the following metadata from the script before generating any test criteria. This prevents incomplete coverage and avoids shell quoting errors caused by mismatched input schemas:
+Read the script and its real registration to determine the input event schema,
+trigger conditions, output contract, and relevant environment. Registration is
+read-only discovery; editing settings needs separate authorization.
 
-- **Trigger event type:** Check `~/.claude/settings.json` for the hook registration. The event type (e.g. `Stop`, `PostToolUse`, `UserPromptSubmit`, `PreToolUse`, `SubagentStop`, `PreCompact`, `SessionEnd`) determines the input JSON schema for test cases. Each event type has a different shape — use the wrong schema and every test case will fail. This vocabulary is owned by the Claude Code harness and grows over time, so `hook_metadata.event_type` is validated as any non-empty string, never against a closed list.
-- **Throttling logic:** Scan the script for `last_run`, `throttle`, `debounce`, or timestamp-comparison patterns. If found, `throttle_behavior` test case is required; otherwise it is optional.
-- **Shebang:** Check whether the script uses `#!/bin/bash` or `#!/usr/bin/env bash`. If `/bin/bash` is absent, note that the script may behave differently in restricted environments.
+Invoke the hook against controlled inputs in isolation. Check both trigger and
+non-trigger cases, stdout/stderr, exit status, and actual state effects. Test
+throttling or time-dependent behavior when present using controlled state/time.
+A hook that exits successfully for every input has not demonstrated trigger accuracy.
 
-Record these as `hook_metadata: {event_type, has_throttle, shebang}` in the workflow state file alongside `artifact_context`. Step 4 reads `hook_metadata` when generating test cases.
+## Scripts
 
-## script
+Use existing tests or direct subprocess execution with controlled arguments, input,
+and environment. Compare actual output to expected output, including failure cases.
+A non-crashing command can still return the wrong result. Verify output files and
+unchanged unrelated files when relevant. Use the project's runtime rather than
+hardcoding a private virtualenv or assuming the system interpreter has dependencies.
 
-| Property | Value |
-|----------|-------|
-| **Discovery** | `~/.claude/scripts/{name}` (any extension) |
-| **Eval criteria path** | `~/.claude/scripts/{name}-evals/eval_criteria.json` |
-| **Edit target** | The script file |
-| **Default dimensions** | correctness (0.35), error_handling (0.25), performance (0.15), output_structure (0.15), output_format (0.1) — mirrors `SCRIPT_WEIGHTS` in `scripts/score_execution.py`, which is authoritative |
-| **Eval generator** | Generate inline with input/output test cases |
+## Portability
+
+Hone's orchestration currently targets Claude Code. The artifact under evaluation
+may target another model or host, provided its runner and permissions are available.
+Record each configuration; do not infer another host's behavior from a Claude run.
+If only simulation is possible, report that limited result instead of a model-wide
+compatibility or performance claim.

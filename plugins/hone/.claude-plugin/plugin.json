@@ -1,7 +1,7 @@
 {
   "name": "hone",
-  "description": "Grade one of your own Claude Code skills, commands, hooks, or scripts, fix what the evidence says is broken, then re-score to prove the fix held. Ships deterministic structural checks, an eval harness, and an auto-revert guard for rounds that make things worse.",
-  "version": "0.1.0",
+  "description": "Improve an existing skill, command, hook, or script using task outcomes, fixed baselines, independent artifact checks, and protected edits. Supports model migrations and instruction simplification, with explicit uncertainty instead of composite grades.",
+  "version": "0.2.0",
   "author": {
     "name": "Rahul Krishnan"
   },
