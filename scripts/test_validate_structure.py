@@ -15,6 +15,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from copy import deepcopy
 from pathlib import Path
 
 VALIDATOR = Path(__file__).parent / "validate_structure.py"
@@ -47,6 +48,24 @@ GOOD_EVAL = {
         "best_practices": 0.15,
         "business_impact": 0.15,
     },
+}
+GOOD_OUTCOME_EVAL = {
+    "schema_version": 3,
+    "measurement": "outcomes",
+    "project": "demo",
+    "skill_name": "demo",
+    "test_cases": [{
+        "id": "TC-1",
+        "name": "Preserves the requested artifact",
+        "prompt": "Improve the skill without changing its required output.",
+        "mode": "execution",
+        "checks": [{
+            "id": "artifact-contract",
+            "description": "The improved skill still produces the required artifact.",
+            "method": "artifact",
+            "required": True,
+        }],
+    }],
 }
 GOOD_MARKETPLACE = {
     "name": "m",
@@ -108,6 +127,14 @@ def build_tree(root, skill=GOOD_SKILL, plugin=GOOD_PLUGIN, evals=GOOD_EVAL,
     return root
 
 
+def outcome_suite(case=None, **updates):
+    suite = deepcopy(GOOD_OUTCOME_EVAL)
+    if case:
+        suite["test_cases"][0].update(case)
+    suite.update(updates)
+    return {"evals": suite}
+
+
 # (description, tree kwargs, expected outcome)
 CASES = [
     ("a valid tree passes", {}, "pass"),
@@ -132,13 +159,103 @@ CASES = [
     ("allowed-tools written as a YAML list", {"skill": SKILL_TOOLS_AS_LIST}, "pass"),
     ("allowed-tools as a same-indent list, followed by a sibling key",
      {"skill": SKILL_TOOLS_AS_FLAT_LIST}, "pass"),
+
+    ("outcome execution suite needs no weighted dimensions or fixtures",
+     outcome_suite(), "pass"),
+    ("outcome simulation suite declares its simulation boundary",
+     outcome_suite(case={
+         "mode": "simulation",
+         "runner_context": "SIMULATION MODE: do not issue real tool calls. Use supplied evidence.",
+     }), "pass"),
+    ("outcome suite rejects legacy dimensions",
+     outcome_suite(dimensions=GOOD_EVAL["dimensions"]), "fail", "'dimensions' is not allowed"),
+    ("outcome suite requires outcome measurement",
+     outcome_suite(measurement="process"), "fail", "'measurement' must be 'outcomes'"),
+    ("outcome suite retains project validation", outcome_suite(project=""),
+     "fail", "missing or empty 'project'"),
+    ("outcome suite retains matching skill name validation", outcome_suite(skill_name="other"),
+     "fail", "does not match plugin 'demo'"),
+    ("outcome suite rejects duplicate case ids",
+     outcome_suite(test_cases=GOOD_OUTCOME_EVAL["test_cases"] * 2),
+     "fail", "duplicate test case id 'TC-1'"),
+    ("outcome suite rejects duplicate check ids",
+     outcome_suite(case={"checks": GOOD_OUTCOME_EVAL["test_cases"][0]["checks"] * 2}),
+     "fail", "duplicate check id 'artifact-contract'"),
 ]
+
+for version in (2, 4, None, True, "3", 3.0):
+    CASES.append((
+        f"explicit unsupported schema version {version!r} cannot route to legacy validation",
+        {"evals": {**GOOD_EVAL, "schema_version": version}},
+        "fail", "unsupported 'schema_version'",
+    ))
+
+for field in ("id", "name", "prompt"):
+    for value in (None, " ", ["not-a-string"]):
+        CASES.append((
+            f"outcome case {field} rejects {value!r}", outcome_suite(case={field: value}),
+            "fail", f"'{field}' must be a nonempty string",
+        ))
+
+for mode in (None, "live", ["execution"]):
+    CASES.append((
+        f"outcome case rejects mode {mode!r}", outcome_suite(case={"mode": mode}),
+        "fail", "'mode' must be 'simulation' or 'execution'",
+    ))
+
+for context in (None, "Use no real tools.", " SIMULATION MODE: do not issue real tool calls."):
+    CASES.append((
+        f"simulation rejects missing or misplaced boundary {context!r}",
+        outcome_suite(case={"mode": "simulation", "runner_context": context}),
+        "fail", "'runner_context' must start with",
+    ))
+
+for field in ("test_cases", "checks"):
+    for value in ([], {}, "checks"):
+        kwargs = outcome_suite(**{field: value}) if field == "test_cases" else outcome_suite(case={field: value})
+        CASES.append((
+            f"outcome {field} rejects {value!r}", kwargs, "fail", f"'{field}' must be a nonempty list",
+        ))
+
+CASES += [
+    ("outcome case must be an object", outcome_suite(test_cases=["case"]),
+     "fail", "test case at index 0 must be an object"),
+    ("outcome check must be an object", outcome_suite(case={"checks": ["check"]}),
+     "fail", "check at index 0 must be an object"),
+]
+
+for field, values in {
+    "id": (None, " ", ["id"]),
+    "description": (None, " ", 4),
+    "method": (None, "regex", ["artifact"]),
+    "required": (None, 1, "true"),
+}.items():
+    message = {
+        "id": "'id' must be a nonempty string",
+        "description": "'description' must be a nonempty string",
+        "method": "'method' must be 'artifact', 'judgment', or 'trace'",
+        "required": "'required' must be a boolean",
+    }[field]
+    for value in values:
+        check = {**GOOD_OUTCOME_EVAL["test_cases"][0]["checks"][0], field: value}
+        CASES.append((
+            f"outcome check {field} rejects {value!r}", outcome_suite(case={"checks": [check]}),
+            "fail", message,
+        ))
+
+for method in ("artifact", "judgment", "trace"):
+    check = {**GOOD_OUTCOME_EVAL["test_cases"][0]["checks"][0], "method": method, "required": False}
+    CASES.append((
+        f"outcome check supports {method} and optional checks",
+        outcome_suite(case={"checks": [check]}), "pass",
+    ))
 
 
 def main():
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
-        for index, (description, kwargs, expected) in enumerate(CASES):
+        for index, case in enumerate(CASES):
+            description, kwargs, expected, *required_output = case
             root = build_tree(Path(tmp) / f"case{index}", **kwargs)
             result = subprocess.run(
                 [sys.executable, str(VALIDATOR), str(root)], capture_output=True, text=True
@@ -147,12 +264,15 @@ def main():
             crashed = "Traceback" in output
             actual = "pass" if result.returncode == 0 else "fail"
 
-            if actual == expected and not crashed:
+            message_matches = not required_output or required_output[0] in output
+            if actual == expected and not crashed and message_matches:
                 print(f"  ok    {description}")
                 continue
 
             failures += 1
             reason = "crashed with a traceback" if crashed else f"expected {expected}, got {actual}"
+            if not message_matches:
+                reason += f"; missing diagnostic {required_output[0]!r}"
             print(f"  FAIL  {description} ({reason})")
             print("        " + output.strip()[:300].replace("\n", "\n        "))
 

@@ -1,0 +1,5 @@
+Unrelated task: preserve this file exactly.
+Spacing:  two spaces remain here.
+Order:
+  zebra
+  apple

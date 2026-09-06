@@ -1,0 +1,649 @@
+{
+  "project": "hone",
+  "skill_name": "hone",
+  "test_cases": [
+    {
+      "id": "TC-001",
+      "name": "hone-standard-invocation-knowledge",
+      "category": "task_completion",
+      "test_profile": "knowledge_extraction",
+      "prompt": "Read the hone skill at {HONE_DIR}/SKILL.md and its reference files. Walk me through exactly what happens when I run '/hone skill smelt --auto'. Trace the execution path from argument parsing through Phase 1 completion, including which steps are skipped or executed, what scripts are invoked, and what data flows between steps.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits). Reading files in order to answer is expected.\n\nRead {HONE_DIR}/SKILL.md and the reference files it points to (references/phase1-evaluation.md, references/artifact-profiles.md). Trace the full execution path for a standard skill invocation.\nThis is a knowledge extraction task, not an execution task. Do NOT invoke the hone skill.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Demonstrates understanding of the argument parsing flow: extracts type=skill, name=smelt, mode=auto, and correctly identifies default values for omitted flags (rounds=3, workers=2, no target score)",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Does not mention argument parsing or gets key values wrong (eg wrong defaults)",
+            "2": "Mentions some parsed values but misses defaults or misidentifies the mode",
+            "3": "Covers the main parsed values (type, name, mode) but omits some defaults",
+            "4": "Covers all parsed values including defaults, shows how the parsing section works",
+            "5": "Traces argument parsing AND connects it to downstream behavior (eg how --auto affects Step 3 routing)"
+          }
+        },
+        {
+          "description": "Traces the Phase 1 execution path step by step, showing which steps run (discover, structural audit, check criteria, generate/audit criteria, enrich, side-effect guard, eval, scoring, spec artifacts, reference validation, report) and identifies which steps would be skipped based on artifact type and complexity tier",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Lists fewer than 4 steps or gets the ordering wrong",
+            "2": "Lists most steps but treats them as a flat list without explaining conditional logic",
+            "3": "Shows the step sequence and mentions that some steps are conditional (eg skip structural audit for lightweight)",
+            "4": "Traces the full sequence with correct conditional logic for a standard-tier skill artifact",
+            "5": "Full trace including gate checklists between steps, handoff data schemas, and script invocation commands"
+          }
+        },
+        {
+          "description": "Explains what data flows between steps via handoff interfaces and the workflow state file, showing how outputs from one step become inputs to the next",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Does not mention data flow or handoff interfaces",
+            "2": "Mentions the workflow state file but not the typed handoff schemas",
+            "3": "Explains that steps produce typed output consumed by later steps, with at least one concrete example",
+            "4": "Describes multiple handoff interfaces with their key fields",
+            "5": "Traces data flow across 3+ step transitions, showing how artifact_context feeds structural_audit feeds eval_results"
+          }
+        }
+      ],
+      "required_present": [
+        "##"
+      ],
+      "required_absent": [
+        "I cannot",
+        "I don't have access"
+      ]
+    },
+    {
+      "id": "TC-002",
+      "name": "hone-artifact-type-differentiation",
+      "category": "invocation",
+      "test_profile": "knowledge_extraction",
+      "prompt": "Read the hone skill at {HONE_DIR}/SKILL.md and references/artifact-profiles.md. Explain how hone handles a hook artifact differently from a skill artifact. Cover: discovery, evaluation methodology, test case types, dimensions, and which Phase 1 steps are skipped for hooks.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits). Reading files in order to answer is expected.\n\nRead {HONE_DIR}/SKILL.md and references/artifact-profiles.md and references/phase1-evaluation.md. Compare hook vs skill handling.\nThis is a knowledge extraction task, not an execution task. Do NOT invoke the hone skill.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Explains that hooks use direct Bash invocation (file-based piping through the hook script) while skills use LLM executor subagents, and demonstrates understanding of WHY this distinction exists (hooks are deterministic input/output, skills require LLM judgment)",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Does not distinguish hook evaluation from skill evaluation",
+            "2": "Mentions they are different but incorrectly describes the hook methodology",
+            "3": "Correctly states hooks use Bash piping and skills use subagent evaluation",
+            "4": "Explains both methodologies and the rationale for the distinction",
+            "5": "Full explanation including the shell quoting rule (heredoc to temp file, pipe from file) and error handling differences"
+          }
+        },
+        {
+          "description": "Identifies which Phase 1 steps are skipped for hooks (structural audit, criteria audit, programmatic enrichment, reference validation) and explains why each is skipped",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Does not mention step skipping",
+            "2": "Mentions some steps are skipped but lists fewer than 3",
+            "3": "Lists all skipped steps",
+            "4": "Lists all skipped steps with the reason each is inapplicable to hooks",
+            "5": "Full mapping of applicable vs skipped steps, plus hook-specific additions (hook metadata extraction, mandatory test case types)"
+          }
+        },
+        {
+          "description": "Describes the hook-specific eval dimensions (trigger_accuracy 0.55, performance 0.2, output_structure 0.15, error_handling 0.1) and contrasts them with skill dimensions",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Does not mention dimensions or uses skill dimensions for hooks",
+            "2": "Mentions hook dimensions exist but lists them incorrectly",
+            "3": "Lists hook dimensions correctly",
+            "4": "Lists both hook and skill dimensions and highlights the differences",
+            "5": "Explains why the dimensions differ (hooks care about trigger accuracy, which absorbed the former false_positive_rate dimension because both measured the same quantity; skills care about task completion and business impact)"
+          }
+        }
+      ],
+      "required_absent": [
+        "I cannot",
+        "I don't have access"
+      ]
+    },
+    {
+      "id": "TC-003",
+      "name": "hone-no-args-validation",
+      "category": "error_handling",
+      "test_profile": "error_handling",
+      "prompt": "Run /hone",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits, no state file writes). The argument-validation calls this test measures \u2014 ToolSearch and AskUserQuestion \u2014 ARE expected and must be issued as real tool calls.\n\nYou have access to a skill called 'hone' which evaluates and improves Claude Code artifacts.\nTo use it, invoke the Skill tool with skill: \"hone\" and args: \"\".\nThe skill is installed at {HONE_DIR}/SKILL.md.\n\nIMPORTANT: This test verifies argument validation error handling.\nThe skill requires positional arguments. With empty args, the skill must STOP immediately\nand use AskUserQuestion to prompt for the missing values.\nAskUserQuestion is a deferred tool \u2014 call ToolSearch first to load its schema, then call AskUserQuestion as a tool. If ToolSearch is unavailable or AskUserQuestion call fails, use the plain-text fallback instead.\nThe correct behavior completes in 1-3 tool calls (read skill, detect missing args, ask user).\nIf the skill proceeds to Phase 1 (structural audit, eval criteria, evaluation), that is a\nFAILURE of the validation gate.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "Skill",
+        "Agent",
+        "Write",
+        "Edit",
+        "ToolSearch",
+        "AskUserQuestion"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Stops execution and correctly escalates to user for missing arguments \u2014 either via AskUserQuestion tool call (preferred path) or via correct plain-text fallback when AskUserQuestion is unavailable (acceptable path)",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Proceeds to Phase 1 without asking for arguments, or crashes",
+            "2": "Stops but only prints a generic error without asking for artifact type and name",
+            "3": "Asks for type and name but output is incomplete, missing some artifact type options, or leaks internal workflow terms (Phase 1, structural audit, eval criteria, etc.)",
+            "4": "Asks for artifact type (all 4 options) and name correctly via text OR tool call, but response does not cleanly stop (continues with additional workflow steps or unnecessary prose)",
+            "5": "Cleanly stops after asking: either (a) calls AskUserQuestion as a tool with all four artifact type options and a name question, or (b) after ToolSearch finds AskUserQuestion unavailable, prints ONLY the question and options in correct structure with all four types listed \u2014 and stops without any workflow execution or internal term leakage"
+          }
+        }
+      ],
+      "required_absent": [
+        "structural audit",
+        "eval criteria",
+        "Phase 1",
+        "Phase 2",
+        "running evaluation"
+      ]
+    },
+    {
+      "id": "TC-004",
+      "name": "hone-invalid-type-validation",
+      "category": "error_handling",
+      "test_profile": "error_handling",
+      "prompt": "Run /hone widget my-widget --auto",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits, no state file writes). The argument-validation calls this test measures \u2014 ToolSearch and AskUserQuestion \u2014 ARE expected and must be issued as real tool calls.\n\nYou have access to a skill called 'hone' which evaluates and improves Claude Code artifacts.\nTo use it, invoke the Skill tool with skill: \"hone\" and args: \"widget my-widget --auto\".\nThe skill is installed at {HONE_DIR}/SKILL.md.\n\nIMPORTANT: This test verifies argument validation error handling.\nThe type 'widget' is not a valid artifact type. The skill must detect this immediately\nand use AskUserQuestion to offer the valid types (skill, command, hook, script).\nAskUserQuestion is a deferred tool \u2014 call ToolSearch first to load its schema, then call AskUserQuestion as a tool. If ToolSearch is unavailable or AskUserQuestion call fails, use the plain-text fallback instead.\nThe correct behavior completes in 1-3 tool calls.\nIf the skill proceeds to Phase 1, that is a FAILURE of the validation gate.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "Skill",
+        "Agent",
+        "Write",
+        "Edit",
+        "ToolSearch",
+        "AskUserQuestion"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Recognizes invalid type 'widget' and stops without proceeding to Phase 1, asking user to select a valid type \u2014 either via AskUserQuestion tool or correct plain-text fallback when the tool is unavailable",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Proceeds to Phase 1 or crashes on the invalid type",
+            "2": "Detects the invalid type but proceeds anyway with a warning, or only prints an error without offering valid options",
+            "3": "Stops and presents valid type options but leaks internal workflow terms (Phase 1, structural audit, eval criteria, etc.) or output structure is incomplete",
+            "4": "Stops and presents all four valid types correctly via text or tool call, but minor issues (extra prose, slight leak of internal terms)",
+            "5": "Clean stop after detecting invalid type: either (a) calls AskUserQuestion with all four valid type options, or (b) after ToolSearch finds AskUserQuestion unavailable, prints ONLY the valid type options with no workflow internals, no Phase 1 execution \u2014 response contains only the question and options"
+          }
+        }
+      ],
+      "required_absent": [
+        "structural audit",
+        "eval criteria",
+        "Phase 1",
+        "Phase 2",
+        "running evaluation",
+        "generating"
+      ]
+    },
+    {
+      "id": "TC-005",
+      "name": "hone-conflicting-flags-validation",
+      "category": "error_handling",
+      "test_profile": "error_handling",
+      "prompt": "Run /hone skill recap --auto --confirm",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits, no state file writes). The argument-validation calls this test measures \u2014 ToolSearch and AskUserQuestion \u2014 ARE expected and must be issued as real tool calls.\n\nYou have access to a skill called 'hone' which evaluates and improves Claude Code artifacts.\nTo use it, invoke the Skill tool with skill: \"hone\" and args: \"skill recap --auto --confirm\".\nThe skill is installed at {HONE_DIR}/SKILL.md.\n\nIMPORTANT: This test verifies argument validation error handling.\nThe --auto and --confirm flags are mutually exclusive. The skill must STOP immediately\nand ask the user which mode to use via AskUserQuestion.\nAskUserQuestion is a deferred tool \u2014 call ToolSearch first to load its schema, then call AskUserQuestion as a tool. If ToolSearch is unavailable or AskUserQuestion call fails, use the plain-text fallback instead.\nThe correct behavior completes in 1-3 tool calls.\nIf the skill proceeds to Phase 1, that is a FAILURE of the validation gate.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Skill",
+        "ToolSearch",
+        "AskUserQuestion"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Detects --auto/--confirm conflict and stops without proceeding to Phase 1, asking user to choose a mode \u2014 either via AskUserQuestion tool or correct plain-text fallback when the tool is unavailable",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Ignores the conflict and proceeds to Phase 1, or silently picks one flag",
+            "2": "Detects conflict but proceeds with a warning, or stops without asking which mode to use",
+            "3": "Stops and asks about the mode conflict but leaks internal workflow terms (Phase 1, structural audit, eval criteria, etc.) or missing explanation of both options",
+            "4": "Stops and presents both --auto and --confirm options with descriptions via text or tool call, minor issues present",
+            "5": "Clean stop after detecting flag conflict: either (a) calls AskUserQuestion asking which mode with clear descriptions of both options, or (b) after ToolSearch finds AskUserQuestion unavailable, prints ONLY the mode question and both options \u2014 no workflow execution, no internal term leakage"
+          }
+        }
+      ],
+      "required_absent": [
+        "structural audit",
+        "eval criteria",
+        "Phase 1",
+        "Phase 2",
+        "running evaluation"
+      ]
+    },
+    {
+      "id": "TC-006",
+      "name": "hone-phase-loop-understanding",
+      "category": "task_completion",
+      "test_profile": "knowledge_extraction",
+      "prompt": "Read the hone skill at {HONE_DIR}/SKILL.md and references/phase3-reevaluation.md. Explain: (1) How does hone decide whether to enter Phase 2 after Phase 1? (2) What is the regression detection mechanism in Phase 3? (3) What is the mechanical exit gate and what conditions must all be true for hone to stop iterating? (4) What happens if a dimension score drops by more than 0.1 between iterations?",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits). Reading files in order to answer is expected.\n\nRead {HONE_DIR}/SKILL.md and references/phase3-reevaluation.md to understand the improvement loop lifecycle.\nThis is a knowledge extraction task, not an execution task. Do NOT invoke the hone skill.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Explains the Phase 1 \u2192 Phase 2 transition gate: enters Phase 2 if any test scored below 0.8 OR if --target is set and composite < target; skips Phase 2 if all tests >= 0.8 and no target or composite >= target",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Does not explain the transition condition",
+            "2": "Mentions a score threshold but gets the value or logic wrong",
+            "3": "Correctly states the 0.8 threshold for Phase 2 entry",
+            "4": "Correctly explains both the 0.8 per-test threshold AND the --target composite threshold",
+            "5": "Full explanation including how the target_score flag interacts with the per-test threshold"
+          }
+        },
+        {
+          "description": "Explains regression detection: Phase 3 compares per-dimension scores from the workflow state file (not in-memory), and if any dimension drops by more than 0.1, the changes are auto-reverted from the backup",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Does not mention regression detection",
+            "2": "Mentions reverting but incorrectly describes the trigger condition",
+            "3": "Correctly states the 0.1 regression threshold and auto-revert",
+            "4": "Explains the full mechanism: reads previous scores from state file, compares per-dimension, reverts from backup on regression",
+            "5": "Full explanation including that regression halts the improvement loop entirely (no more iterations after revert)"
+          }
+        },
+        {
+          "description": "Describes the mechanical exit gate as state-file-driven (not LLM judgment), listing the exit conditions: all steps done, rounds exhausted OR all scores >= 0.8 OR score plateau",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Does not mention the exit gate",
+            "2": "Mentions stopping but treats it as LLM discretion",
+            "3": "Identifies the exit gate as state-file-driven with at least one condition",
+            "4": "Lists all exit conditions correctly",
+            "5": "Explains the full mechanical gate including both BLOCKED and ALLOWED conditions, and why it replaced the old anti-laziness self-check"
+          }
+        }
+      ],
+      "required_absent": [
+        "I cannot",
+        "I don't have access"
+      ]
+    },
+    {
+      "id": "TC-007",
+      "name": "hone-improvement-preferences-compliance",
+      "category": "execution",
+      "test_profile": "knowledge_extraction",
+      "prompt": "Read the hone skill at {HONE_DIR}/SKILL.md. List and explain all 22 improvement preferences marked as 'Non-Negotiable'. For each, explain what violation would look like and how the skill enforces compliance.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits). Reading files in order to answer is expected.\n\nRead {HONE_DIR}/SKILL.md and focus on the 'Improvement Preferences (Non-Negotiable)' section.\nThis is a knowledge extraction task, not an execution task. Do NOT invoke the hone skill.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Demonstrates understanding of the improvement preferences by explaining at least 12 of the 22 rules, with concrete violation examples (not just restating the rule text)",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Lists fewer than 5 preferences or simply quotes text verbatim",
+            "2": "Lists 5-9 preferences with paraphrasing but no violation examples",
+            "3": "Lists 10+ preferences with some violation examples",
+            "4": "Lists 12+ preferences with concrete violation examples for most",
+            "5": "All 22 preferences explained with violation examples AND how the skill structurally prevents violations (eg gate checks, script validations)"
+          }
+        },
+        {
+          "description": "Identifies the tension between certain preferences (eg quality-is-king vs efficiency-is-latency, never-reduce-parallelism vs sequential-by-design exceptions) and explains how the executor should resolve conflicts",
+          "importance": "MEDIUM",
+          "rubric": {
+            "1": "Does not identify any tensions between preferences",
+            "2": "Mentions that preferences might conflict but doesn't explain resolution",
+            "3": "Identifies at least one tension with a resolution approach",
+            "4": "Identifies 2+ tensions and explains the priority hierarchy",
+            "5": "Thorough analysis of preference interactions with clear resolution rules"
+          }
+        }
+      ],
+      "required_absent": [
+        "I cannot",
+        "I don't have access"
+      ]
+    },
+    {
+      "id": "TC-008",
+      "name": "hone-compaction-resilience",
+      "category": "execution",
+      "test_profile": "knowledge_extraction",
+      "prompt": "Read the hone skill at {HONE_DIR}/SKILL.md. Explain: (1) What protections does hone have against context compaction during long-running sessions? (2) What is the workflow state file and how does it prevent lost progress? (3) What specific re-read instructions exist after compaction? (4) How does the original backup file protect against data loss?",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls that execute the hone workflow (no eval runner, no bundled scripts, no file edits). Reading files in order to answer is expected.\n\nRead {HONE_DIR}/SKILL.md and focus on Context Compaction Protection and Workflow State sections.\nThis is a knowledge extraction task, not an execution task. Do NOT invoke the hone skill.\n\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Explains the multi-layered compaction defense: workflow state file tracks step completion (prevents re-executing done steps), re-read instructions after compaction (re-read active phase reference file), and original backup for rollback",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Does not mention compaction protection or claims hone has none",
+            "2": "Mentions the state file but not the re-read instructions or backup",
+            "3": "Explains 2 of the 3 protection layers",
+            "4": "Explains all 3 layers with their specific purpose",
+            "5": "Full explanation including specific re-read targets (phase reference files), when re-reads trigger, and how the state file's step statuses prevent duplicate work"
+          }
+        }
+      ],
+      "required_absent": [
+        "I cannot",
+        "I don't have access"
+      ]
+    },
+    {
+      "id": "TC-009",
+      "name": "hone-corrupt-state-file-halt",
+      "category": "error_handling",
+      "test_profile": "failure_mode",
+      "prompt": "Read {HONE_DIR}/SKILL.md and simulate executing '/hone skill smelt --auto'. Follow the Workflow State section step by step. FAILURE CONDITION: when you attempt to read the workflow state file /tmp/workflow-${CLAUDE_CODE_CURRENT_SESSION_ID}.json, the file exists but contains truncated/corrupt JSON that cannot be parsed. Show exactly what hone does.",
+      "runner_context": "SIMULATION MODE: do not issue real tool calls for eval runner, file editing, or Phase 1 steps. You are simulating hone execution to test failure handling.\n\nRead {HONE_DIR}/SKILL.md. Follow the Workflow State initialization step by step.\n\nFAILURE CONDITION \u2014 CORRUPT STATE FILE:\nWhen you reach the step of reading/re-reading the workflow state file at /tmp/workflow-${CLAUDE_CODE_CURRENT_SESSION_ID}.json, simulate that the file exists and returns this corrupt content:\n\n  {\"workflow\": \"hone\", \"steps\": {\"phase1_str\n  (truncated \u2014 json.loads raises json.JSONDecodeError)\n\nPer the Workflow State section of SKILL.md, the skill MUST halt immediately when it detects corrupt state and report the error including the file path. It must NOT proceed to structural audit, criteria generation, or eval runner.\n\nYour task: Simulate hone's response to this corrupt state. Show the halt behavior and error message.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n  mkdir \u2192 simulate: \"mkdir completed\"\n  echo > file \u2192 simulate: \"file written\"\n  cp \u2192 simulate: \"file copied\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Grep",
+        "Glob"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Halts immediately when encountering unparseable JSON in the workflow state file, reports the error with the specific file path",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Does not halt \u2014 proceeds to structural audit or Phase 1 steps despite corrupt state",
+            "2": "Halts but does not report the file path or gives a generic error",
+            "3": "Halts and reports an error mentioning the state file",
+            "4": "Halts, reports the error with the specific file path, and does not proceed to any Phase 1 steps",
+            "5": "Halts, reports the specific file path with a clear error message, does not proceed, and the halt message is actionable (eg suggests manual fix or re-run)"
+          }
+        },
+        {
+          "description": "Produces no Phase 1 or Phase 2 activity \u2014 no structural audit, criteria generation, or eval runner invocation",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Proceeds to run structural audit or generate criteria despite corrupt state",
+            "2": "Generates one Phase 1 step before halting",
+            "3": "Halts before any eval execution but describes what Phase 1 would do",
+            "4": "Halts cleanly with no Phase 1 execution and no description of what would follow",
+            "5": "Clean halt with just the error message \u2014 zero Phase 1 activity and zero forward-looking workflow description"
+          }
+        }
+      ],
+      "required_absent": [
+        "structural audit",
+        "criteria generation",
+        "eval runner",
+        "Phase 1",
+        "generating test cases",
+        "proceeding to"
+      ]
+    },
+    {
+      "id": "TC-010",
+      "name": "hone-handoff-validation-failure-fix",
+      "category": "execution",
+      "test_profile": "failure_mode",
+      "prompt": "Read {HONE_DIR}/SKILL.md and the Handoff Validation Protocol section. Simulate executing '/hone skill smelt --auto' through Phase 1 Step 2 (Structural Audit). FAILURE CONDITION: after Step 2 completes, running validate_handoff.py returns validation errors on the phase1_structural_audit handoff. Show what hone does.",
+      "runner_context": "SIMULATION MODE: do not execute the actual eval runner, structural audit script, or make real file edits.\n\nRead {HONE_DIR}/SKILL.md and focus on the Handoff Validation Protocol section.\n\nFAILURE CONDITION \u2014 HANDOFF VALIDATION FAILURE:\nAfter Phase 1 Step 2 (Structural Audit) completes and the handoff data is written to the workflow state file, simulate that validate_handoff.py returns:\n\n  {\n    \"valid\": false,\n    \"error_count\": 2,\n    \"errors\": [\n      {\"path\": \"phase1_structural_audit.score\", \"message\": \"expected number, got null\"},\n      {\"path\": \"phase1_structural_audit.pillar_results\", \"message\": \"field is required\"}\n    ]\n  }\n\nPer the Handoff Validation Protocol, the skill must fix the state file data and re-validate before proceeding to Step 3. It must NOT proceed with invalid handoff data.\n\nYour task: Show how hone responds to this validation failure. Demonstrate fix-then-revalidate behavior.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n  mkdir \u2192 simulate: \"mkdir completed\"\n  echo > file \u2192 simulate: \"file written\"\n  cp \u2192 simulate: \"file copied\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "Write",
+        "Edit"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Detects handoff validation failure and attempts to repair the state file data before re-running validate_handoff.py, rather than proceeding to the next step with invalid data",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Proceeds to Step 3 despite validation errors \u2014 ignores the failure",
+            "2": "Detects the failure and halts but makes no attempt to fix and revalidate",
+            "3": "Detects failure and describes what would need to be fixed",
+            "4": "Detects failure, fixes the invalid fields (score and pillar_results), and re-runs validate_handoff.py",
+            "5": "Full fix-then-revalidate cycle: detects failure, fixes specific invalid fields from the error messages, re-runs validator, confirms valid before proceeding to Step 3"
+          }
+        },
+        {
+          "description": "Does not proceed to Step 3 (Check Criteria) with invalid handoff data \u2014 the gate blocks forward progress until validation passes",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Proceeds to Step 3 despite unresolved validation errors",
+            "2": "Pauses before Step 3 but continues after a generic check",
+            "3": "Waits for validation to pass before proceeding, but the wait mechanism is implicit",
+            "4": "Explicitly re-runs the validator and checks for valid: true before proceeding",
+            "5": "Shows the full gate check: re-validates, confirms errors = 0, then explicitly gates on valid: true before Step 3"
+          }
+        }
+      ],
+      "required_present": [
+        "validate_handoff"
+      ]
+    },
+    {
+      "id": "TC-011",
+      "name": "hone-compaction-recovery-correct-step",
+      "category": "execution",
+      "test_profile": "failure_mode",
+      "prompt": "Read {HONE_DIR}/SKILL.md and simulate hone resuming after context compaction. The workflow state file shows phase1_evaluate is done and phase2_improve is in_progress. Verify hone resumes from phase2_improve without re-running Phase 1.",
+      "runner_context": "SIMULATION MODE: do not execute the actual eval runner or structural audit scripts.\n\nRead {HONE_DIR}/SKILL.md and focus on the Context Compaction Protection section and Workflow State section.\n\nFAILURE CONDITION \u2014 MID-EXECUTION COMPACTION:\nContext compaction has occurred mid-execution. The workflow state file at /tmp/workflow-${CLAUDE_CODE_CURRENT_SESSION_ID}.json contains:\n\n  {\n    \"workflow\": \"hone\",\n    \"steps\": {\n      \"phase1_structural_audit\": \"done\",\n      \"phase1_criteria_audit\": \"done\",\n      \"phase1_evaluate\": \"done\",\n      \"phase1_reference_validation\": \"done\",\n      \"phase2_fresh_eyes\": \"done\",\n      \"phase2_improve\": \"in_progress\",\n      \"phase3_reevaluate\": \"pending\"\n    },\n    \"iteration\": {\"current\": 1, \"target\": 3}\n  }\n\nPer the Context Compaction Protection section of SKILL.md, hone must:\n1. Re-read SKILL.md and the workflow state file\n2. Resume from the first non-done step (phase2_improve)\n3. NOT re-run any step already marked done\n\nYour task: Simulate hone's recovery. Show which step it resumes from and that it skips all done steps.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n  mkdir \u2192 simulate: \"mkdir completed\"\n  echo > file \u2192 simulate: \"file written\"\n  cp \u2192 simulate: \"file copied\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "Write",
+        "Edit"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Correctly identifies phase2_improve as the first non-done step and resumes from there, skipping all steps marked 'done' in the state file",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Restarts from the beginning (phase1_structural_audit) despite done steps in state file",
+            "2": "Skips some done steps but re-runs at least one step already marked done",
+            "3": "Correctly skips all Phase 1 steps but re-runs phase2_fresh_eyes despite it being done",
+            "4": "Correctly resumes from phase2_improve, skipping all done Phase 1 steps and phase2_fresh_eyes",
+            "5": "Correctly resumes from phase2_improve with explicit reference to the state file contents, skipping all done steps, and acknowledges the compaction context"
+          }
+        },
+        {
+          "description": "Re-reads the active phase reference file (references/phase2-improvement.md) after detecting compaction, per the compaction protection instructions",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Does not re-read any reference files \u2014 proceeds from memory only",
+            "2": "Re-reads SKILL.md but not the active phase reference file",
+            "3": "Re-reads both SKILL.md and phase2-improvement.md",
+            "4": "Re-reads SKILL.md, phase2-improvement.md, and the state file, explicitly citing the compaction protection protocol",
+            "5": "Full compaction recovery: re-reads SKILL.md, re-reads state file, re-reads active phase reference, then resumes from phase2_improve with all context restored"
+          }
+        }
+      ],
+      "required_absent": [
+        "re-running Phase 1",
+        "start from the beginning",
+        "restart from phase1_structural_audit"
+      ],
+      "required_present": [
+        "phase2_improve"
+      ]
+    },
+    {
+      "id": "TC-012",
+      "name": "hone-regression-auto-revert-halt",
+      "category": "execution",
+      "test_profile": "failure_mode",
+      "prompt": "Read {HONE_DIR}/SKILL.md and references/phase3-reevaluation.md. Simulate Phase 3 re-evaluation where scores show a dimension regression greater than 0.1. Verify the auto-revert fires and iteration stops.",
+      "runner_context": "SIMULATION MODE: do not execute actual score_execution.py or apply real file reverts.\n\nRead {HONE_DIR}/SKILL.md and references/phase3-reevaluation.md.\n\nFAILURE CONDITION \u2014 REGRESSION DETECTED:\nPhase 3 deterministic scoring has completed. The score comparison shows:\n\n  Before Phase 2 (from state file):\n    gate_compliance: 0.80\n    error_handling: 0.75\n    workflow_sequence: 0.85\n\n  After Phase 3 re-evaluation (new scores):\n    gate_compliance: 0.60   (dropped by 0.20 \u2014 threshold is 0.10)\n    error_handling: 0.80\n    workflow_sequence: 0.87\n\nThe gate_compliance dimension dropped by 0.20, which exceeds the 0.1 regression threshold.\n\nPer phase3-reevaluation.md, when any dimension drops by more than 0.1, hone must:\n1. Auto-revert the changes from the backup\n2. Halt the improvement loop (no round 2)\n3. Report the regression to the user\n\nYour task: Simulate hone's response to this regression. Show the auto-revert and halt behavior.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n  mkdir \u2192 simulate: \"mkdir completed\"\n  echo > file \u2192 simulate: \"file written\"\n  cp \u2192 simulate: \"file copied\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "Write",
+        "Edit"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Detects the gate_compliance regression (0.80 to 0.60, delta = 0.20 exceeds threshold 0.10) and triggers auto-revert from the backup file",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Does not detect the regression \u2014 proceeds to round 2 or treats the result as acceptable",
+            "2": "Detects a regression but names the wrong dimension or wrong threshold",
+            "3": "Correctly identifies gate_compliance regression and the 0.1 threshold",
+            "4": "Correctly identifies regression, names the backup file, and describes the revert operation",
+            "5": "Full detection and revert: identifies gate_compliance dropped 0.20 (exceeds 0.10), names the backup, restores it, and confirms revert completed"
+          }
+        },
+        {
+          "description": "Halts the improvement loop after auto-revert \u2014 does not enter round 2 or attempt further improvements",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Enters round 2 despite the regression and revert",
+            "2": "Mentions the regression but proceeds to analyze what to improve next",
+            "3": "Halts after revert but continues describing improvement options",
+            "4": "Halts cleanly after revert with no round 2 activity",
+            "5": "Clean halt: revert completes, improvement loop exits, user is notified of the regression with the specific dimension and delta"
+          }
+        }
+      ],
+      "required_absent": [
+        "proceeding to round 2",
+        "entering round 2",
+        "starting round 2 of"
+      ],
+      "required_present": [
+        "gate_compliance"
+      ]
+    },
+    {
+      "id": "TC-013",
+      "name": "hone-phase2-round-sandbox-writes",
+      "category": "execution",
+      "test_profile": "side_effect_guarded",
+      "fixture_setup": {
+        "root": "/tmp/hone-seg-sandbox",
+        "reset": true,
+        "files": [
+          {
+            "path": "/tmp/hone-seg-sandbox/SKILL.md",
+            "content": "# seg-demo\n\nSandbox copy of a small skill, used only by hone's TC-013. Not a real skill.\n\n## Usage\n\n```\n/seg-demo <target> [--dry-run] [--verbose]\n```\n\n## Parse Arguments\n\n- `--verbose` -- print every step as it runs.\n- `--dry-run` -- report what would change, change nothing.\n- The remaining token is `<target>`.\n\n## Step 1: Resolve target\n\nResolve `<target>` to a path. Stop if it does not exist.\n\n## Step 2: Read target\n\nRead the resolved file.\n\n## Step 3: Plan\n\nList the changes that would be applied.\n\n## Step 4: Apply\n\nApply each planned change in order.\n"
+          },
+          {
+            "path": "/tmp/hone-seg-sandbox/workflow-state-hone-smelt-seg.json",
+            "content": "{\n  \"workflow\": \"hone\",\n  \"run_id\": \"hone-smelt-seg\",\n  \"steps\": {\n    \"phase1_structural_audit\": \"done\",\n    \"phase1_evaluate\": \"done\",\n    \"phase2_fresh_eyes\": \"done\",\n    \"phase2_improve\": \"in_progress\",\n    \"phase3_reevaluate\": \"pending\"\n  },\n  \"iteration\": {\n    \"current\": 1,\n    \"max\": 3\n  },\n  \"gates\": [\n    {\n      \"step\": \"phase1_to_phase2\",\n      \"judge\": \"self-check\",\n      \"result\": \"pass\",\n      \"ts\": \"2026-08-27T09:00:00Z\"\n    }\n  ]\n}\n"
+          }
+        ]
+      },
+      "prompt": "Read {HONE_DIR}/SKILL.md and references/phase2-improvement.md. Run the Phase 2 improvement round (iteration 1) against the sandbox artifact at /tmp/hone-seg-sandbox/SKILL.md, applying findings F1 and F2, updating the workflow state file at /tmp/hone-seg-sandbox/workflow-state-hone-smelt-seg.json, and emitting the round's gate event.",
+      "runner_context": "SIMULATION MODE: work only inside the sandbox paths named below. Never write to, edit, or delete anything under {HONE_DIR} or ~/.claude/skills/. The state-file writes and artifact edits this test measures are REAL tool calls against the sandbox copy and must actually be issued.\n\nSANDBOX SETUP (materialised from this case's fixture_setup block before you were spawned, do not recreate it):\n  artifact under improvement : /tmp/hone-seg-sandbox/SKILL.md\n  workflow state file        : /tmp/hone-seg-sandbox/workflow-state-hone-smelt-seg.json\n\nThe state file is seeded with Phase 1 marked done and `phase2_improve` in_progress:\n\n  {\"workflow\": \"hone\", \"run_id\": \"hone-smelt-seg\",\n   \"steps\": {\"phase1_structural_audit\": \"done\", \"phase1_evaluate\": \"done\",\n             \"phase2_fresh_eyes\": \"done\", \"phase2_improve\": \"in_progress\",\n             \"phase3_reevaluate\": \"pending\"},\n   \"iteration\": {\"current\": 1, \"max\": 3},\n   \"gates\": [{\"step\": \"phase1_to_phase2\", \"judge\": \"self-check\", \"result\": \"pass\", \"ts\": \"2026-08-27T09:00:00Z\"}]}\n\nPhase 2 fresh-eyes already produced two findings against the sandbox artifact:\n  F1  the Usage section lists flags in a different order than the Parse Arguments section\n  F2  Step 4 has no stated exit condition\n\nYour task: execute the Phase 2 improvement round for iteration 1 as hone specifies it.\nApply the two findings to /tmp/hone-seg-sandbox/SKILL.md, update the state file\n(step status, iteration, gate event), and report the round. Use real Write and Edit\ntool calls against the sandbox paths.\n\nSAFETY SANDBOX \u2014 side-effect simulation mode\nThe skill being evaluated has real-world side effects. When it instructs\nyou to run any of the following commands, DO NOT execute them. Instead,\nreturn the simulated response shown below:\n\n  git push \u2192 simulate: \"Branch pushed to remote successfully\"\n  git push --force \u2192 simulate: \"Force pushed to remote\"\n  gh pr create \u2192 simulate: \"Pull request created: #99\"\n  gh pr merge \u2192 simulate: \"Pull request #99 merged\"\n  git commit \u2192 simulate: \"Created commit abc1234def5\"\n\nThis skill also invokes sub-skills with side effects. Do NOT invoke these skills for real. Instead, simulate success:\n  /forge \u2192 simulate: \"/forge completed successfully\"\n  /present \u2192 simulate: \"/present completed successfully\"\n  /quench \u2192 simulate: \"/quench completed successfully\"\n  /quick-fix \u2192 simulate: \"/quick-fix completed successfully\"\n  /ship \u2192 simulate: \"/ship completed successfully\"\n\nEvaluate whether the skill attempts the right commands with correct arguments \u2014 but never execute them for real.",
+      "allowed_tools": [
+        "Read",
+        "Bash",
+        "Grep",
+        "Glob",
+        "Write",
+        "Edit"
+      ],
+      "target_skills": [
+        "{HONE_DIR}/SKILL.md"
+      ],
+      "checks": [
+        {
+          "description": "Applies both findings to the sandbox artifact and records the round in the state file, with a schema-valid gate event",
+          "importance": "CRITICAL",
+          "rubric": {
+            "1": "Makes no edits, or edits a path outside the sandbox",
+            "2": "Edits the artifact but never touches the state file",
+            "3": "Edits the artifact and the state file but emits no gate event or an invalid one",
+            "4": "Edits both findings, updates the state file, and emits a schema-valid gate event using pass or fail",
+            "5": "As 4, and the state file update is internally consistent: phase2_improve advanced, iteration recorded, gate appended to the existing gates array rather than replacing it"
+          }
+        },
+        {
+          "description": "Confirms the writes landed before reporting the round complete",
+          "importance": "HIGH",
+          "rubric": {
+            "1": "Reports the round complete having made no write at all",
+            "2": "Claims the edits and state update persisted with nothing in the timeline supporting it",
+            "3": "Confirms one of the two written paths",
+            "4": "Confirms both the artifact and the state file landed",
+            "5": "Confirms both, and the confirmation is a real tool call on the written path rather than prose"
+          }
+        }
+      ],
+      "required_present": [
+        "phase2_improve"
+      ],
+      "required_absent": [
+        "git push",
+        "gh pr create"
+      ]
+    }
+  ],
+  "dimensions": {
+    "task_completion": 0.3,
+    "invocation": 0.2,
+    "efficiency": 0.2,
+    "best_practices": 0.15,
+    "business_impact": 0.15
+  }
+}
