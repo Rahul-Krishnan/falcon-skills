@@ -26,11 +26,7 @@ class TestClassifyFailure(unittest.TestCase):
         self.assertEqual(result, "variance")
 
     def test_floor_score_with_others_passing_is_variance(self):
-        """A deterministic composite bottoms out at DIMENSION_FLOOR, not 0.0.
-
-        Written against an exact 0.0, this band was dead in the documented
-        primary mode.
-        """
+        """Deterministic failures reach DIMENSION_FLOOR, so exact-zero checks miss them."""
         floor = DIMENSION_FLOOR
         self.assertEqual(classify_failure(floor, [floor, 0.8, 0.9]), "variance")
 
@@ -157,11 +153,7 @@ class TestTriageFunction(unittest.TestCase):
         self.assertEqual(result["summary"]["pass"], 1)
 
     def test_variance_reachable_on_deterministic_only_run(self):
-        """The real shape: no LLM scores, composites from the sibling file.
-
-        The other variance tests hand-write an LLM `score: 0.0`, which a
-        deterministic composite can never be.
-        """
+        """Detect variance from sibling composites when results carry no judge scores."""
         path = self._write_results(
             {"results": [{"test_id": "TC-001"}, {"test_id": "TC-002"}]},
             det_scores={
@@ -179,8 +171,7 @@ class TestTriageFunction(unittest.TestCase):
         self.assertEqual(result["summary"]["pass"], 1)
 
     def test_test_results_alias_is_triaged(self):
-        """Reading only `results` reported a zero-test run for a file
-        score_execution had just graded, so Phase 2 saw no failures."""
+        """Accept the test_results alias so triage sees the cases the scorer graded."""
         path = self._write_results(
             {"test_results": [{"test_id": "TC-001", "score": 0.3}]}
         )
@@ -270,12 +261,7 @@ class TestAnalyzeOutput(unittest.TestCase):
         self.assertNotIn("FAIL", sim_row)
 
     def test_analyze_skips_non_object_entries(self):
-        """score_execution warns and keeps going on a malformed record.
-
-        Both scripts read the same file through extract_results, so an entry
-        that score_execution tolerates must not abort analyze with an
-        AttributeError.
-        """
+        """Skip malformed entries with warnings, matching score_execution."""
         path = self._write(
             {"results": ["oops", {"test_id": "a", "details": {"category": "exec"}}]},
             {"per_test": [{"test_id": "a", "composite": 0.9}]},
@@ -285,13 +271,7 @@ class TestAnalyzeOutput(unittest.TestCase):
         self.assertNotIn("No test results found", output)
 
     def test_analyze_tolerates_explicit_null_semantic_scores(self):
-        """`"raw_semantic_scores": null` is a real shape from the judge.
-
-        dict.get hands back that None for a present key, and `.items()` on it
-        aborted analyze() at RECOMMENDED ACTIONS — after the summary, per-test
-        breakdown and dimension summary had already printed, so the operator
-        got a report that looked complete minus its last section.
-        """
+        """Null semantic scores must not abort the recommendations section."""
         path = self._write(
             {
                 "results": [

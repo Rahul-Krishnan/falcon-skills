@@ -13,19 +13,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-# Will import after implementation exists
-# from score_execution import (
-#     compute_composite,
-#     score_workflow_sequence,
-#     score_gate_compliance,
-#     score_state_persistence,
-#     score_output_structure,
-#     score_voice_compliance,
-#     score_parallel_efficiency,
-#     score_error_handling,
-#     score_from_results,
-#     EPSILON,
-# )
+# Imports live beside the tests that use them.
 
 
 def _make_results_json(
@@ -245,15 +233,7 @@ class TestGateCompliance(unittest.TestCase):
 
 
 class TestRepeatedGateAttemptsScoreCompliant(unittest.TestCase):
-    """A correct repair scored exactly as an ignored halt did.
-
-    Phase 3's exit-2 branch emits `convergence:fail` (reason ledger_missing),
-    rewrites the ledger, re-runs, and emits a second `convergence` that fails
-    whenever the re-run returns escalate or capped. With `terminal or
-    repaired` as the whole predicate, the first fail was neither -- the halt
-    tail slice is exclusive of the failing step, and there is no later pass --
-    so the run scored 5/6 instead of 1.0.
-    """
+    """A ledger_missing retry may itself fail; both failures get credit when the run halts."""
 
     def _score(self, gates):
         from score_execution import score_gate_compliance
@@ -290,14 +270,8 @@ class TestRepeatedGateAttemptsScoreCompliant(unittest.TestCase):
         self.assertEqual(self._score(gates)["score"], 1.0)
 
     def test_the_same_repair_undeclared_does_not_score_fully_compliant(self):
-        """The migration cost, priced in the dimension that pays it.
-
-        The identical events with no `reason` lose the retry that settles the
-        first fail, so a correct legacy run drops a sixth of this dimension.
-        That is the cost of the invariant: while an undeclared fail kept the
-        retry, this same run declaring the truthful `escalate` scored 0.8333
-        against 1.0 for saying nothing, which paid an executor not to declare.
-        """
+        """Legacy repairs without reasons lose one sixth of gate credit; silence must
+        not outperform a truthful halt reason."""
         self.assertLess(self._score(self._exit_2_repair(None, None))["score"],
                         1.0)
 
@@ -505,13 +479,7 @@ class TestErrorHandling(unittest.TestCase):
 
 
 class TestHaltReporting(unittest.TestCase):
-    """The halt branch needs a halt, not just error vocabulary.
-
-    An error on the last tool call plus any final response containing
-    "failed"/"missing"/"cannot" used to count as "handled by halting and
-    reporting", which credits the executor that carried on and claimed
-    success.
-    """
+    """Error vocabulary alone cannot establish that the executor halted."""
 
     def _timeline(self):
         return [
@@ -539,12 +507,7 @@ class TestHaltReporting(unittest.TestCase):
 
 
 class TestVerifyActionsScope(unittest.TestCase):
-    """verify_actions counts artifact writes only.
-
-    The state-file, criteria-file and gate-event read-back instructions were
-    ablated out of the docs, so counting those writes would score an executor
-    down for following the current text.
-    """
+    """verify_actions counts artifact writes; current docs exempt bookkeeping writes."""
 
     def test_state_file_write_is_not_counted(self):
         from score_execution import score_verify_actions
@@ -576,13 +539,7 @@ class TestVerifyActionsScope(unittest.TestCase):
 
 
 class TestSandboxedArtifactWrites(unittest.TestCase):
-    """A declared fixture sandbox under /tmp still holds a real artifact.
-
-    Scoping verify_actions/research_first to `_is_artifact_write_entry` made
-    the scratch-directory exclusion swallow TC-013's artifact at
-    /tmp/hone-seg-sandbox/SKILL.md, so the one case in the suite that scores
-    these two dimensions handed both a free 1.0 whatever the executor did.
-    """
+    """Declared fixture artifacts under /tmp must receive write and research checks."""
 
     SANDBOX = ("/tmp/hone-seg-sandbox/",)
     ARTIFACT = "/tmp/hone-seg-sandbox/SKILL.md"
@@ -1725,13 +1682,7 @@ class TestScoringEvidenceIntegrity(unittest.TestCase):
         self.assertTrue(result["partial_scoring"])
 
     def test_knowledge_extraction_with_evidence_is_still_inconclusive(self):
-        """Evidence of activity is not evidence of a correct answer.
-
-        The KE profile's only dimension is error_handling, which is 1.0
-        whenever nothing errored. Scoring a composite off it reported "did not
-        crash" as "answered well", so one Read plus any prose scored 1.0 and
-        was preferred over the judge. The dimension stays visible as evidence.
-        """
+        """KE error_handling remains evidence only; a crash-free run does not prove answer quality."""
         from score_execution import _score_single_test
 
         result = _score_single_test(
@@ -2192,12 +2143,7 @@ class TestEchoedGateTemplate(unittest.TestCase):
         self.assertLessEqual(result["score"], 0.7)
 
     def test_written_gate_outranks_the_same_gate_quoted(self):
-        """The class penalty survives the evidence floor.
-
-        Both rules bite hardest on one event, and a flat 0.7 cap stopped
-        composing there: the padded ceiling is already 0.625, so a quoted gate
-        used to score exactly what a written one did.
-        """
+        """The quoted-evidence discount must still apply below the evidence floor."""
         written = _score_written_gates(
             [{"step": "phase1_evaluate", "judge": "self", "result": "pass"}]
         )
@@ -2307,13 +2253,7 @@ class TestUnscorableFilesAreInconclusive(unittest.TestCase):
 
 
 class TestNoExecutionEvidenceIsInconclusive(unittest.TestCase):
-    """No tool calls means nothing was observed, whatever the artifact type.
-
-    Every dimension in the hook and script profiles defaults high when there is
-    nothing to look at (trigger_accuracy "No Bash calls to evaluate",
-    correctness "No tool calls to evaluate", error_handling "No errors
-    encountered"), so a run that recorded nothing used to grade A.
-    """
+    """Empty hook/script timelines are inconclusive even when dimensions default high."""
 
     EMPTY = {"test_id": "T1", "execution_timeline": [], "agent_response": ""}
 
@@ -2368,12 +2308,7 @@ class TestNoExecutionEvidenceIsInconclusive(unittest.TestCase):
 
 
 class TestEmittedDimensionsMatchWeightedDimensions(unittest.TestCase):
-    """An unweighted dimension cannot move the composite but still gets read.
-
-    It lands in the per-test `dimensions` map and in `aggregate_dimensions`,
-    where an operator attributes composite movement to it, and Phase 3's "a
-    drop > 0.1 in any dimension flags a regression" rule can auto-revert on it.
-    """
+    """Emit only weighted dimensions so irrelevant scores cannot trigger regression reverts."""
 
     TEST_RESULT = {
         "test_id": "T1",
@@ -2589,13 +2524,7 @@ class TestCoordinatedListDenial(unittest.TestCase):
 
 
 class TestUncommaedClauseBoundaries(unittest.TestCase):
-    """A dash or a causal conjunction ends the denial's clause too.
-
-    Regression: the 160-character lookback only trimmed at sentence
-    punctuation and at `, ; then and but before after while`, so a clause
-    joined by a dash, "so" or "because" inherited a denial from up to 160
-    characters back and forward progress went unscored on `required_absent`.
-    """
+    """Dashes and causal conjunctions must end denial scope for independent clauses."""
 
     SPLICES = (
         "No files were found in the target directory - the structural audit "
@@ -2635,12 +2564,7 @@ class TestUncommaedClauseBoundaries(unittest.TestCase):
         self.assertFalse(_has_unnegated_occurrence("structural audit", text))
 
     def test_a_dash_introducing_a_list_still_reads_as_one_denial(self):
-        """The widening the 160-character window exists for, after a dash.
-
-        A dash can introduce an appositive list as easily as it can splice a
-        clause, so it gets the comma's conditional treatment (glue plus a
-        coordinator), not the semicolon's unconditional break.
-        """
+        """Appositive lists after dashes use the same conditional scope rule as commas."""
         from score_execution import _has_unnegated_occurrence
 
         text = (
@@ -2692,12 +2616,7 @@ class TestHaltSequenceGateCompliance(unittest.TestCase):
         self.assertLess(result["score"], ECHOED_GATE_CAP)
 
     def test_extra_truthful_fail_does_not_lower_the_score(self):
-        """Never lower, and below the evidence floor strictly higher.
-
-        The floor is what makes it strictly higher: a run's denominator is the
-        number of events it chose to emit, so before the floor the terse run
-        and the candid one both scored the cap and under-emitting was free.
-        """
+        """Reporting an additional compliant event must increase credit below the floor."""
         from score_execution import score_gate_compliance
 
         terse = [
@@ -2766,13 +2685,7 @@ class TestRequireTimelineGate(unittest.TestCase):
 
 
 class TestCommaClauseScoping(unittest.TestCase):
-    """A comma separates list items or splices clauses; only one is negation.
-
-    Blanket comma transparency excused "Skipped the audit, ran Phase 1" --
-    forward progress hiding behind an earlier denial, which is the violation
-    required_absent exists to catch. Stopping at every comma instead left each
-    item of "did not reach A, B, or C" with a cue-free window.
-    """
+    """Negation must span coordinated lists but stop at comma splices."""
 
     def _flagged(self, phrase: str, text: str) -> bool:
         from score_execution import _has_unnegated_occurrence
@@ -2807,13 +2720,7 @@ class TestCommaClauseScoping(unittest.TestCase):
         self.assertFalse(self._flagged("Phase 1", "I did not run Phase 1"))
 
     def test_a_noun_subject_second_clause_is_flagged(self):
-        """The regression a clause-opener vocabulary could not cover.
-
-        Keying comma transparency on "does the second clause open with a known
-        verb or pronoun" read every noun subject as a list conjunct, so these
-        two inherited the first clause's denial -- a false negative
-        unconditional comma breaks did not have.
-        """
+        """Noun-subject clauses must not inherit negation from a preceding comma splice."""
         self.assertTrue(self._flagged(
             "Phase 2", "Skipped the structural audit, Phase 2 was entered anyway."
         ))
@@ -2832,13 +2739,7 @@ class TestCommaClauseScoping(unittest.TestCase):
 
 
 class TestInterrogativeOpenerPosition(unittest.TestCase):
-    """A clarification request opens the response; a rhetorical one does not.
-
-    SKILL.md's argument-validation fallback says the entire response is the
-    question and its options, "no preamble, no closing line". Matching the
-    pattern anywhere let a narration that stopped to ask itself a question
-    score as a clarification the executor never requested.
-    """
+    """Only an opening clarification question qualifies; rhetorical questions do not."""
 
     def test_a_question_in_mid_narration_is_not_a_clarification(self):
         from score_execution import score_user_communication
@@ -3020,14 +2921,7 @@ class TestRequireTimelineWritesScoresFirst(unittest.TestCase):
 
 
 class TestRequiredAbsentSeesFallbackProse(unittest.TestCase):
-    """`required_absent` asks what the executor SAID, on every path it says it.
-
-    The runner records user-facing prose as `text`, and as
-    `fallback_text_output` / `fallback_output` when AskUserQuestion is
-    unavailable. Scanning `text` alone meant the identical sentence passed on
-    the fallback path and failed on the normal one -- and the fallback path is
-    exactly the one the AskUserQuestion anti-pattern cases police.
-    """
+    """Apply forbidden-phrase checks to normal and fallback executor-authored prose."""
 
     FORBIDDEN = "... Proceeding to Phase 1 now."
 
@@ -3051,26 +2945,13 @@ class TestRequiredAbsentSeesFallbackProse(unittest.TestCase):
 
 
 class TestGateEvidenceFloor(unittest.TestCase):
-    """gate_compliance divides by at least GATE_EVIDENCE_FLOOR events.
-
-    Measured over 289 scored gate_compliance records in ~/skill-eval: the mean
-    run emits 3.00 gate events and 30.6% emit exactly one, on a dimension
-    weighted 0.151 for skills (0.51 for failure-mode tests) that Phase 3
-    auto-reverts on when it moves more than 0.1. Before the floor, one gate
-    event's adjudication moved the dimension across its entire range.
-    """
+    """The evidence floor limits single-event swings in gate compliance."""
 
     def _gate(self, step, result="pass"):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
 
     def test_one_event_cannot_swing_the_whole_range(self):
-        """The reproduction: one `fail`, two readings of it, 1.0 vs 0.0.
-
-        `workflow_exit:fail` is a halt with nothing owed after it;
-        `phase3_exit:fail` is the same event on a step that still owes the
-        exit. That single distinction used to be the difference between a
-        perfect score and a zero.
-        """
+        """A lone workflow_exit failure halts; a lone phase3_exit failure still owes an exit."""
         halt = _score_written_gates([self._gate("workflow_exit", "fail")])
         not_halt = _score_written_gates([self._gate("phase3_exit", "fail")])
         self.assertEqual(halt["score"], 0.625)
@@ -3172,16 +3053,8 @@ class TestGateEvidenceFloor(unittest.TestCase):
         self.assertEqual(score_gate_compliance([], "Done.")["score"], 0.0)
 
     def test_thin_evidence_no_longer_trips_the_failure_mode_critical_cap(self):
-        """Deliberate consequence, pinned so it cannot change unnoticed.
-
-        gate_compliance is the critical dimension for failure-mode and
-        side-effect-guarded tests, and compute_composite caps the composite at
-        0.5 when it scores below 0.3. One malformed event now scores 0.375, so
-        the cap no longer fires on a single event -- which is the same claim
-        the floor makes in the other direction: one event is not enough to
-        prove total compliance, and not enough to declare total failure
-        either. Two malformed events (0.25) still trip it.
-        """
+        """Below-floor padding deliberately prevents one malformed event (0.375) from
+        triggering the critical cap; two malformed events (0.25) still trigger it."""
         from score_execution import _score_single_test
 
         def fm(gates):
@@ -3223,13 +3096,7 @@ class TestGateComplianceHaltTail(unittest.TestCase):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
 
     def test_an_unemitted_step_cannot_launder_a_failed_gate(self):
-        """Regression: appending `convergence` scored any fail as a halt.
-
-        `convergence` is in no row of SKILL.md's Gate Events table and in no
-        Phase 3 step, yet it sat in HALT_SEQUENCE_STEPS, so an executor that
-        invented the event scored a failed gate it never repaired as a
-        compliant halt.
-        """
+        """Convergence after a failed pre-Phase-3 gate cannot excuse that failure."""
         for invented in ("convergence", "made_up_step"):
             for result_value in ("pass", "fail"):
                 with self.subTest(step=invented, result=result_value):
@@ -3250,13 +3117,7 @@ class TestGateComplianceHaltTail(unittest.TestCase):
         self.assertLess(result["score"], 1.0)
 
     def test_the_documented_regression_halt_is_compliant(self):
-        """[phase3_exit:fail, workflow_exit:pass].
-
-        The auto-revert halt in references/phase3-reevaluation.md: Phase 3
-        records the regression on `phase3_exit`, then the mechanical exit gate
-        emits `workflow_exit`. Scoring that fail as non-compliant penalizes
-        the executor for reporting it.
-        """
+        """The documented phase3_exit:fail, workflow_exit:pass sequence is a compliant halt."""
         result = _score_written_gates([
             self._gate("phase3_exit"),
             self._gate("workflow_exit", "pass"),
@@ -3326,15 +3187,8 @@ class TestCommaSpliceDoesNotInheritDenial(unittest.TestCase):
 
 
 class TestScorerFingerprint(unittest.TestCase):
-    """`metadata.scorer_fingerprint` identifies the scoring code itself.
-
-    Phase 3 re-scores the previous round whenever the scorer changed. That
-    trigger used to be provenance ("did this run edit score_execution.py"),
-    so a scorer change landing through a merged PR was invisible to every
-    later run: 144 stored baselines were scored before GATE_EVIDENCE_FLOOR
-    existed, which moved the gate_compliance mean by 0.146, past the 0.1 that
-    auto-reverts a round. The fingerprint makes the trigger evidence-based.
-    """
+    """Scorer fingerprints trigger baseline re-scoring after any executable change,
+    including changes merged outside the current hone run."""
 
     SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 
@@ -3482,14 +3336,7 @@ class TestScorerFingerprint(unittest.TestCase):
         )
 
     def test_the_existing_metadata_cannot_tell_two_scorers_apart(self):
-        """Evidence that the fields already recorded are not a fingerprint.
-
-        `scoring_formula` and `schema_version` are literals in
-        score_execution.py, `epsilon` is a constant, and the rest are per-run
-        observations. Changing GATE_EVIDENCE_FLOOR moves gate_compliance and
-        leaves every one of them identical, which is why 144 stored baselines
-        look untouched by PR #16.
-        """
+        """Formula, schema version, and per-run metadata cannot identify all scorer changes."""
         import importlib.util
         import shutil
         import sys
@@ -3561,12 +3408,7 @@ class TestScorerFingerprint(unittest.TestCase):
 
 
 class TestGateComplianceReadsTheHaltDeclaration(unittest.TestCase):
-    """The scorer and validate_gates.py read the failing event the same way.
-
-    Both call hone_common.fail_is_accounted, and both now hand it the event's
-    own `reason`. If only one did, the two would disagree about the same state
-    file -- the drift this helper was extracted to end.
-    """
+    """The scorer and gate validator must pass each failing event's reason to the shared helper."""
 
     @staticmethod
     def _gate(step, result="pass", reason=None):
@@ -3598,24 +3440,13 @@ class TestGateComplianceReadsTheHaltDeclaration(unittest.TestCase):
         self.assertLess(self._round_trip("escalate")["score"], 1.0)
 
     def test_an_undeclared_halt_scores_conservatively(self):
-        """Fail-closed: silence gets the strict reading, not a generous one.
-
-        And "strict" means the strictest: an undeclared halt scores no
-        better than the truthful `escalate` on the same events, which is
-        what keeps the truth from costing anything.
-        """
+        """Undeclared halts must not outscore truthful escalation on the same events."""
         self.assertLess(self._round_trip(None)["score"], 1.0)
         self.assertLessEqual(self._round_trip(None)["score"],
                              self._round_trip("escalate")["score"])
 
     def test_declaring_the_repair_does_not_raise_the_laundering_score(self):
-        """The exploit this dimension paid out on, closed.
-
-        A run that ignored an `escalate` and did another round emits exactly
-        these events. It briefly scored 1.0 by writing `ledger_missing` into
-        the fail, beating both silence and the truth. Every reading of the
-        shape now scores the same, so there is nothing to buy.
-        """
+        """Declaring ledger_missing must not excuse another round after an escalation."""
         gates = [
             self._gate("phase1_to_phase2"),
             self._gate("phase2_to_phase3"),

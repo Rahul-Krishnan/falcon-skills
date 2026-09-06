@@ -58,13 +58,7 @@ class TestConvergence(unittest.TestCase):
 
 
 class TestOmittedFindingsStayLive(unittest.TestCase):
-    """The verdict reads the same rule the escalation signals already read.
-
-    Only an explicit `fixed` or `rejected` closes a finding. A round that
-    simply omits one is an unreported round, and reading it as a fix is the
-    slip SKILL.md Phase 2 Step 8's "restate every still-live finding" rule
-    exists to prevent.
-    """
+    """Only explicit fixed or rejected records close findings within a run."""
 
     def test_a_forgotten_critical_does_not_converge(self):
         report = analyze(
@@ -94,7 +88,7 @@ class TestOmittedFindingsStayLive(unittest.TestCase):
         self.assertEqual([f["id"] for f in report["open_blocking"]], ["f1"])
 
     def test_the_carry_forward_does_not_cross_runs(self):
-        """Permanence is the failure this module has already had to undo twice."""
+        """A new run must explicitly carry findings forward."""
         report = analyze(
             {"artifact": "demo", "max_rounds": 3, "rounds": [
                 round_entry(1, [finding("f1")], run="run-1"),
@@ -133,24 +127,14 @@ class TestEscalation(unittest.TestCase):
         self.assertTrue(any("did not move" in r for r in report["reasons"]))
 
     def test_a_rising_blocking_count_is_not_a_stall(self):
-        """[0, 0, 1]: a newly found finding, not a loop that stopped moving.
-
-        `window[-1] >= max(window)` escalated on a blocking finding's first
-        appearance, before the loop had one round to fix it.
-        """
+        """A newly found blocker after clean rounds must get a chance to be fixed."""
         rounds = [[], [], [finding("a")]]
         report = analyze(ledger(rounds, max_rounds=9), 99, 3)
         self.assertEqual(report["verdict"], "in_progress")
         self.assertEqual(report["reasons"], [])
 
     def test_a_fixed_streak_no_longer_escalates(self):
-        """A finding open three rounds and then fixed is healed, not stuck.
-
-        `reasons` is built from the whole history and was consulted before the
-        "nothing open -> converged" branch, so one 3-round streak made every
-        later round return `escalate` with an empty `open_blocking` -- a run
-        that halted on a convergence gate it had already cleared.
-        """
+        """An explicit fix clears a previously stuck finding."""
         rounds = [[finding("f1")]] * 3 + [[finding("f1", status="fixed")]] * 2
         report = analyze(ledger(rounds, max_rounds=9), 3, 9)
         self.assertEqual(report["verdict"], "converged")
@@ -238,12 +222,7 @@ class TestLedgerRootShape(unittest.TestCase):
 
 
 class TestCappedIsReachable(unittest.TestCase):
-    """`capped` fires when the budget runs out on a finding opened late.
-
-    A blocking finding first raised in the final round has a one-round streak
-    and does not hold the blocking count flat, so no escalation reason fires
-    and the rounds-exhausted branch is the one that wins.
-    """
+    """A late blocking finding exhausts the budget without triggering escalation."""
 
     def test_a_finding_new_in_the_last_round_caps_rather_than_escalates(self):
         from check_convergence import analyze
@@ -293,12 +272,7 @@ class TestCappedIsReachable(unittest.TestCase):
 
 
 class TestReopenRecurrence(unittest.TestCase):
-    """The docstring's first failure shape: fixed one round, open the next.
-
-    The consecutive-open streak cannot see this -- the round recording the fix
-    zeroes it -- so before the reopen counter an oscillating critical finding
-    reported `converged` with no reasons.
-    """
+    """Track fixed-to-open cycles that consecutive-open streaks cannot detect."""
 
     def test_alternating_open_and_fixed_escalates(self):
         statuses = ["open", "fixed", "open", "fixed", "open", "fixed"]
@@ -315,11 +289,7 @@ class TestReopenRecurrence(unittest.TestCase):
         self.assertEqual(report["reopened"], [])
 
     def test_absent_round_is_a_gap_not_a_fix(self):
-        """Only an explicit `fixed` record closes a finding.
-
-        A ledger that lists open findings only would otherwise read every
-        unreported round as a fix and escalate on the next sighting.
-        """
+        """Omission must not invent a fixed-to-open transition."""
         rounds = [[finding("f1")], [], [finding("f1")], [], [finding("f1")]]
         report = analyze(ledger(rounds, max_rounds=9), 3, 99)
         self.assertEqual(report["reopened"], [])
@@ -374,11 +344,7 @@ class TestRelocationDeduplication(unittest.TestCase):
 
 
 class TestLedgerTypeTolerance(unittest.TestCase):
-    """A stringified number in the ledger is exit 2 territory, not a traceback.
-
-    Everything else in this module tolerates a wrong type; `round` and
-    `max_rounds` reached a comparison and raised TypeError out of analyze().
-    """
+    """Coerce supported ledger numbers without leaking TypeError."""
 
     def test_string_round_numbers_sort_without_raising(self):
         report = analyze(
@@ -494,12 +460,7 @@ class TestReopenCountsVisibleBelowTheBar(unittest.TestCase):
 
 
 class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
-    """The ledger is per artifact and permanent; `round` restarts per run.
-
-    Reading the cumulative array as one monotonic run produced a false
-    `converged` (sorting interleaved the runs) and a false `capped`
-    (`len(rounds)` measured against a per-run `max_rounds`).
-    """
+    """Restarted round numbers must not interleave runs or consume another run's budget."""
 
     def test_a_second_runs_open_finding_is_not_sorted_away(self):
         """Run 1's rounds 1-3 then run 2's rounds 1-2 sorted to [1,1,2,2,3]."""
@@ -527,7 +488,7 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
         self.assertEqual(report["total_rounds_logged"], 4)
 
     def test_an_explicit_run_id_is_authoritative(self):
-        """The `run` id beats the repeated-number inference."""
+        """Only the run id establishes a boundary."""
         report = analyze({"artifact": "x", "max_rounds": 3, "rounds": [
             round_entry(1, [finding("A", status="fixed")], run="r1"),
             round_entry(2, [finding("A", status="fixed")], run="r1"),
@@ -539,12 +500,7 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
         self.assertEqual(report["verdict"], "in_progress")
 
     def test_an_out_of_order_append_is_one_run_not_two(self):
-        """[round 2, round 1] needs sorting, not splitting.
-
-        A "the number went down" boundary rule would read this as two runs
-        and lose a round. Nothing infers a boundary here at all now, which is
-        the same answer for a stronger reason.
-        """
+        """Sort out-of-order rounds within the same run."""
         report = analyze({"max_rounds": 5, "rounds": [
             {"round": "2", "findings": [finding("f1")]},
             {"round": "1", "findings": []},
@@ -561,14 +517,7 @@ class TestCumulativeLedgerHoldsSeveralRuns(unittest.TestCase):
 
 
 class TestARepeatedRoundNumberMeansCompaction(unittest.TestCase):
-    """The signal carries ONE meaning, and this is the one it carries.
-
-    `_run_segments` used to read a repeated round number as a run boundary
-    while `_dedupe_rounds` read it as a compaction re-append, and the former
-    runs first, so on a `run`-less ledger the dedupe path was unreachable.
-    The boundary now needs the explicit `run` id and the repeat means
-    compaction, everywhere.
-    """
+    """Repeated round numbers are re-appends; only explicit run ids mark boundaries."""
 
     @staticmethod
     def _ledger(run=None):
@@ -576,12 +525,7 @@ class TestARepeatedRoundNumberMeansCompaction(unittest.TestCase):
             round_entry(n, [finding("A")], run=run) for n in (1, 2, 2, 3)]}
 
     def test_the_run_less_ledger_now_agrees_with_the_run_scoped_one(self):
-        """`[1, 2, 2, 3]` with `max_rounds: 3` is a capped 3-round run.
-
-        With the boundary inference it returned `in_progress` at
-        `rounds_run: 2` and the run kept looping past its budget; the
-        identical ledger carrying a `run` id returned `capped`.
-        """
+        """[1, 2, 2, 3] counts as three rounds with or without a run id."""
         without = analyze(self._ledger(), 9, 9)
         withid = analyze(self._ledger(run="r1"), 9, 9)
         self.assertEqual(without["verdict"], "capped")
@@ -607,13 +551,7 @@ class TestARepeatedRoundNumberMeansCompaction(unittest.TestCase):
         self.assertEqual(report["verdict"], "converged")
 
     def test_run_scoping_reports_which_reading_was_used(self):
-        """The degradation is legible rather than silent.
-
-        Without a `run` id the whole ledger is one run, so `rounds_run`
-        over-counts and `capped` can arrive early. That is the conservative
-        direction -- `capped` reaches the human gate -- but a caller has to
-        be able to see it.
-        """
+        """Report absent run ids so callers can see why merged rounds may cap early."""
         self.assertEqual(
             analyze(self._ledger(), 9, 9)["run_scoping"], "absent")
         self.assertEqual(
@@ -623,11 +561,7 @@ class TestARepeatedRoundNumberMeansCompaction(unittest.TestCase):
             "absent")
 
     def test_a_partially_scoped_ledger_does_not_split_on_the_gap(self):
-        """An entry with no id continues the current segment.
-
-        Merging over-counts the run, which is the recoverable error; a split
-        would reset the budget, which is not.
-        """
+        """A missing id continues the segment without resetting its budget."""
         report = analyze({"artifact": "x", "max_rounds": 9, "rounds": [
             round_entry(1, [finding("A")], run="r1"),
             round_entry(2, [finding("A")]),
@@ -638,14 +572,7 @@ class TestARepeatedRoundNumberMeansCompaction(unittest.TestCase):
 
 
 class TestReopenIdentityIsCrossRunSafe(unittest.TestCase):
-    """The reopen counter is cross-run, so its key has to survive a restart.
-
-    `id` does not: SKILL.md's Phase 2 Step 8 template starts every run's
-    findings at `F1` and the ledger is per artifact, so three ordinary runs
-    produced `reopen_counts: {"F1": 2}` and `escalate` on run 3's first
-    round -- a forced halt, routed away from the `--confirm` gate, before the
-    run did any work.
-    """
+    """Reused ids such as F1 must not combine unrelated findings across runs."""
 
     @staticmethod
     def _runs(summaries):
@@ -671,11 +598,7 @@ class TestReopenIdentityIsCrossRunSafe(unittest.TestCase):
         self.assertEqual(report["verdict"], "converged")
 
     def test_a_genuinely_recurring_finding_still_counts_across_runs(self):
-        """Scoping the key per run would delete the check, so it is not.
-
-        Step 8 restates a live finding verbatim, so a finding that really
-        does keep coming back keeps one key across every run.
-        """
+        """A verbatim restatement retains its reopen identity across runs."""
         report = analyze(self._runs(["step 4 has no exit condition"] * 3),
                          9, 9)
         self.assertGreaterEqual(report["reopen_counts"].get("F1", 0), 2)
@@ -683,12 +606,7 @@ class TestReopenIdentityIsCrossRunSafe(unittest.TestCase):
         self.assertEqual(report["verdict"], "escalate")
 
     def test_two_findings_sharing_an_id_do_not_pool_their_counts(self):
-        """The larger of the two, not their sum.
-
-        Summing would rebuild the false escalation the key exists to
-        prevent: two unrelated findings reopened once each are not one
-        finding reopened twice.
-        """
+        """Report the larger per-finding count, not the sum for a reused id."""
         report = analyze(self._runs(
             ["alpha alpha alpha", "alpha alpha alpha",
              "beta beta beta", "beta beta beta"]), 9, 9)
@@ -697,12 +615,7 @@ class TestReopenIdentityIsCrossRunSafe(unittest.TestCase):
 
 
 class TestReopenCounterExpires(unittest.TestCase):
-    """The reopen bar is cross-run by design; permanence was not.
-
-    One historical alternation escalated every future invocation for that
-    artifact, with `open_blocking` empty and no recovery short of deleting the
-    ledger.
-    """
+    """Historical reopenings must expire rather than halt every future run."""
 
     @staticmethod
     def _rounds(statuses):
@@ -733,12 +646,7 @@ class TestReopenCounterExpires(unittest.TestCase):
 
 
 class TestEscalationReasonsAreSeverityFiltered(unittest.TestCase):
-    """`reasons` short-circuits to `escalate` ahead of the converged branch.
-
-    Unfiltered, a single known nit left open halted a run that had fixed
-    everything blocking -- against the module docstring and
-    test_minor_findings_do_not_block_convergence.
-    """
+    """Minor findings cannot escalate a run with no blocking work."""
 
     def test_a_minor_finding_open_three_rounds_does_not_escalate(self):
         rounds = [[finding("m1", severity="minor")]] * 3
@@ -791,7 +699,7 @@ class TestRelocationIsOrderIndependent(unittest.TestCase):
 
 
 class TestMissingRoundsIsLoud(unittest.TestCase):
-    """Findings at the top level silently disabled the check forever."""
+    """Reject missing rounds instead of silently disabling convergence checks."""
 
     def _run(self, payload):
         import json as _json
@@ -822,14 +730,7 @@ class TestMissingRoundsIsLoud(unittest.TestCase):
 
 
 class TestEscalationSignalsAreRunScoped(unittest.TestCase):
-    """The ledger is cumulative; the escalation signals are not.
-
-    The streak, the stall window and the relocation trail read the whole
-    array and had neither the run scoping `max_rounds` got nor the trailing
-    window the reopen counter got, so each halted a NEW run on its first
-    round on previous-run history alone -- permanently, since Phase 2 Step 8
-    restates still-open findings on every future invocation.
-    """
+    """Prior-run history must not trigger streak, stall, or relocation escalation."""
 
     def _ledger(self, rounds, max_rounds=3):
         return {"artifact": "demo", "max_rounds": max_rounds, "rounds": rounds}
@@ -922,14 +823,7 @@ if __name__ == "__main__":
 
 
 class TestMalformedFindingsAreLoud(unittest.TestCase):
-    """A bad `status` or `severity` reported success with work outstanding.
-
-    `_open_findings` compared `status` case-sensitively while `_blocking`
-    lowered `severity`, so `"status": "Open"` was blocking-but-not-open and an
-    omitted `severity` was open-but-not-blocking. Either alone emptied
-    `open_blocking` and returned `converged`, exit 0. Every other malformed
-    ledger shape already exited 2; these were the two that reported success.
-    """
+    """Normalize known statuses and severities; reject missing or unknown values."""
 
     def _run(self, payload):
         import json as _json
@@ -983,14 +877,7 @@ class TestMalformedFindingsAreLoud(unittest.TestCase):
 
 
 class TestUnreadableLedgerIsUsageError(unittest.TestCase):
-    """Exit 1 is a documented verdict code, so a read error must not use it.
-
-    `main()` caught only FileNotFoundError and JSONDecodeError, so passing a
-    directory (`~/skill-eval/{name}/` instead of the ledger inside it) or an
-    unreadable file raised out of `main()` and Python exited 1 -- which this
-    module's docstring and both reference docs define as "not converged yet,
-    read the verdict from --json", with no JSON to read.
-    """
+    """Read errors exit 2; exit 1 requires a JSON verdict."""
 
     def _run(self, target):
         import subprocess
@@ -1040,15 +927,7 @@ class TestUnreadableLedgerIsUsageError(unittest.TestCase):
 
 
 class TestUnusableBudgetIsLoud(unittest.TestCase):
-    """An unreadable `max_rounds` silently disabled `capped` forever.
-
-    The templates carry the placeholder `<max_rounds>` rather than a concrete
-    3, and an executor that copies it literally writes valid JSON holding an
-    unparseable int. `bool(max_rounds)` then read it as "no cap", so a run
-    that should have reported `capped` reported `in_progress` with no
-    diagnostic -- and `capped` is the only verdict routed to the `--confirm`
-    human gate.
-    """
+    """Reject absent, invalid, or unresolved budgets rather than disable capping."""
 
     def _run(self, payload):
         import json as _json
@@ -1105,15 +984,7 @@ class TestUnusableBudgetIsLoud(unittest.TestCase):
 
 
 class TestBudgetExhaustionReportsCapped(unittest.TestCase):
-    """The `--confirm` human gate hangs off `capped` and was unreachable.
-
-    With the escalation bars equal to the templated `max_rounds: 3`, the two
-    ordinary budget-exhaustion shapes both tripped a bar on the same round the
-    budget expired, and `reasons` short-circuits to `escalate` ahead of
-    `capped`. phase3-reevaluation.md routes `capped` to the human gate and
-    routes `escalate` away from it, so the gate was nearly unreachable. The
-    bars now sit one above the templated budget.
-    """
+    """Default budget exhaustion must reach capped and its human confirmation gate."""
 
     def _run(self, rounds, max_rounds=3):
         from check_convergence import (DEFAULT_RECURRENCE_LIMIT,
@@ -1155,12 +1026,7 @@ class TestBudgetExhaustionReportsCapped(unittest.TestCase):
 
 
 class TestRelocationNeedsANewDestination(unittest.TestCase):
-    """Two findings that share wording are not one finding that moved.
-
-    `escalate` has no counting bar and is routed away from the `--confirm`
-    human gate, so a false relocation kills the run outright. Identical
-    summaries across files are routine for hone findings.
-    """
+    """Identical summaries in concurrent findings must not trigger relocation."""
 
     def _ledger(self, rounds):
         return {"artifact": "demo", "max_rounds": 5, "rounds": [
@@ -1204,11 +1070,7 @@ class TestRelocationNeedsANewDestination(unittest.TestCase):
 
 
 class TestRoundNumbersNotLedgerEntries(unittest.TestCase):
-    """A round re-appended after a compaction is one round, not two.
-
-    Phase 2's compaction-recovery protocol says append and never overwrite,
-    so the duplicate is expected and must not spend the round budget twice.
-    """
+    """Compaction re-appends count once toward the budget."""
 
     def test_a_re_appended_round_does_not_exhaust_the_budget(self):
         for run in ("run-1", None):
@@ -1247,11 +1109,7 @@ class TestRoundNumbersNotLedgerEntries(unittest.TestCase):
 
 
 class TestTuningLimitsAreValidated(unittest.TestCase):
-    """A limit this module cannot use is a usage error, not a traceback.
-
-    Exit 1 is the documented "not converged yet, read --json" code, so an
-    uncaught IndexError exiting 1 with no JSON breaks the contract.
-    """
+    """Invalid limits produce usage errors, not tracebacks or false verdicts."""
 
     def _run(self, *flags):
         import json as _json
@@ -1297,18 +1155,10 @@ class TestTuningLimitsAreValidated(unittest.TestCase):
 
 
 class TestHaltVerdictsAreDeclarableReasons(unittest.TestCase):
-    """The gate event's `reason` vocabulary is this script's own verdicts.
+    """Every halting verdict must be a valid convergence gate reason.
 
-    `hone_common.HALT_REASONS["convergence"]` is what a failing `convergence`
-    event may declare, and two of its three members are the verdicts computed
-    here. That is deliberate: declaring is copying a value the run already
-    holds, not composing a new claim, so there is no step at which the
-    executor gets to decide what its halt "really" was.
-
-    If a future verdict halts the loop and is not in the vocabulary, the
-    executor has nothing truthful to write and the event falls back to the
-    conservative reading -- safe, but a silent loss of the concession. This
-    test is what makes that a visible failure instead.
+    The executor copies the verdict directly; a missing vocabulary entry must
+    fail this test rather than silently lose the halt concession.
     """
 
     def test_every_halting_verdict_this_script_returns_is_declarable(self):
@@ -1325,12 +1175,7 @@ class TestHaltVerdictsAreDeclarableReasons(unittest.TestCase):
                 self.assertIn(report["verdict"], HALT_REASONS["convergence"])
 
     def test_the_non_halting_verdicts_are_not_in_the_vocabulary(self):
-        """`converged` and `in_progress` are `pass` events, so they declare nothing.
-
-        A `reason` of `in_progress` on a `fail` is a contradiction, and the
-        closed vocabulary is what rejects it rather than quietly accepting a
-        word this script also produces.
-        """
+        """Converged and in_progress belong to pass events, never fail reasons."""
         for verdict in ("converged", "in_progress"):
             with self.subTest(verdict=verdict):
                 self.assertNotIn(verdict, HALT_REASONS["convergence"])

@@ -1,109 +1,49 @@
 #!/usr/bin/env python3
 """Scope guard for hone Phase 2 edits.
 
-Preference 11 (stale-write protection) stops hone from clobbering a file
-someone else changed. Nothing stops hone from changing a file it was never
-asked to touch: a shared reference, a sibling skill, a script two directories
-over. Those edits are invisible in the run report and land in the working tree
-next to the intended ones.
+Combine git status for tracked files with hashes for dirty, untracked, and
+opaque paths. This detects collateral edits that git diff alone misses,
+following trailofbits/skills skill-improver.
 
-Git alone is not enough. A file git does not track produces no diff, so an
-edit to an untracked file inside or outside scope is silent. This script
-therefore pairs git's own accounting (for tracked files) with a content-hash
-manifest (for the files git cannot attribute), which is the arrangement
-trailofbits/skills skill-improver arrived at for the same reason.
+Root is the watched tree; scope is the subset this run may change. Derive
+both from --artifact and --type: a hook needs its install directory watched
+but only its file permitted; a repository skill needs the repository watched
+but only its own directory permitted. Verify reloads both from the manifest.
 
-Two independent knobs:
+  --snapshot  Record pre-edit state before Phase 2 writes.
+  --verify    Compare against that state and the run's declared writes.
 
-  root   the tree being watched -- everything that could plausibly be
-         collateral damage.
-  scope  the subset of that tree this run is permitted to change.
+Tree changes establish detection, not authorship. Attribution comes only
+from --declared, --declared-file, or --declared-none. Declared out-of-scope
+changes are violations. Undeclared changes are unattributed: halt without
+reverting another writer's possible work.
 
-They are derived from the artifact rather than from a dirname chain in the
-caller's shell, because the two derivations pull in opposite directions and a
-single chain cannot serve both. A hook at `~/.claude/hooks/foo.sh` needs a
-narrow root (`~/.claude/hooks`) and a narrower scope (that one file), while a
-skill at `<repo>/plugins/p/skills/s/` needs a *wide* root (the repository, so
-edits to `plugins/p/commands/` or a repo-root `scripts/` are visible) and a
-scope of just its own directory. Passing `--artifact` and `--type` lets the
-script answer both, and `--verify` reads root and scope back out of the
-manifest so the caller never has to reproduce them across two tool calls.
+Incomplete coverage or attribution returns not_measurable, never clean:
 
-Two phases, both read-only with respect to the artifact:
+  1.  Git stops answering between snapshot and verify.
+  2.  A nested repository or submodule cannot be hashed.
+  3.  A regular file cannot be read (_hash_file returns UNREADABLE).
+  4.  A directory cannot be listed.
+  5.  An entry's type cannot be determined.
+  6.  A symlink is dangling.
+  7.  An entry is not a directory or regular file (socket, fifo, device, door).
+  8.  A directory symlink loops onto its descent path.
+  9.  The tree exceeds --max-files at snapshot or verify.
+  10. The manifest mode is unknown.
+  11. Scope lies under an ignored directory.
+  12. An out-of-scope change is undeclared.
+  13. An in-scope change is undeclared, making the declaration incomplete.
+  14. A declared path lies outside the watched root.
+  15. Verify receives no declaration.
 
-  --snapshot  Record the pre-edit state of the repository into a manifest.
-              Run before Phase 2 applies any edit.
-  --verify    Compare the current state against the manifest and report every
-              change outside the declared scope, plus untracked files that
-              appeared inside scope without being registered.
+Follow and hash non-looping directory symlinks, which are common in skill
+and hook installations. Record unreadable paths rather than dropping them.
 
-Detection and attribution are two different questions, and only the first one
-the tree can answer. Comparing a snapshot against the live tree shows that a
-file changed DURING the round; it can never show that THIS run is what changed
-it, because a second session, the user's own editor, and a build step all
-leave the same marks. Inferring attribution from the diff got it backwards in
-practice: an out-of-scope file the run really did edit came back
-`not_measurable` while a file the user was editing themselves came back
-`scope_violation`, whose documented response is `git checkout` of the listed
-paths.
+Exit codes: 0 clean; 1 scope violation; 2 usage error (check did not run);
+3 not_measurable (check could not answer). Only 0 passes. This vocabulary
+matches check_overfit.py and check_eval_power.py.
 
-Attribution therefore comes from the run's own declaration of what it wrote
-(`--declared`, `--declared-file`, `--declared-none`), never from the diff. An
-out-of-scope change the run declared is one this run caused, so it is a
-`violation` and is safe to revert. An out-of-scope change it did not declare
-belongs to somebody else: it is reported under `unattributed_out_of_scope` and
-the round halts, with no destructive instruction riding on a guess.
-
-A verify has three possible answers, not two. "I could not see" is the third,
-and collapsing it into `clean` is the one failure mode a safety check must not
-have: the caller records a passing `scope_verify` gate and the run proceeds as
-though the tree had been checked. Every path that cannot answer therefore
-reports `not_measurable` and exits 3, following the vocabulary
-`check_overfit.py` and `check_eval_power.py` already use for the same
-distinction.
-
-That invariant is only worth as much as the enumeration behind it, so here is
-the whole enumeration. Every point in this file where a path can decline to be
-read or classified is on this list, and every one of them records itself.
-
-Answers the tree refuses:
-
-  1.  git stops answering between snapshot and verify.
-  2.  a nested repository or submodule the guard could not hash.
-  3.  a regular file that exists but cannot be read (`_hash_file` -> UNREADABLE).
-  4.  a directory that cannot be listed (`os.scandir` raises).
-  5.  a directory entry whose type cannot be determined (`stat` raises).
-  6.  a dangling symlink: it names something that is not there to hash.
-  7.  an entry that is neither a directory nor a regular file -- a socket,
-      fifo, device, or door -- whose content there is no way to hash.
-  8.  a symlinked directory pointing back onto its own descent path, which
-      cannot be walked without looping.
-  9.  a tree over `--max-files` at snapshot or at verify time.
-  10. a manifest whose `mode` this script does not recognise.
-  11. a permitted scope that lies under an ignored directory name, so nothing
-      inside it was ever read.
-
-Answers the run refuses:
-
-  12. an out-of-scope change this run did not declare.
-  13. an in-scope change this run did not declare, which proves the
-      declaration incomplete and so says nothing reliable about elsewhere.
-  14. a declared path outside the watched root.
-  15. a `--verify` given no declaration at all. That one is deliberately
-      blunt: a run that will not say what it wrote cannot be told it stayed
-      in scope.
-
-A symlinked *directory* is deliberately absent from the list: it is followed
-and hashed rather than recorded, because `~/.claude/skills` and
-`~/.claude/hooks` normally hold artifact directories symlinked out of a
-repository, and those are the very roots walk mode exists for. Declining to
-read them would report `not_measurable` on every ordinary run instead.
-
-Exit codes: 0 clean, 1 scope violation, 2 usage error (the check never ran),
-3 not_measurable (the check ran and could not answer). Only 0 is a pass.
-
-Stdlib only. Never modifies tracked content; the manifest is the only file it
-writes, and only under --snapshot.
+Stdlib only. Writes only the manifest under --snapshot; never artifact content.
 """
 
 from __future__ import annotations
@@ -117,25 +57,13 @@ import sys
 import unicodedata
 from pathlib import Path
 
-# Files that change as a side effect of normal tool use and would otherwise
-# produce a violation on every run.
+# Routine tool-generated files.
 IGNORED_NAMES = {".DS_Store", "Thumbs.db", ".coverage"}
 
-# Directories holding tool output rather than source. A lint, type-check, or
-# coverage run *during* a round writes into these, and `--ignored=traditional`
-# lists such a file individually whenever the `.gitignore` entry names it one
-# by one instead of collapsing the whole directory. Without this list an
-# incidental `ruff` invocation halts the round with a scope violation the run
-# had no way to avoid. Only caches and dependency trees belong here: a
-# directory that can hold hand-written source does not, which is why `dist`
-# and `build` are absent.
-#
-# Every name here matches on ANY path component, so a name that could plausibly
-# appear in an artifact's own install path would make that artifact invisible
-# and the verify `clean`. Bare `venv` and `.cache` were dropped for exactly
-# that reason; the rest are distinctive enough not to collide. `verify` also
-# reports a scope that lands under one of these as `not_measurable` rather than
-# clean, so a future collision fails loudly instead of silently.
+# Ignore caches and dependency trees, not possible source directories such as
+# dist or build. Names match any path component; avoid generic names such as
+# venv and .cache that could hide artifact paths. A scope under an ignored
+# name must report not_measurable.
 IGNORED_PARTS = {
     "__pycache__", ".git", ".pytest_cache", ".ruff_cache", ".mypy_cache",
     ".pytype", ".tox", ".nox", ".hypothesis", "htmlcov", ".ipynb_checkpoints",
@@ -148,18 +76,14 @@ IGNORED_SUFFIXES = (".pyc", ".pre-hone", ".pre-workout", ".pre-audit", ".pre-enr
 
 ARTIFACT_TYPES = ("skill", "command", "hook", "script")
 
-# One place the caller's branch table is defined. `not_measurable` gets its own
-# code rather than sharing 1 with `scope_violation`, because the two demand
-# opposite responses: a violation says revert the listed paths, and
-# not_measurable says revert nothing because nothing here knows what to revert.
+# Keep unknown coverage separate from violations: not_measurable provides
+# no basis for restoring files.
 VERDICT_EXITS = {"clean": 0, "scope_violation": 1, "not_measurable": 3}
 
 DEFAULT_MAX_FILES = 20000
 
-# Sentinel for "this file existed at snapshot time and was clean in git, so no
-# hash was stored". Git alone shows such a file changed during the round, which
-# is all a pre-image would have shown too; who changed it comes from the
-# declaration either way.
+# Clean tracked files need no stored hash: git detects later changes, while
+# declarations identify the writer.
 CLEAN_TRACKED = object()
 
 
@@ -180,19 +104,12 @@ def _is_ignored(path: Path) -> bool:
     return any(path.name.endswith(suffix) for suffix in IGNORED_SUFFIXES)
 
 
-# A file that exists but could not be read. Distinct from `None`, which means
-# the file was not there at all: conflating the two classified an unreadable
-# file as `added` and put it in the revert list, and made an unreadable file
-# that stayed unreadable compare equal to itself and vanish from the report.
-# It is a string so it survives the JSON round-trip through the manifest, and
-# one no sha256 digest can collide with.
+# Distinguish unreadable files from absent ones (None). A JSON-safe sentinel
+# that cannot equal a SHA-256 digest preserves this distinction across snapshots.
 UNREADABLE = "unreadable"
 
-# The reason carried by every `unmeasurable` entry a manifest written before
-# walk mode recorded its own unreadable paths holds. Those were all opaque
-# subtrees and were stored as bare path strings; `_unmeasurable` reads both
-# spellings so an older manifest still verifies instead of crashing or, worse,
-# losing its record and verifying clean.
+# Older manifests stored opaque unreadable subtrees as bare paths. Preserve
+# their reason when normalizing to {path, reason} records.
 NESTED_UNMEASURABLE = ("it is a nested repository or submodule the snapshot "
                        "could not hash")
 
@@ -227,30 +144,15 @@ def _real(path: Path) -> str:
 
 def _walk(root: Path, exclude: set[Path] | None = None,
           limit: int | None = None) -> tuple[list[Path], list[dict]]:
-    """`(files, unmeasurable)` for every entry under root.
+    """Return (files, unmeasurable) for entries under root.
 
-    `rglob("*")` descends `.git` and `__pycache__` in full and only then
-    discards what it found, which on a repository root costs orders of
-    magnitude more than the walk itself. Prune at the directory boundary
-    instead.
+    Prune ignored directories before descent. Record unhashable or unwalkable
+    entries as {"path", "reason"}; snapshot_state preserves these and verify
+    reports not_measurable instead of treating unread paths as empty.
 
-    The second return value is what stops this walk failing open. An entry it
-    can neither hash nor descend used to be dropped with `continue`, so a
-    subtree the guard never read came back as a subtree with nothing in it,
-    and `--verify` reported `clean` over a tree it had not looked at. Cases 4
-    to 8 of the module docstring's enumeration all landed there. Each one now
-    returns a `{"path", "reason"}` record instead, which `snapshot_state`
-    stores and `verify` turns into a `not_measurable` reason.
-
-    Symlinked directories are followed, which is the change that closes the
-    common case: `~/.claude/skills/{name}` is routinely a symlink into a
-    repository checkout, and `is_dir(follow_symlinks=False)` called that
-    neither a directory nor a file and dropped the artifact's whole tree.
-    Following them needs loop protection, so each branch of the descent
-    carries the set of real directories above it and refuses to re-enter one.
-    Two distinct symlinks to the same target are not a loop and are both
-    walked: they are two real paths in the watched tree, and a change reached
-    through either one is a change.
+    Follow directory symlinks, including installed artifacts. Track real
+    ancestors per branch to stop loops; two links to one target remain valid
+    paths and are both walked.
     """
     excluded = {_real(p) for p in (exclude or set())}
     found: list[Path] = []
@@ -276,8 +178,7 @@ def _walk(root: Path, exclude: set[Path] | None = None,
         for entry in entries:
             path = Path(entry.path)
             try:
-                # Both follow symlinks, which is what admits a symlinked
-                # artifact directory and a symlinked file alike.
+                # Follow symlinked artifact directories and files.
                 is_dir = entry.is_dir()
                 is_file = entry.is_file()
                 is_link = entry.is_symlink()
@@ -319,11 +220,9 @@ def _walk(root: Path, exclude: set[Path] | None = None,
 
 def walk_manifest(root: Path, exclude: set[Path] | None = None,
                   limit: int | None = None) -> tuple[dict, list[dict]]:
-    """`build_manifest`, plus the paths under root that could not be read.
+    """Return file hashes and unreadable-path records under root.
 
-    Both halves, because either alone fails open: the hashes without the
-    unreadable list report `clean` over what nobody looked at, and the list
-    without the hashes has nothing to compare.
+    Both are needed to compare content without reporting unread paths as clean.
     """
     files, unmeasurable = _walk(root, exclude, limit)
     return (
@@ -334,30 +233,20 @@ def walk_manifest(root: Path, exclude: set[Path] | None = None,
 
 def build_manifest(root: Path, exclude: set[Path] | None = None,
                    limit: int | None = None) -> dict:
-    """Hash every non-ignored file under root.
+    """Hash non-ignored files under root, skipping exclude paths.
 
-    `exclude` holds paths to skip. The manifest itself belongs there: writing
-    it inside the guarded tree would otherwise register as a new out-of-scope
-    file on the very next verify.
-
-    Callers that must not fail open want `walk_manifest`, which also returns
-    what could not be read.
+    Exclude the manifest itself to avoid detecting its write as a scope change.
+    Use walk_manifest when callers also need unreadable-path records.
     """
     return walk_manifest(root, exclude, limit)[0]
 
 
 def _git(root: Path, *args: str) -> str | None:
-    """Run git in `root` and return stdout, or None when git cannot answer.
+    """Return git stdout from root, or None when git cannot answer.
 
-    Bytes, decoded the way the filesystem decodes them, rather than
-    `text=True`. `text=True` decodes strictly under the locale encoding, and
-    `git ls-files -z` emits raw path bytes (unlike `git status --porcelain`,
-    which C-quotes them). One non-UTF-8 filename anywhere under the root
-    therefore raised `UnicodeDecodeError` out of the middle of the guard and
-    exited 1 -- the code the caller's branch table reads as "scope violation,
-    revert the listed paths", with no report to list any. `surrogateescape` is
-    what `os.fsdecode` uses, so the decoded string round-trips back to the same
-    bytes on disk and `Path` operations on it work.
+    Decode raw path bytes with os.fsdecode so non-UTF-8 names round-trip through
+    Path operations. Strict text decoding can raise an exception that would
+    otherwise exit 1, the scope-violation code.
     """
     try:
         result = subprocess.run(
@@ -385,12 +274,10 @@ def _nul_list(stdout: str | None) -> list[str]:
 
 
 def _git_tracked(root: Path) -> set[str] | None:
-    """Index paths under `root`, relative to `root`.
+    """Return index paths relative to root.
 
-    `git ls-files` respects the working directory, so `-C root` already scopes
-    the answer to the watched tree and prints root-relative paths -- unlike
-    `git status --porcelain`, which always prints repository-root-relative
-    paths and has to be rebased by hand below.
+    ls-files honors -C root; porcelain status instead uses the repository root
+    and needs rebasing.
     """
     out = _git(root, "ls-files", "-z")
     if out is None:
@@ -399,23 +286,18 @@ def _git_tracked(root: Path) -> set[str] | None:
 
 
 def _git_gitlinks(root: Path) -> list[str] | None:
-    """Registered submodules under `root`, as root-relative paths.
+    """Return registered submodules as root-relative paths.
 
-    A submodule is a gitlink: one index entry with mode 160000 whose content
-    lives in another repository. `git status` reports it as a single path with
-    no trailing slash, and `Path.is_file()` calls it absent, so the classifier
-    used to bucket a content change inside a submodule as `removed` and tell
-    the caller to revert a directory the manifest holds no content for.
+    Gitlinks have index mode 160000 and content in another repository. Treat
+    them as opaque subtrees, not removed files without recoverable content.
     """
     out = _git(root, "ls-files", "--stage", "-z")
     if out is None:
         return None
     links: list[str] = []
     for record in _nul_list(out):
-        # `<mode> <sha> <stage>\t<path>`. `-z` output is never C-quoted, so it
-        # must not be unquoted here: `_git_tracked` does not either, and a path
-        # that happens to start and end with a quote would otherwise be spelled
-        # two different ways by two functions whose results are compared.
+        # Format: <mode> <sha> <stage>\t<path>. -z paths are raw, never C-quoted;
+        # unquoting would change filenames containing literal surrounding quotes.
         head, _, path = record.partition("\t")
         if head.startswith("160000") and path:
             links.append(path)
@@ -423,24 +305,12 @@ def _git_gitlinks(root: Path) -> list[str] | None:
 
 
 def _git_hash_candidates(root: Path) -> int | None:
-    """How many files a git-mode snapshot would actually hash under `root`.
+    """Estimate files hashed by a git-mode snapshot for --max-files.
 
-    This is the cost estimate `--max-files` is compared against, and it is
-    deliberately not the size of the tree. `snapshot_state` stores nothing for
-    the clean-tracked majority, because git attributes those on its own, so the
-    cost of watching a repository scales with its dirty and untracked files
-    rather than with how many files it tracks.
-
-    Comparing the limit against the tracked count instead narrowed the watch on
-    any repository over 20000 files while saving no work whatsoever, and the
-    coverage it dropped was the whole reason the root is wide: a sibling
-    `commands/` directory, a repo-root `scripts/`, a sibling plugin. A monorepo
-    got a permanently degraded guard in exchange for nothing.
-
-    Opaque subtrees count as one apiece here. They are hashed in full, but
-    `_hash_opaque` passes the same budget down to each one and records the
-    subtrees that blow it under `unmeasurable`, so their cost is already
-    bounded where it is actually incurred.
+    Count dirty and untracked files, not clean tracked files. Limiting the full
+    tracked count would narrow large repositories without saving hashing work.
+    Count opaque subtrees once here; _hash_opaque enforces their individual
+    budgets and records failures as unmeasurable.
     """
     status = _git_status(root)
     if status is None:
@@ -449,53 +319,24 @@ def _git_hash_candidates(root: Path) -> int | None:
 
 
 def _candidate_count(entries: list[tuple[str, str]], opaque: list[str]) -> int:
-    """Candidate count from a `_git_status` answer already in hand.
+    """Count hash candidates from an existing _git_status result.
 
-    `snapshot_state` holds one and must not pay for a second `git status` just
-    to check the budget it is about to spend.
+    Reuse snapshot_state's result rather than running git status again.
     """
     hashed = [rel for _code, rel in entries if not _is_ignored(Path(rel))]
     return len(hashed) + len(opaque)
 
 
 def _git_status(root: Path) -> tuple[list[tuple[str, str]], list[str]] | None:
-    """`((status code, root-relative path), ...)` plus the paths git cannot see into.
+    """Return (status code, root-relative path) entries and opaque subtree paths.
 
-    The second list is the one that stops this from being a fail-open check.
+    Rebase porcelain's repository-relative paths onto root and drop paths
+    outside it. --untracked-files=all expands ordinary directories to match the
+    file-level manifest. --ignored=traditional includes individually listed
+    ignored files; wholly ignored directories stay collapsed and skipped.
 
-    `git status --porcelain` prints paths relative to the *repository* root,
-    never to `--root`. The manifest, `--scope`, and `_in_scope` all speak
-    root-relative paths, so comparing the two namespaces directly matched
-    nothing whenever root sits below the repo root -- which is a documented
-    invocation (a hook watched at `~/.claude/hooks` inside a repo rooted at
-    `~/.claude`). Every dirty file then looked both unchanged by this run and
-    out of scope, so the report listed all of them, including the in-scope
-    file the run had just legitimately edited, under
-    `preexisting_dirty_out_of_scope` next to "do not revert them".
-
-    Rebase each path onto `root` and drop the ones that fall outside it.
-
-    `--untracked-files=all` is not decoration. The default `normal` collapses
-    a wholly untracked directory to one entry, `newdir/`, which never matches
-    the file-level paths in the hash manifest. A directory this run created
-    therefore passed the `not in changed` test and was reported as
-    pre-existing dirt, while the files inside it were reported as violations:
-    the caller was told to revert `newdir/x.txt` and, in the same report, that
-    `newdir` predates the run and must not be reverted.
-
-    `--ignored=traditional` brings back individually-listed `.gitignore`d
-    files, which the old whole-tree rglob used to hash and plain `status`
-    hides entirely. Wholly-ignored *directories* still collapse to one entry
-    and are skipped -- that is the point, since they are the `node_modules`
-    and `.venv` trees this rewrite exists to stop walking.
-
-    A collapsed entry that is NOT ignored is a different animal and used to be
-    dropped by the same branch. `--untracked-files=all` expands every ordinary
-    untracked directory, so the only thing left collapsing is a directory git
-    declines to look inside: a nested repository. Dropping it made every edit
-    within that repository invisible and the verdict `clean`. Those paths come
-    back as the second return value, and the caller hashes them itself or says
-    it could not.
+    Other collapsed directories are nested repositories git cannot inspect.
+    Return them separately for hashing or an explicit not_measurable report.
     """
     stdout = _git(root, "status", "--porcelain", "--untracked-files=all",
                   "--ignored=traditional")
@@ -521,13 +362,11 @@ def _git_status(root: Path) -> tuple[list[tuple[str, str]], list[str]] | None:
         try:
             relative = (toplevel_resolved / entry).relative_to(root_resolved)
         except ValueError:
-            # Dirty, but outside the guarded tree entirely. Not this run's
-            # business either way, and reporting it would be noise.
+            # Ignore dirty paths outside the watch.
             continue
         if collapsed:
-            # An ignored tree is collapsed on purpose and stays skipped. Any
-            # other collapsed directory is a nested repository git will not
-            # look inside, and dropping it is how edits in there went unseen.
+            # Skip collapsed ignored trees. Other collapsed directories are opaque
+            # nested repositories and must remain visible.
             if code != "!!" and not _is_ignored(relative):
                 opaque.append(str(relative))
             continue
@@ -536,10 +375,7 @@ def _git_status(root: Path) -> tuple[list[tuple[str, str]], list[str]] | None:
     gitlinks = _git_gitlinks(root)
     if gitlinks is None:
         return None
-    # `ls-files` prints paths relative to its working directory, so these are
-    # already root-relative and already scoped to root. Rebasing them onto the
-    # repository toplevel the way the status lines above are rebased would
-    # double the prefix whenever root sits below the toplevel.
+    # ls-files paths are already root-relative; rebasing would double prefixes.
     opaque.extend(link for link in gitlinks if not _is_ignored(Path(link)))
     # A submodule can also appear as a dirty entry; the opaque handling owns it.
     opaque_set = set(opaque)
@@ -548,11 +384,10 @@ def _git_status(root: Path) -> tuple[list[tuple[str, str]], list[str]] | None:
 
 
 def _git_changed(root: Path) -> list[str] | None:
-    """Root-relative paths git reports as dirty, or None outside a repo.
+    """Return dirty root-relative paths, or None outside a repository.
 
-    `.gitignore`d entries are excluded: they are tracked for *attribution*
-    (see `_git_status`) but calling them "dirty" would flood
-    `preexisting_dirty_out_of_scope` with build output.
+    Exclude ignored entries from the informational dirty-file list; _git_status
+    still collects them for change detection.
     """
     status = _git_status(root)
     if status is None:
@@ -567,13 +402,9 @@ _C_ESCAPES = {
 
 
 def _unquote_git_path(entry: str) -> str:
-    """Decode the C-quoted path form `git status --porcelain` emits.
+    """Decode porcelain's C-quoted paths, including octal byte escapes.
 
-    Git wraps a path in double quotes and escapes it whenever it holds a
-    control character, a quote, a backslash, or a non-ASCII byte, encoding
-    those bytes as three-digit octal. Stripping the quotes without undoing the
-    escapes leaves a literal `\303\251` that matches nothing on disk, so the
-    entry falls out of the report it was supposed to appear in.
+    Stripping quotes alone leaves escaped names that cannot match files on disk.
     """
     if len(entry) < 2 or not (entry.startswith('"') and entry.endswith('"')):
         return entry
@@ -597,23 +428,16 @@ def _unquote_git_path(entry: str) -> str:
             continue
         out.extend(_C_ESCAPES.get(nxt, nxt).encode("utf-8"))
         index += 1
-    # `os.fsdecode`, not `decode(..., "replace")`: replacement characters do
-    # not round-trip, so a path holding a non-UTF-8 byte decoded to a name that
-    # matched nothing on disk and fell out of the report. Surrogate escapes
-    # re-encode to the original bytes, which is what makes `Path(...).is_file()`
-    # and the comparison against `git ls-files -z` output agree.
+    # Preserve non-UTF-8 bytes with surrogate escapes; replacement characters
+    # would break filesystem lookups and ls-files comparisons.
     return os.fsdecode(bytes(out))
 
 
 def _porcelain_path(line: str) -> str:
-    """The on-disk path a `git status --porcelain` line refers to.
+    """Return a porcelain entry's on-disk path.
 
-    Two shapes need handling. A rename or copy prints `old -> new`, and taking
-    the whole tail gives the single nonexistent path `old -> new`, which never
-    resolves under root and is dropped silently -- losing an entry from
-    `preexisting_dirty_out_of_scope`, the list whose whole job is telling the
-    caller what not to revert. The destination is the path that exists now, so
-    that is the one to keep. The other shape is C-quoting, handled above.
+    Keep the destination of an old -> new rename/copy and decode C-quoting.
+    Otherwise nonexistent composite or escaped paths disappear from the report.
     """
     entry = line[3:].strip()
     if line[:1] in ("R", "C") and " -> " in entry:
@@ -641,37 +465,22 @@ def _in_scope(rel_path: str, scope: list[str]) -> bool:
 
 
 def permitted_scope(artifact: Path, artifact_type: str) -> Path:
-    """The artifact's own path: the primary entry in `permitted_scopes`.
+    """Return the artifact's primary permitted path.
 
-    A skill is a directory (`.../{name}/SKILL.md`), so the whole directory is
-    fair game -- references, scripts, evals all belong to it. A command, hook,
-    or script is a single file and nothing around it is in scope: a hook's
-    siblings in `~/.claude/hooks/` are other people's hooks, and permitting
-    the directory would permit editing every one of them.
+    Skills permit their whole directory, including references, scripts, and
+    evals. Commands, hooks, and scripts permit only their file; siblings belong
+    to other artifacts. permitted_scopes adds command validator directories.
     """
     return artifact.parent if artifact_type == "skill" else artifact
 
 
 def permitted_scopes(artifact: Path, artifact_type: str) -> list[Path]:
-    """Every path this run may change, artifact first.
+    """Return permitted paths, with the artifact first.
 
-    One entry for every type but `command`, which gets two. Phase 2 Step 6
-    mandates a companion `validate_handoffs.py` for a multi-phase artifact,
-    and for a command it has nowhere to put it but the `{name}-validator/`
-    sibling directory: the command itself is a single file, so there is no
-    in-scope directory to write into. With the file as the only scope entry,
-    Step 6 wrote a file that Step 6 also required be declared, and Step 6a
-    then read "declared and out of scope" as a violation and ordered the run
-    to delete the validator it had just been required to create.
-
-    Admitting the sibling resolves that without widening the blast radius in
-    the way the docstring above warns against. `{name}-validator/` is named
-    for this artifact and holds nothing else; the objection to permitting a
-    hook's directory is that the siblings there belong to other artifacts, and
-    that objection does not reach a directory this artifact owns outright.
-    Hooks and scripts need no equivalent, because Step 6 skips validator
-    generation for them entirely -- they are tested by direct invocation, not
-    through state files -- so their scope stays the single file.
+    Commands also permit their {name}-validator/ companion directory so a
+    required validate_handoffs.py is not itself a scope violation. This adds
+    only the named companion, not the whole commands directory. Hooks and
+    scripts use direct tests and do not need generated validator companions.
     """
     primary = permitted_scope(artifact, artifact_type)
     if artifact_type != "command":
@@ -680,38 +489,23 @@ def permitted_scopes(artifact: Path, artifact_type: str) -> list[Path]:
 
 
 def install_root(artifact: Path, artifact_type: str) -> Path:
-    """The narrow watch root used when the artifact is not inside a repository.
+    """Return the narrow watch root outside a repository.
 
-    For a skill this is the directory holding all installed skills
-    (`~/.claude/skills`); for a single-file artifact it is the install
-    directory itself (`~/.claude/hooks`). Never the parent of that, which for
-    a hook would widen the watch to the whole `~/.claude` config tree.
+    For skills, use the directory of installed skills; for single-file
+    artifacts, use their install directory. A hook must not widen to the parent
+    configuration tree.
     """
     container = artifact.parent
     return container.parent if artifact_type == "skill" else container
 
 
 def access_path(artifact: Path, artifact_type: str) -> Path:
-    """`artifact` with its install directory resolved and its own name kept.
+    """Resolve the install directory while retaining the artifact's own path.
 
-    Everything downstream of this is derived from the returned path, and a
-    plain `realpath` of the artifact answers a different question than the one
-    the watch root asks. `~/.claude/skills/{name}` is routinely a symlink into
-    a repository checkout: resolving it moves the artifact wholesale into the
-    checkout's namespace, `install_root` then answers `<checkout>/skills`
-    instead of `~/.claude/skills`, and `derive_root` widens to the checkout.
-    The watched tree becomes the repository the artifact happens to have come
-    from and stops containing the sibling artifacts a run can actually reach,
-    so an edit to `~/.claude/skills/other/SKILL.md` -- the collateral damage
-    this module exists to catch -- verified `clean`.
-
-    The install directory is the half that has to survive, because that is
-    where a collateral edit lands. Its *ancestors* are still resolved, because
-    the root and everything compared against it live in the realpath namespace
-    and leaving them alone reintroduces the `/tmp` against `/private/tmp`
-    mismatch. Only the components below the install directory keep the
-    spelling the caller used, which is exactly the spelling `_walk` produces
-    and `_under_root` expects.
+    A full realpath follows symlinked artifacts into their source checkouts,
+    moving the watch away from sibling installations. Resolve install-directory
+    ancestors to unify paths such as /tmp and /private/tmp, but preserve names
+    below it to match _walk and _under_root.
     """
     container = install_root(artifact, artifact_type)
     return Path(_real(container)) / artifact.relative_to(container)
@@ -719,39 +513,24 @@ def access_path(artifact: Path, artifact_type: str) -> Path:
 
 def derive_root(artifact: Path, artifact_type: str,
                 max_files: int = DEFAULT_MAX_FILES) -> tuple[Path, dict | None]:
-    """Watch root for `artifact`, plus a fallback record if it was narrowed.
+    """Return the watch root and any narrowing fallback record.
 
-    Inside a repository the root is the repository, so a change to a sibling
-    plugin, a sibling command directory, or a repo-root `scripts/` is visible.
-    That is only affordable because `snapshot_state` hashes just the files git
-    cannot attribute, so the budget is compared against that hashing workload
-    (`_git_hash_candidates`) and not against the size of the checkout. A
-    hundred-thousand-file monorepo with a handful of dirty files keeps the wide
-    watch, because widening it costs nothing there. Only when the work itself
-    is too big does the root narrow to the install directory, and then it says
-    so out loud.
+    Use the install directory's repository when available so sibling plugins,
+    commands, and repo-root scripts are watched. Compare --max-files against
+    hashing workload, not tracked count. Narrow to the install directory only
+    when that workload exceeds budget, and report the loss of coverage.
 
-    Which repository, though, is asked of the *install directory* and not of
-    the artifact. Ask the artifact and a symlinked `~/.claude/skills/{name}`
-    reports the checkout it points into, which is a tree that does not contain
-    the install directory at all: widening to it swaps the watch for a
-    different tree, dropping every sibling artifact the run can reach and
-    admitting files it has no path to. Asking the install directory answers
-    the question the root is for -- what could plausibly be collateral damage
-    -- and still widens for the case that motivated widening, an install
-    directory that is itself inside a repository.
+    Query the install directory, not the artifact's symlink target: the latter
+    may identify a different tree that excludes sibling installations.
     """
     narrow = Path(_real(install_root(artifact, artifact_type)))
     toplevel = _git_toplevel(narrow)
     if toplevel is None:
         return narrow, None
-    # Put the repo root in the same namespace as `narrow` or the `is this
-    # below that` tests below compare /tmp against /private/tmp and silently
-    # decline to narrow.
+    # Normalize root aliases such as /tmp and /private/tmp before containment checks.
     toplevel = Path(_real(toplevel))
     if toplevel != narrow and toplevel not in narrow.parents:
-        # git answered about a tree that does not contain the install
-        # directory. Widening to it would watch somewhere else entirely.
+        # Do not widen to a repository that excludes the install directory.
         return narrow, None
 
     count = _git_hash_candidates(toplevel)
@@ -774,56 +553,33 @@ def derive_root(artifact: Path, artifact_type: str,
 
 def snapshot_state(root: Path, exclude: set[Path] | None = None,
                    max_files: int = DEFAULT_MAX_FILES) -> dict:
-    """Pre-edit state of `root`, hashing as little as correctness allows.
+    """Snapshot root, hashing only files whose pre-edit content git cannot track.
 
-    Inside a repository, git can attribute any change to a file that was clean
-    when we started: if it is dirty at verify time, this run dirtied it. Only
-    the files git *cannot* attribute need a pre-image:
+    In git mode, hash already-dirty files, untracked files, and individually
+    listed ignored files. Store nothing for clean tracked files; later git
+    status detects their changes. Attribution still requires declared writes.
 
-      * tracked and already dirty -- git will call it dirty either way, so the
-        hash is the only thing that separates "we changed it" from "it was
-        already like that", which is the difference between reverting our own
-        edit and destroying someone else's uncommitted work.
-      * untracked (and individually-listed ignored files) -- invisible to
-        `git diff` entirely.
-
-    Both sets are small. The clean-tracked majority, which is the whole cost
-    of the old rglob-everything manifest, is stored as nothing at all.
-
-    The exception is a nested repository or a registered submodule. The outer
-    git knows nothing about their contents, so neither "clean in git" nor
-    "dirty in git" means anything there and the cheap accounting above cannot
-    be applied. Those subtrees are hashed in full, exactly as walk mode hashes
-    an install directory, and a subtree too large or unreadable to hash is
-    recorded under `unmeasurable` rather than dropped.
+    Hash nested repositories and submodules fully because the outer repository
+    cannot inspect their contents. Record oversized or unreadable subtrees as
+    unmeasurable.
     """
     excluded = {_real(p) for p in (exclude or set())}
     status = _git_status(root)
     tracked = _git_tracked(root)
     if status is None or tracked is None:
-        # Not a repository (or git is unavailable): walk it. These roots are
-        # install directories, which are small.
+        # Without git, walk the install directory.
         files, unmeasurable = walk_manifest(root, exclude, max_files)
         return {
             "mode": "walk",
             "files": files,
-            # What the walk could not read. Without it a symlink loop, an
-            # unlistable directory, or a socket vanished from the manifest and
-            # `--verify` called the tree clean.
+            # Retain unreadable entries so verify cannot treat them as clean.
             "unmeasurable": unmeasurable,
-            # The budget this snapshot was taken under, carried in the state
-            # itself and not only in the CLI's manifest payload, so an
-            # in-process `verify(root, snapshot_state(root, max_files=N))`
-            # walks under N rather than silently falling back to the default.
+            # Store the budget for in-process verify as well as CLI use.
             "max_files": max_files,
         }
     entries, opaque = status
-    # The budget, spent where git mode actually spends it. Only the walk
-    # branch used to check it, so a root git could answer about was hashed
-    # without limit while the same budget still made verify report
-    # `not_measurable` for a nested subtree inside it. `derive_root` narrows
-    # first where narrowing is available, so a count over budget here means it
-    # is not.
+    # Enforce the actual git hashing budget. derive_root has already tried
+    # narrowing; exceeding the budget here must fail.
     candidates = _candidate_count(entries, opaque)
     if candidates > max_files:
         raise TooManyFiles(candidates, max_files)
@@ -849,21 +605,17 @@ def snapshot_state(root: Path, exclude: set[Path] | None = None,
         "untracked": untracked,
         "nested": nested,
         "unmeasurable": unmeasurable,
-        # Carried in the state itself, not only spliced into the CLI's manifest
-        # payload, so an in-process `verify(root, snapshot_state(...))` walks
-        # nested subtrees under the budget the snapshot actually used.
+        # Retain the snapshot budget for in-process verification of nested trees.
         "max_files": max_files,
     }
 
 
 def _hash_opaque(root: Path, opaque: list[str], exclude: set[Path] | None,
                  max_files: int) -> tuple[dict[str, dict], list[dict]]:
-    """Hash each subtree git cannot see into; name the ones that could not be.
+    """Hash opaque subtrees and record those that cannot be read.
 
-    Returns `({subtree: {path relative to the subtree: digest}}, unmeasurable)`.
-    A subtree over `--max-files` or unreadable goes in the second list, which
-    is what makes the verify report `not_measurable` instead of `clean`, and
-    so does anything inside a subtree that the walk itself could not read.
+    Return ({subtree: {subtree-relative path: digest}}, unmeasurable). Record
+    oversized subtrees and unreadable entries so verify cannot report them clean.
     """
     nested: dict[str, dict] = {}
     unmeasurable: list[dict] = []
@@ -912,21 +664,12 @@ def _classify_git(root: Path, state: dict,
                   exclude: set[Path] | None) -> tuple[list[str], list[str],
                                                       list[str], list[str],
                                                       list[str], list[str]]:
-    """(modified, added, removed, git_changed, blind, unreadable) for git mode.
+    """Return (modified, added, removed, git_changed, blind, unreadable).
 
-    Detection only. Nothing here decides who made a change: that comes from the
-    run's declaration in `verify`, because no comparison of two tree states can
-    tell this run's write from the user's editor saving the same file.
-
-    `blind` names the subtrees that could not be read. It is returned rather
-    than raised because a partly-readable tree still has findings worth
-    reporting: an unhashable submodule must not swallow the out-of-scope edit
-    the rest of the walk did see.
-
-    `Blind` IS raised for the one case where nothing at all was observed, git
-    itself going quiet. The old code returned an empty change list there, which
-    `verify` rendered as `verdict: "clean"` and the caller recorded as a
-    passing `scope_verify` gate: a guard reporting a clean tree it never read.
+    Detect changes only; verify attributes them using declarations. Return blind
+    subtrees alongside observed changes so partial coverage retains findings.
+    Raise Blind when git stops answering entirely; empty changes would imply a
+    clean tree that was never checked.
     """
     excluded = {_real(p) for p in (exclude or set())}
     pre_images = _pre_images(state)
@@ -941,11 +684,9 @@ def _classify_git(root: Path, state: dict,
     entries, opaque_now = status
 
     dirty_now = {rel for _code, rel in entries if not _is_ignored(Path(rel))}
-    # A file recorded at snapshot that git no longer reports still needs
-    # checking: reverting a dirty file to its HEAD content, or deleting an
-    # untracked one, both drop it out of `git status` while being changes this
-    # run made. Paths inside a currently-opaque subtree are `_classify_nested`'s
-    # to bucket, and taking them here as well would report each one twice.
+    # Recheck saved paths missing from git status: restoring HEAD content or
+    # deleting untracked files can hide real changes there. Currently opaque
+    # paths belong to _classify_nested to avoid duplicate findings.
     candidates = {rel for rel in dirty_now | set(pre_images)
                   if not _in_scope(rel, opaque_now)}
 
@@ -963,10 +704,8 @@ def _classify_git(root: Path, state: dict,
             before: object = pre_images[rel]
             existed = before is not None
         elif rel in tracked_now:
-            # Tracked now and absent from every pre-image store means it was
-            # clean when we started, so git reporting it dirty now proves it
-            # changed during the round. Detection, not attribution: who changed
-            # it is the declaration's question, not this one's.
+            # A newly dirty tracked file without a pre-image was clean at snapshot.
+            # This detects a change; declarations still identify its writer.
             before, existed = CLEAN_TRACKED, True
         else:
             before, existed = None, False
@@ -996,17 +735,11 @@ def _classify_git(root: Path, state: dict,
 
 
 def _pre_images(state: dict) -> dict[str, object]:
-    """Every path the snapshot recorded a pre-image for, root-relative.
+    """Flatten all snapshot pre-images into root-relative paths.
 
-    The three stores are partitioned by HOW git saw a file at snapshot time,
-    not by what the file is, and a file moves between them during a round for
-    reasons that have nothing to do with its content: a `git init` in a
-    subdirectory turns ordinary untracked paths into an opaque nested subtree,
-    and removing a submodule turns a nested subtree back into ordinary paths.
-    A classifier that consults only its own store then finds no pre-image for a
-    byte-identical file, calls it `added`, and hands the caller a revert
-    instruction for a file nobody touched. One flat map, read by both
-    classifiers, is what makes the movement irrelevant.
+    Files can move between ordinary and opaque git stores without changing
+    content, eg after git init or submodule removal. Both classifiers need the
+    same map to avoid falsely classifying those files as added.
     """
     flat: dict[str, object] = {}
     flat.update(state.get("untracked", {}) or {})
@@ -1022,34 +755,18 @@ def _classify_nested(root: Path, state: dict, pre_images: dict[str, object],
                      exclude: set[Path] | None
                      ) -> tuple[list[str], list[str], list[str],
                                 list[str], list[str]]:
-    """Bucket the subtrees git cannot see into: (mod, add, rm, blind, unreadable).
+    """Return (mod, add, rm, blind, unreadable) for currently opaque subtrees.
 
-    Only the subtrees opaque *now* are walked here. One the snapshot hashed
-    that is no longer opaque needs no special handling: its pre-images are in
-    the same flat map the top-level loop reads, and git reports its files
-    directly again.
+    Previously opaque paths now visible to git use the shared pre-image map
+    and top-level classifier. Newly opaque clean tracked files have no saved
+    hash; tracked_now identifies them so missing pre-images mean unknown prior
+    content, not newly added files.
 
-    The reverse movement needs handling, and did not get it. A subtree that
-    becomes opaque *during* the round -- a `git init` in a subdirectory, a
-    submodule initialised by a build step -- takes its clean tracked files with
-    it, and those files have no pre-image by construction: the snapshot stored
-    nothing for them precisely because git was attributing them. Reading
-    "absent from the pre-images" as `added` then manufactured a change for
-    every one of them. They are still in the outer repository's index, which
-    `git init` in a subdirectory does not touch, so `tracked_now` identifies
-    them; their content at snapshot time is genuinely unknown, so they are
-    reported as unreadable rather than invented as new.
-
-    A subtree the snapshot could not hash, or one that cannot be hashed now,
-    produces a blind reason rather than silence: `~/.claude/skills` and
-    `~/.claude/scripts` are separate repositories inside `~/.claude`, which is
-    the exact tree a run on a hook or a script watches, so this is the ordinary
-    case here rather than an exotic one.
+    Report blind reasons for subtrees unreadable at either snapshot or verify.
     """
     unmeasurable = _unmeasurable(state)
     unmeasurable_paths = {entry["path"] for entry in unmeasurable}
-    # The snapshot's own budget, so a subtree that fitted then and has since
-    # grown past it is reported rather than walked without limit.
+    # Use the snapshot budget to catch subtrees that have grown beyond it.
     limit = state.get("max_files")
     if not isinstance(limit, int) or isinstance(limit, bool):
         limit = DEFAULT_MAX_FILES
@@ -1080,9 +797,7 @@ def _classify_nested(root: Path, state: dict, pre_images: dict[str, object],
                 for entry in inner
             )
         else:
-            # Opaque per git, yet not a directory on disk. Whatever it is, its
-            # contents were not read, and the snapshot records the same shape
-            # under `unmeasurable` rather than passing over it.
+            # Git reports an opaque path that is not a directory; its contents remain unknown.
             blind.append(
                 f"{rel!r} is a submodule or nested repository git reports but "
                 f"which is not a directory on disk, so it could not be read")
@@ -1100,11 +815,8 @@ def _classify_nested(root: Path, state: dict, pre_images: dict[str, object],
             if before == UNREADABLE or after == UNREADABLE:
                 unreadable.append(full)
             elif inner not in stored_here and full in tracked_now:
-                # Clean and tracked at snapshot, and the outer index still says
-                # so, so the file predates the round and only its snapshot-time
-                # content is unknown. `unreadable` is exactly that state, and
-                # routing it there gets it a not_measurable reason instead of a
-                # fabricated `added` and a revert that would delete it.
+                # A clean tracked file without a saved hash predates the run, but its
+                # prior content is unknown. Report unreadable rather than inventing added.
                 unreadable.append(full)
             elif inner not in stored_here:
                 added.append(full)
@@ -1120,43 +832,22 @@ class DeclarationError(Exception):
 
 
 def _match_key(rel: str) -> str:
-    """Comparison key for a root-relative path.
+    """Normalize a root-relative path for comparison only.
 
-    Declared paths and detected paths come from different machinery -- the
-    executor's own tool calls on one side, `git status`, `os.scandir` and
-    `Path` joins on the other -- and two spellings of one file compare unequal.
-    `./b`, `a/../b` and `b` are the same file. So are the NFC and NFD spellings
-    of an accented name: macOS hands back whichever form the writer used while
-    git's index holds NFC, so a path with an accent in it can be spelled two
-    ways within a single run.
-
-    A miss here is not cosmetic. It moves a path the run admits writing out of
-    `violations` and into `unattributed_out_of_scope`, which reads as another
-    writer's change -- the fail-open this whole design closes. It does fail in
-    the safe direction when it happens anyway (the change lands in
-    `unattributed` AND the declared path lands in `declared_out_of_scope` with
-    nothing detected, so both push the verdict to `not_measurable`), but the
-    round is lost either way.
-
-    Keys are for comparison only. Every path in the report keeps the spelling
-    it was found with, so `root / rel` still opens the right file.
+    Normalize ./b, a/../b, and NFC/NFD spellings so declarations match detected
+    paths. A mismatch would make a declared change unattributed and halt the
+    run. Reports retain the original spelling so paths still open correctly.
     """
     return unicodedata.normalize("NFC", os.path.normpath(rel))
 
 
 class Declaration:
-    """What the run says it wrote, or the absence of any such statement.
+    """Represent declared writes, explicit no-writes, or no declaration.
 
-    Tri-valued, and the third value is the one that matters. `present` with an
-    empty path set is a run stating it wrote nothing, which is a claim the
-    guard can hold it to. Absent is a run that said nothing at all, and reading
-    those two as the same thing is how a guard fails open: every out-of-scope
-    change would land in whichever bucket the empty set implies.
-
-    Membership is exact, never prefix. A declared directory would attribute
-    everything beneath it to this run, including the file the user was editing,
-    and hand the caller a `git checkout` for it -- so `normalize_declared`
-    refuses a directory outright rather than letting one widen attribution.
+    Present with an empty set means the run says it wrote nothing; absent means
+    it gave no statement and cannot pass verification. Membership is exact,
+    never a directory prefix that could attribute another writer's files.
+    normalize_declared rejects directories.
     """
 
     def __init__(self, paths: set[str] | None,
@@ -1177,24 +868,12 @@ ABSENT = Declaration(None)
 
 
 def _under_root(candidate: Path, root_real: Path) -> str | None:
-    """Root-relative spelling of `candidate`, keeping symlinks inside the root.
+    """Return candidate relative to root, preserving symlinks beneath root.
 
-    Two spellings have to meet here, and resolving both ends the same way is
-    not available. The walk descends from the root, so a file reached through
-    a symlinked directory inside the root keeps that directory's name --
-    `hone/SKILL.md`, where `hone` is a symlink into a checkout, which is the
-    ordinary shape of `~/.claude/skills`. A declared path is whatever the
-    executor typed, and `realpath` on it resolves that symlink away onto a
-    path that is not under the root at all. Resolving the walk instead would
-    make `~/.claude/skills` report paths inside whatever repository each skill
-    came from, and the scope it was handed would match none of them.
-
-    So resolve the candidate one ancestor at a time and stop at the first one
-    that IS the root. Everything below that keeps the spelling it arrived
-    with, which is the spelling the walk produces. Returns None when no
-    ancestor is the root; the caller then tries the fully-resolved form before
-    giving up, which is what catches a path spelled through the symlink's
-    target instead of through the symlink.
+    Resolve ancestors until one matches root, retaining names below it to match
+    the walk. Fully resolving an installed skill can move it into a checkout
+    outside root and break scope matching. Return None when no ancestor matches;
+    the caller then tries the fully resolved path to accept target-side spellings.
     """
     parts: list[str] = []
     current = candidate
@@ -1210,31 +889,15 @@ def _under_root(candidate: Path, root_real: Path) -> str | None:
 
 
 def normalize_declared(raw: list[str], root: Path) -> Declaration:
-    """Resolve declared paths into the same namespace the detected paths use.
+    """Normalize declarations into the detected paths' namespace.
 
-    A declared path arrives however the executor spelled it: absolute,
-    root-relative, `~`-prefixed, or reached through a symlinked temp directory
-    (`/tmp` against `/private/tmp` on macOS). Detected paths are root-relative
-    and built from `os.path.realpath(root)`. A spelling difference between the
-    two is not cosmetic: it drops a path the run admits writing out of
-    `violations` and into `unattributed_out_of_scope`, which reads as another
-    writer's change and is exactly the fail-open this design closes. Resolve
-    both ends the same way, once, here.
+    Accept absolute, root-relative, tilde-prefixed, and symlinked spellings.
+    Resolve relative paths against the watch root, not the working directory;
+    prefer absolute declarations. Use _under_root to retain symlinks beneath
+    root while resolving aliases such as /tmp and /private/tmp.
 
-    A relative path is resolved against the watch root, not the process's
-    working directory: Step 6a runs in whatever directory the executor happens
-    to be in, and the root is the only namespace both ends of the comparison
-    share. An absolute path is the unambiguous form and is what the docs ask
-    for.
-
-    A declared path that lands outside the watched root is kept separately. It
-    cannot be checked against a snapshot that never covered it, so it is
-    reported rather than silently dropped or blamed.
-
-    "Outside the root" is decided by `_under_root`, which keeps the spelling a
-    symlinked directory inside the root gives a path. A full `realpath` would
-    put every file under `~/.claude/skills/{name}` outside the root the moment
-    that directory is a symlink into a checkout, which is its ordinary state.
+    Keep outside-root declarations separate: the snapshot cannot check them,
+    so report them without silently discarding or attributing changes.
     """
     root_real = Path(_real(root))
     inside: set[str] = set()
@@ -1268,30 +931,18 @@ def normalize_declared(raw: list[str], root: Path) -> Declaration:
 def verify(root: Path, state: dict, scope: list[str],
            exclude: set[Path] | None = None,
            declared: Declaration | None = None) -> dict:
-    """Compare the live tree against a snapshot and bucket every change.
+    """Compare live state with the snapshot and classify changes.
 
-    Three verdicts, and the third one is the point. `clean` means the tree was
-    read and held no out-of-scope change. `scope_violation` means it held one
-    THIS RUN DECLARED WRITING, which is the only kind the caller may revert.
-    `not_measurable` means the question was not answered: git went quiet, a
-    nested repository could not be hashed, an out-of-scope file changed that
-    this run did not declare, or no declaration was supplied at all.
-
-    The declaration is what separates the second verdict from the third, and it
-    has to be, because the tree cannot. A file that changed during the round
-    looks identical whether this run wrote it or the user's editor did, and the
-    documented response to a violation is `git checkout` of the listed paths.
-    Attributing from the diff put the user's own uncommitted work in
-    `violations` and the run's real out-of-scope edit in
-    `unattributed_out_of_scope`, firing the destructive branch in precisely the
-    case where attribution was unsound. Reporting an undeclared change and
-    halting loses a round; reverting it loses the work.
+    clean requires measurable coverage and attribution with no violations.
+    scope_violation identifies out-of-scope changes declared by this run.
+    not_measurable covers unreadable state, undeclared changes, or absent
+    attribution. A tree diff cannot distinguish this run from another writer;
+    only declarations authorize attribution and a possible restore.
     """
     blind: list[str] = []
     unreadable: list[str] = []
-    # Paths the walk could neither hash nor descend, at snapshot time and at
-    # verify time. Git mode routes its own straight into `blind` through
-    # `_classify_nested`; walk mode collects them here and does the same below.
+    # Collect unreadable walk paths at both snapshots. Git-mode blind paths
+    # come from _classify_nested.
     unmeasurable: list[dict] = []
     mode = state.get("mode")
     declaration = declared if declared is not None else ABSENT
@@ -1301,15 +952,11 @@ def verify(root: Path, state: dict, scope: list[str],
              blind, unreadable) = _classify_git(root, state, exclude)
         except Blind as exc:
             return _blind_report(root, scope, state, exc.reasons, declaration)
-        # Which paths the snapshot holds a pre-image for, which is exactly the
-        # set that was already dirty or untracked when the run began.
+        # Pre-images cover files already dirty or untracked at snapshot.
         pre_image_paths = set(_pre_images(state))
     elif mode == "walk":
         manifest = state.get("files", {})
-        # The snapshot's own budget. Without it a walk root that grew past the
-        # limit between snapshot and verify was hashed without bound, while
-        # every other walk in this file -- the snapshot, the nested subtrees --
-        # is bounded.
+        # Bound verify by the snapshot budget, including trees that have grown.
         limit = state.get("max_files")
         if not isinstance(limit, int) or isinstance(limit, bool):
             limit = DEFAULT_MAX_FILES
@@ -1320,9 +967,7 @@ def verify(root: Path, state: dict, scope: list[str],
                 f"the watched tree holds more than {exc.limit} file(s) at "
                 f"verify time, over the budget its snapshot was taken under, "
                 f"so it was not hashed"], declaration)
-        # Both ends of the comparison. A path the snapshot could not read is
-        # as unmeasurable as one the verify cannot: either way its content at
-        # one end is unknown and no comparison can be made.
+        # An unreadable path at either end prevents comparison.
         unmeasurable = _unmeasurable(state) + walked
         unreadable = sorted(
             p for p in set(manifest) | set(current)
@@ -1335,46 +980,33 @@ def verify(root: Path, state: dict, scope: list[str],
         )
         added = sorted(set(current) - set(manifest) - skip)
         removed = sorted(set(manifest) - set(current) - skip)
-        # In walk mode the hash manifest IS the check, so git having nothing to
-        # say costs no visibility. It only feeds the informational
-        # `preexisting_dirty_out_of_scope` list.
+        # Walk hashes supply verification; git only adds informational pre-existing dirt.
         git_changed = _git_changed(root)
-        # Walk mode is what runs outside a repository, so every path has a
-        # pre-image and none of them has a HEAD to be checked out back to.
+        # Walk-mode files have pre-images but no repository HEAD to restore.
         pre_image_paths = set(manifest)
     else:
-        # A manifest whose mode is missing or unrecognised used to fall through
-        # to the walk branch, where an absent `files` map made every file under
-        # the root `added` and the caller was handed the whole tree as a revert
-        # list. `_run_verify` guards the analogous `--root` mismatch for the
-        # same reason. Nothing was compared here, so say that.
+        # Unknown modes cannot support comparison. Falling through to an empty
+        # walk manifest would falsely classify the whole tree as added.
         return _blind_report(root, scope, state, [
             f"the manifest records mode {mode!r}, which this guard cannot "
             f"read, so nothing in the watched tree was compared"], declaration)
 
     changed = sorted(set(modified) | set(added) | set(removed))
     out_of_scope = [p for p in changed if not _in_scope(p, scope)]
-    # Attribution, and the only place it happens. A change this run declared
-    # writing is one it caused and may revert; anything else out of scope
-    # belongs to another writer and is reported, never reverted.
+    # Attribute only declared writes. Undeclared changes may belong to another writer.
     violations = sorted(p for p in out_of_scope if p in declaration)
     unattributed = sorted(p for p in out_of_scope if p not in declaration)
-    # Violations `git checkout` cannot correctly undo. It works on one shape
-    # only, a file clean and tracked when the run began, where HEAD still holds
-    # what the run overwrote. A file already dirty at snapshot loses the user's
-    # earlier edits too; a file the run created has no HEAD content to return
-    # to. Attribution is sound either way -- the run declared these -- so they
-    # stay violations and only the instruction differs.
+    # A HEAD restore is valid only for originally clean tracked files. Dirty
+    # files need their saved contents; newly created files have no prior HEAD
+    # content. Keep these declared violations but require manual restoration.
     added_set = set(added)
     violations_manual = sorted(
         p for p in violations if p in pre_image_paths or p in added_set)
     declared_out_of_scope = sorted(
         p for p in (declaration.paths or set()) if not _in_scope(p, scope))
     in_scope_new = sorted(p for p in added if _in_scope(p, scope))
-    # The one check that can catch a declaration that is simply wrong: an
-    # honest run declares its in-scope edits, so an undeclared one proves the
-    # declaration incomplete -- and an incomplete declaration is what would let
-    # a real out-of-scope write pass as another writer's.
+    # Undeclared in-scope changes show an incomplete declaration, which cannot
+    # reliably attribute out-of-scope changes.
     undeclared_in_scope = sorted(
         p for p in changed if _in_scope(p, scope) and p not in declaration
     ) if declaration.present else []
@@ -1393,10 +1025,8 @@ def verify(root: Path, state: dict, scope: list[str],
         f"not declare writing it, so another writer changed it and it must "
         f"not be reverted" for path in unattributed
     )
-    # Declared out of scope, yet nothing there changed. The run's own admission
-    # is enough to refuse a `clean`, and not enough to order a revert: the path
-    # may be an untracked file that predates the round, and reverting one means
-    # deleting it.
+    # A declared out-of-scope write without a detected change blocks clean,
+    # but provides no basis to restore or delete a possibly pre-existing file.
     blind.extend(
         f"this run declared it wrote {path!r}, which is outside the permitted "
         f"scope, but no change was detected there"
@@ -1407,19 +1037,15 @@ def verify(root: Path, state: dict, scope: list[str],
         f"root, so whether it changed could not be checked"
         for path in declaration.outside_root
     )
-    # An unreadable file is the plainest form of "could not see": it exists and
-    # its content is unknown at one or both ends of the comparison. Reported
-    # out of scope only, since in scope this run is free to change it anyway.
+    # Unknown file content at either end is unmeasurable outside scope.
+    # In-scope files remain permitted edits.
     blind.extend(
         f"{path!r} could not be read, so whether it changed during the round "
         f"is unknown" for path in sorted(unreadable) if not _in_scope(path, scope)
     )
-    # Cases 4 to 8 of the module docstring's enumeration: an entry the walk
-    # could neither hash nor descend. Reported on the same terms as an
-    # unreadable file, and out of scope only for the same reason -- inside the
-    # scope this run is free to change what it likes. An unreadable directory
-    # in scope hides only paths that are themselves in scope, since `_in_scope`
-    # matches on the path prefix.
+    # Unwalkable entries (module cases 4-8) are unmeasurable outside scope.
+    # An in-scope unreadable directory hides only permitted descendants because
+    # _in_scope matches prefixes.
     seen: set[tuple[str, str]] = set()
     for entry in sorted(unmeasurable, key=lambda item: item["path"]):
         key = (entry["path"], entry["reason"])
@@ -1429,9 +1055,7 @@ def verify(root: Path, state: dict, scope: list[str],
         blind.append(
             f"{entry['path']!r} could not be read during the round because "
             f"{entry['reason']}, so whether anything changed there is unknown")
-    # The scope itself sitting under an ignored directory name would make every
-    # edit the run is supposed to make invisible, and a tree nothing was read
-    # from must not come back `clean`.
+    # An ignored scope makes authorized edits invisible and cannot pass verification.
     blind.extend(
         f"the permitted scope {entry!r} lies under an ignored directory name, "
         f"so nothing inside it was read" for entry in scope
@@ -1440,16 +1064,8 @@ def verify(root: Path, state: dict, scope: list[str],
 
     preexisting = []
     if git_changed is not None:
-        # Git reports a file dirty relative to HEAD; the manifest reports it
-        # relative to this run's start. A file git calls dirty whose hash still
-        # matches the snapshot was already dirty before the run began — someone
-        # else's uncommitted work, not ours.
-        #
-        # This must NOT be a violation. The caller's documented response to a
-        # violation is to revert the offending paths, and reverting a file this
-        # run never touched destroys whatever uncommitted work was sitting
-        # there. Report it as context and let the hash manifest, which is the
-        # only signal that can attribute a change to this run, decide.
+        # A dirty file matching its snapshot predates this run. Report it as
+        # context, never a violation or restoration target.
         changed_set = set(changed)
         preexisting = sorted(
             p for p in git_changed
@@ -1471,18 +1087,16 @@ def verify(root: Path, state: dict, scope: list[str],
         "modified_in_scope": sorted(p for p in modified if _in_scope(p, scope)),
         "new_files_in_scope": in_scope_new,
         "violations": violations,
-        # The subset of `violations` a `git checkout` would damage: the file
-        # was already dirty or untracked at snapshot, so restore this run's
-        # edit by hand instead.
+        # These violations need saved-content restoration; HEAD would discard
+        # pre-existing edits or cannot restore an untracked file.
         "violations_manual_revert": violations_manual,
-        # Changed out of scope and undeclared, so somebody else's. Report, never revert.
+        # Undeclared out-of-scope changes: report without restoring.
         "unattributed_out_of_scope": unattributed,
         # Changed in scope without being declared. The declaration is incomplete.
         "undeclared_in_scope": undeclared_in_scope,
         # Dirty in git before this run started. Informational: never revert these.
         "preexisting_dirty_out_of_scope": preexisting,
-        # Everything the run admitted writing outside its permitted scope,
-        # whether or not a change was detected there.
+        # Include all declared out-of-scope writes, even without detected changes.
         "declared_out_of_scope": declared_out_of_scope,
         "declared_outside_root": declaration.outside_root,
         "declaration_present": declaration.present,
@@ -1507,11 +1121,9 @@ def verify(root: Path, state: dict, scope: list[str],
 def _blind_report(root: Path, scope: list[str], state: dict,
                   reasons: list[str],
                   declaration: Declaration | None = None) -> dict:
-    """The report for a verify that could not read the tree it was asked about.
+    """Return a non-passing report when the tree could not be read.
 
-    Same shape as a normal report so the caller parses one thing, with empty
-    change lists and a verdict that is not a pass. The empty lists used to be
-    the whole report, under `verdict: "clean"`.
+    Keep the normal schema with empty change lists; these do not imply clean.
     """
     declaration = declaration if declaration is not None else ABSENT
     report = {
@@ -1543,10 +1155,9 @@ def _blind_report(root: Path, scope: list[str], state: dict,
 
 
 def _same_dir(recorded: str, root: Path) -> bool:
-    """True when a manifest's recorded root names the same directory as `root`.
+    """Compare the recorded root with root, literally then after resolution.
 
-    String equality first (the snapshot writes `str(root)` unresolved), then a
-    resolved comparison so a symlinked or `~`-spelled path is not a mismatch.
+    Resolution accepts symlinked and tilde-prefixed spellings.
     """
     if recorded == str(root):
         return True
@@ -1578,12 +1189,10 @@ def _fail(message: str) -> None:
 
 
 def _display(text: str) -> str:
-    """A form of `text` that is safe to print on any terminal encoding.
+    """Make text printable under the terminal encoding.
 
-    Paths carry surrogate escapes when the filesystem holds non-UTF-8 bytes,
-    and printing one raises `UnicodeEncodeError` out of the reporting code
-    after the check has already succeeded. Only the human-readable output needs
-    this; `--json` escapes surrogates on its own.
+    Filesystem paths can contain surrogate escapes. Sanitize human-readable
+    output to avoid UnicodeEncodeError; JSON already escapes surrogates.
     """
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
@@ -1650,9 +1259,8 @@ def main() -> None:
         if artifact.is_dir():
             _fail(f"--artifact must be a file, not a directory: {artifact}. "
                   "For a skill, pass the SKILL.md inside it.")
-        # Resolve the install directory and nothing below it. A full realpath
-        # here is what made the watch root come from the symlink target rather
-        # than the install directory; see `access_path`.
+        # Preserve the install namespace instead of following artifact symlinks
+        # into their source checkouts; see access_path.
         artifact = access_path(artifact, args.artifact_type)
 
     manifest_path = Path(args.manifest).expanduser()
@@ -1679,21 +1287,17 @@ def _resolve_scope(artifact: Path | None, artifact_type: str | None,
             if index == 0:
                 _fail(f"artifact {artifact} is not inside the watch root {root}")
                 return []  # unreachable; _fail exits
-            # A companion directory outside the watch root is not in the
-            # watched tree at all, so it cannot produce a finding and needs no
-            # scope entry. The artifact itself falling outside is the error.
+            # Companions outside the watch need no scope entry; an artifact outside
+            # the watch is an error.
     return resolved
 
 
 def _declared_paths(args) -> list[str] | None:
-    """The raw declared paths from the CLI, or None when nothing was declared.
+    """Return CLI declarations, or None when absent.
 
-    `--declared-file` accepts three shapes so the executor can point it at
-    whatever it already writes: a bare list, `{"edited_paths": [...]}`, or a
-    workflow state file carrying `applied_edits.edited_paths`. A file that
-    holds none of them is a usage error rather than an empty declaration --
-    the caller aimed at a declaration and there is not one there, and reading
-    that as "wrote nothing" would quietly disarm the check.
+    --declared-file accepts a list, {"edited_paths": [...]}, or workflow state
+    with applied_edits.edited_paths. Missing declaration fields are usage errors,
+    not an implicit claim that the run wrote nothing.
     """
     if args.declared_none:
         return []
@@ -1717,11 +1321,8 @@ def _declared_paths(args) -> list[str] | None:
                   f"or a state file with applied_edits.edited_paths")
             return None
         if not found and not raw:
-            # An empty list here is `--declared-none` arrived at by accident,
-            # which is the one reading of a declaration that must never be
-            # inferred. The handoff schema requires a non-empty `edited_paths`
-            # alongside `edit_count >= 1`, so an empty one means the run failed
-            # to record what it wrote.
+            # Empty edited_paths is not an implicit --declared-none. Handoff state
+            # requires non-empty paths with edit_count >= 1.
             _fail(f"--declared-file {args.declared_file} declares an empty "
                   f"list. If this run really wrote nothing, say so with "
                   f"--declared-none; otherwise record the paths it wrote.")
@@ -1793,8 +1394,7 @@ def _run_snapshot(args, artifact: Path | None, manifest_path: Path,
         "scope": scope,
         "mode": state.get("mode"),
         "nested_repos": sorted(state.get("nested", {}) or {}),
-        # Paths only: the reasons go to the human on the text path below, and
-        # the manifest keeps the full records for --verify to read back.
+        # Keep reasons in the manifest and text output; this payload lists paths only.
         "unmeasurable": [entry["path"] for entry in unmeasurable],
     }
     if fallback:
@@ -1831,16 +1431,12 @@ def _run_verify(args, artifact: Path | None, manifest_path: Path,
 
     recorded_root = payload.get("root")
 
-    # --verify reads root and scope back out of the manifest so the caller
-    # never has to reproduce them. Step 5a and Step 6a are separate tool calls
-    # and shell state does not survive between them; asking the executor to
-    # re-derive $SCOPE_ROOT is exactly how the root-mismatch bug happened.
+    # Reload root and scope from the manifest; shell state does not persist
+    # between snapshot and verify calls.
     if args.root:
         root = Path(args.root).expanduser()
-        # The manifest records the root it was taken under. Under a different
-        # root every recorded path is missing and every present path is new, so
-        # the report lists the whole tree under `violations` -- and the
-        # documented response to a violation is "revert only the paths listed".
+        # Reject root mismatches; comparing different trees would fabricate
+        # removed and added paths across both.
         if (
             isinstance(recorded_root, str)
             and recorded_root
@@ -1881,8 +1477,7 @@ def _run_verify(args, artifact: Path | None, manifest_path: Path,
         print(f"VERDICT: {report['verdict']} (root: {root}; "
               f"scope: {', '.join(report['scope'])})")
         counts = report["counts"]
-        # `violations` alone under-reads as "nothing happened out of scope"
-        # whenever the out-of-scope changes were all unattributable.
+        # Include unattributed changes so the summary does not imply none occurred.
         out_of_scope = counts["violations"] + counts["unattributed"]
         print(f"  {counts['modified']} modified, {counts['added']} added, "
               f"{counts['removed']} removed, {out_of_scope} out of scope "
@@ -1914,24 +1509,19 @@ def _run_verify(args, artifact: Path | None, manifest_path: Path,
         for reason in report["not_measurable_reasons"]:
             print(f"  UNCHECKED: {_display(reason)}")
         if not report["git_available"] and report.get("mode") != "git":
-            # Only true of a walk-mode manifest, which hashes the whole tree.
-            # A git-mode manifest stores no whole-tree hashes, so when git goes
-            # quiet there nothing was checked at all -- and the verdict above
-            # is `not_measurable`, not `clean`.
+            # Only walk manifests provide whole-tree hashes. If git-mode verification
+            # loses git, nothing was checked and the verdict is not_measurable.
             print("  NOTE: git unavailable here; hash manifest was the only check")
 
     sys.exit(VERDICT_EXITS.get(report["verdict"], 1))
 
 
 def _cli() -> None:
-    """`main()` with every uncaught error routed away from exit 1.
+    """Run main, mapping uncaught errors to exit 2 rather than exit 1.
 
-    Exit 1 is `scope_violation`, and the caller's branch table answers it by
-    reverting the paths under `violations`. A traceback exits 1 too, and prints
-    no report at all, so a crash read as an order to revert a list the caller
-    cannot even read. Anything unplanned is exit 2: the check never ran, revert
-    nothing, halt. `SystemExit` passes through untouched so the verdict codes
-    the body sets still reach the shell.
+    Exit 1 means scope_violation and needs a readable violations report. On an
+    unexpected error, halt without restoring files. Preserve SystemExit so
+    intentional verdict codes reach the shell.
     """
     try:
         main()

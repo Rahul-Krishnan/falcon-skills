@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""Enrich eval criteria with deterministic required_present checks.
+"""Add deterministic required_present anchors from semantic check descriptions.
 
-Extracts underscore identifiers from semantic check descriptions, verifies
-them against the artifact content, and adds high-confidence anchors as
-required_present entries. Conservative by design: only adds identifiers
-that exist verbatim in the artifact and are specific enough to avoid
-false positives on valid responses.
+Select specific underscore identifiers that appear verbatim in the artifact.
 
 Usage:
     enrich_programmatic_checks.py --artifact-path PATH --criteria-path PATH [--json] [--max-per-test N]
@@ -63,11 +59,7 @@ def extract_identifiers(text: str) -> list[str]:
 
 
 def get_check_texts(test_case: dict) -> list[str]:
-    """Extract check description texts from a test case.
-
-    Only reads the 'description' field, NOT rubric values.
-    Rubric text contains implementation details that should not become anchors.
-    """
+    """Read check descriptions only; rubric details must not become anchors."""
     texts: list[str] = []
 
     for check in test_case.get("checks", []):
@@ -137,11 +129,7 @@ def enrich_test_case(
     artifact_content: str,
     max_per_test: int,
 ) -> dict:
-    """Enrich a single test case with required_present checks.
-
-    Returns a dict with enrichment results. Does not modify the test_case
-    in place -- the caller handles YAML mutation.
-    """
+    """Return proposed required_present additions without mutating test_case."""
     test_id = test_case.get("id", "unknown")
     # Normalize hyphen/underscore so legacy "error-handling" spellings still
     # hit the guard; the schema enum's canonical spelling is "error_handling".
@@ -176,22 +164,9 @@ def enrich_test_case(
     filtered = filter_candidates(
         raw_candidates, artifact_content, existing_absent, existing_present
     )
-    # max_per_test budgets the test case's total enrichment, not this
-    # invocation's. filter_candidates already drops anything in
-    # required_present, so a per-invocation cap simply promoted the next N
-    # candidates on every run and required_present grew without bound (5, then
-    # 10, then 12). Phase 1 and Phase 3 both run this script over the same
-    # criteria, so Phase 3 was scoring against strictly more anchors than
-    # Phase 1 did, and score_programmatic_checks divides by that count: the
-    # before/after delta mixed an artifact change with a criteria change while
-    # phase3-reevaluation.md promises the refresh is idempotent, and auto-revert
-    # reads that delta.
-    #
-    # Only identifier-shaped entries count against the budget. That is the same
-    # ownership rule strip_stale_present uses for removals, and it is the whole
-    # shape enrichment ever adds; charging hand-written phrases (which assert on
-    # the agent response, not the artifact text) would starve a test case of
-    # deterministic anchors it never received.
+    # Cap total identifier-shaped enrichment across invocations so repeated
+    # Phase 1/3 refreshes stay idempotent. Handwritten phrases do not consume
+    # this budget; they are outside enrichment ownership.
     owned = sum(
         1
         for entry in existing_present
@@ -210,16 +185,11 @@ def enrich_test_case(
 
 
 def strip_stale_present(test_case: dict, artifact_content: str) -> list[str]:
-    """Remove enrichment-shaped required_present entries no longer in artifact.
+    """Remove identifier-shaped anchors absent from the edited artifact.
 
-    Phase 3 relies on re-running this script after edits: a Phase 2 rename
-    would otherwise leave the old identifier in required_present, score
-    MISSING deterministically on every re-eval, and trigger auto-revert of a
-    correct improvement. Only identifier-shaped entries (the only shape
-    enrichment ever adds) are candidates; hand-written phrases are left alone
-    because they assert on the agent response, not the artifact text.
-
-    Mutates test_case in place. Returns the removed entries.
+    Refresh before re-evaluation so renamed identifiers do not cause false
+    regressions. Preserve handwritten phrases, which constrain agent responses.
+    Mutates test_case and returns the removed entries.
     """
     existing = test_case.get("required_present", [])
     if not isinstance(existing, list):
@@ -325,10 +295,8 @@ def main() -> None:
     total_removed = 0
 
     for test_case in test_cases:
-        # Strip stale identifiers first so a renamed identifier can be
-        # re-added under its new name in the same pass. Same population as
-        # additions: error-handling tests are never enriched, so their
-        # entries are never enrichment-owned.
+        # Remove stale identifiers before adding replacements. Error-handling
+        # tests are never enriched, so their entries are not ours to remove.
         removed: list[str] = []
         if test_case.get("category", "").lower().replace("-", "_") != "error_handling":
             removed = strip_stale_present(test_case, artifact_content)
@@ -390,9 +358,7 @@ def main() -> None:
             )
         sys.exit(0)
 
-    # Always back up before overwriting. The caller used to be told to run `cp`
-    # by hand, which made the safety property depend on the model remembering a
-    # separate step. Fail closed if the backup cannot be written.
+    # Back up before overwriting; abort if the backup cannot be written.
     backup_path = f"{criteria_path}.pre-enrich"
     try:
         with open(criteria_path) as original:

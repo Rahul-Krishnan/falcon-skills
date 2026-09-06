@@ -187,9 +187,7 @@ class TestEnrichTestCase(unittest.TestCase):
 
 
 class TestIdempotency(unittest.TestCase):
-    # A 12-identifier description, well over the default cap of 5. The original
-    # test used 2 candidates against a cap of 5, so the pool never exceeded the
-    # cap and the per-invocation budget bug was invisible.
+    # Use twelve candidates against the default cap of five to exercise the limit.
     OVERSUBSCRIBED_CHECK = (
         "Covers max_rounds, target_score, progress_gates, handoff_interfaces, "
         "state_persistence, schema_validation, anti_laziness, research_depth, "
@@ -217,9 +215,7 @@ class TestIdempotency(unittest.TestCase):
         self.assertEqual(result2["added"], [])
 
     def test_cap_is_per_test_case_not_per_invocation(self) -> None:
-        # The Phase 1 / Phase 3 hazard: both phases enrich the same criteria,
-        # so a per-invocation cap grew required_present 5 -> 10 -> 12 and
-        # Phase 3 scored against strictly more anchors than Phase 1 did.
+        # Repeated Phase 1/3 enrichment must not increase the existing anchor count.
         test_case = {
             "id": "TC-001",
             "category": "invocation",
@@ -247,8 +243,7 @@ class TestIdempotency(unittest.TestCase):
         self.assertEqual(self._run(test_case), [])
 
     def test_raised_cap_admits_more_anchors(self) -> None:
-        # Converging is not the same as freezing: raising the cap between runs
-        # must still let the next most specific identifiers in.
+        # Raising the cap must permit the next most specific identifiers.
         test_case = {
             "id": "TC-003",
             "category": "invocation",

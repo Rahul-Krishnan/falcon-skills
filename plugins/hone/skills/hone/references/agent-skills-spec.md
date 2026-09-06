@@ -1,6 +1,6 @@
-# Agent Skills Open Standard — Key Requirements
+# Agent Skills Open Standard requirements
 
-Extracted from [agentskills.io/specification](https://agentskills.io/specification) for use by hone when evaluating and improving skills.
+Requirements from [agentskills.io/specification](https://agentskills.io/specification) for evaluating and improving skills.
 
 ## Directory Structure
 
@@ -24,15 +24,15 @@ skill-name/
 | `metadata` | No | Arbitrary key-value map (string→string). For custom fields. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools. Experimental. |
 
-**Any non-spec field at the frontmatter root level is a violation.** Move custom fields to `metadata`.
+Move non-spec frontmatter fields to `metadata`; root-level custom fields violate the spec.
 
 ## Description Best Practices
 
 - **Use imperative phrasing:** "Use this skill when..." not "This skill does..."
 - **Focus on user intent, not implementation:** Describe what the user is trying to achieve.
-- **Be pushy about activation:** List contexts where the skill applies, including non-obvious cases.
+- **Activation:** List applicable contexts, including non-obvious cases.
 - **Include anti-patterns:** Describe when NOT to use the skill (overlap with similar skills).
-- **Keep concise:** A few sentences to a short paragraph. Hard limit: 1024 chars.
+- **Length:** A few sentences; at most 1024 chars.
 
 ## Progressive Disclosure
 
@@ -46,25 +46,25 @@ Three levels of context loading:
 
 ## Body Content Best Practices
 
-- **Add what the agent lacks, omit what it knows.** Don't explain common concepts.
-- **Design coherent units.** One skill = one coherent unit of work.
-- **Aim for moderate detail.** Concise stepwise guidance > exhaustive documentation.
+- **Assume common knowledge.** Add only what the agent needs.
+- **Scope:** One skill per coherent unit of work.
+- **Detail:** Give concise steps.
 - **Match specificity to fragility.** Be prescriptive for fragile operations, flexible for judgment calls.
 - **Provide defaults, not menus.** Pick one approach, mention alternatives briefly.
 - **Favor procedures over declarations.** Teach how to approach problems, not what to produce.
 
 ## Patterns
 
-- **Gotchas sections:** Concrete corrections to mistakes the agent WILL make.
-- **Templates:** Concrete output format examples (pattern-match friendly).
+- **Gotchas:** Corrections to predictable mistakes.
+- **Templates:** Output format examples.
 - **Checklists:** Track progress in multi-step workflows.
 - **Validation loops:** Do work → validate → fix → repeat.
 - **Plan-validate-execute:** For batch/destructive operations.
 
 ## File References
 
-Use relative paths from skill root. Keep one level deep. The paths in the block
-below are illustrative spec syntax, not live references into this skill.
+Use paths relative to the skill root, one level deep. These examples illustrate
+the syntax; they do not reference this skill:
 ```markdown
 See [the reference guide](references/REFERENCE.md) for details.
 Run: scripts/structural_audit.py

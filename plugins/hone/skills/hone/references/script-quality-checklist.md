@@ -1,10 +1,10 @@
 # Script Quality Checklist
 
-Reference for hone structural audit pillar 11: evaluating bundled scripts for agentic design principles.
+Checklist for bundled scripts, used by structural audit pillar 11.
 
 ## Mechanical Checks (5, run by structural_audit.py)
 
-These are regex-based pattern checks run during the structural audit. Each produces a binary pass/fail.
+Each regex check returns pass/fail.
 
 | # | Check | Pattern | Pass | Fail |
 |---|-------|---------|------|------|
@@ -16,11 +16,11 @@ These are regex-based pattern checks run during the structural audit. Each produ
 
 ## LLM-Judged Criteria (5, evaluated during Phase 2 fresh-eyes analysis)
 
-These require holistic judgment and are assessed by the fresh-eyes subagent during fresh-eyes analysis.
+The fresh-eyes subagent judges these criteria.
 
 ### 1. Idempotency
 
-**Question:** Can this script be run twice with the same input and produce the same output without side effects?
+Can repeated runs with identical input produce the same output without side effects?
 
 **Pass criteria:**
 - No append-only file writes without truncation
@@ -34,7 +34,7 @@ These require holistic judgment and are assessed by the fresh-eyes subagent duri
 
 ### 2. Dry-run Safety
 
-**Question:** Does this script support a way to preview what it would do without actually doing it?
+Can the user preview the script's effects?
 
 **Pass criteria:**
 - Has `--dry-run` or `--preview` flag, OR
@@ -43,11 +43,11 @@ These require holistic judgment and are assessed by the fresh-eyes subagent duri
 
 **Fail signals:**
 - Immediately performs destructive operations (file deletes, API calls) with no preview
-- No way to see what would happen before it happens
+- No preview of effects
 
 ### 3. Predictable Output Size
 
-**Question:** Is the output size bounded and predictable regardless of input size?
+Is output size bounded and predictable?
 
 **Pass criteria:**
 - Output is O(input) or better (summarization, filtering)
@@ -61,7 +61,7 @@ These require holistic judgment and are assessed by the fresh-eyes subagent duri
 
 ### 4. Helpful Error Messages
 
-**Question:** When the script fails, does it tell the user what went wrong and how to fix it?
+Do errors explain the failure and how to fix it?
 
 **Pass criteria:**
 - Error messages include: what failed, why, and suggested fix
@@ -75,7 +75,7 @@ These require holistic judgment and are assessed by the fresh-eyes subagent duri
 
 ### 5. Safe Defaults
 
-**Question:** Does the script's default behavior minimize blast radius?
+Do defaults minimize the scope of damage?
 
 **Pass criteria:**
 - Defaults to read-only or dry-run when destructive
@@ -89,12 +89,12 @@ These require holistic judgment and are assessed by the fresh-eyes subagent duri
 
 ## How Hone Uses This
 
-1. **Structural audit (pillar 11):** Runs the 5 mechanical checks. Results are `WARNING_ONLY` — they inform but don't block.
-2. **Fresh-eyes analysis:** When the artifact has a `scripts/` directory, the fresh-eyes subagent reads this checklist and evaluates each bundled script against the 5 LLM-judged criteria.
-3. **Improvement plan:** Script quality findings appear as `fix_type: "script"` entries. They are lower priority than structural and content fixes unless a script has critical safety issues (no exit codes + destructive defaults).
+1. **Structural audit (pillar 11):** Runs the 5 mechanical checks as non-blocking `WARNING_ONLY` findings.
+2. **Fresh-eyes analysis:** For artifacts with `scripts/`, the subagent reads this checklist and judges each script against the 5 criteria.
+3. **Improvement plan:** Record findings as `fix_type: "script"`, below structural and content fixes unless safety is critical (no exit codes + destructive defaults).
 
 ## When NOT to Use
 
 - Artifacts without a `scripts/` directory
-- Test files (`test_*.py`) — these are evaluated by different criteria
+- Test files (`test_*.py`), which use different criteria
 - Scripts that are explicitly documented as one-shot or interactive by design

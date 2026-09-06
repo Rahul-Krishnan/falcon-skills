@@ -1,9 +1,8 @@
 # Improve a candidate
 
-Read the frozen task requirements, baseline observations, and the relevant source.
-Classify each failure by inspecting evidence: artifact defect, fixture/grader defect,
-harness failure, or uncertain observation. This classification requires judgment;
-a numeric threshold cannot decide which component is wrong.
+Read frozen requirements, baseline observations, and source. Use the evidence to
+classify failures as artifact defects, fixture/grader defects, harness failures, or
+uncertain observations. Classification requires judgment, not a numeric threshold.
 
 Fix an invalid experiment before comparing candidates. Version changed cases,
 fixtures, or graders and run both arms again under the corrected setup. Re-scoring
@@ -12,25 +11,22 @@ task or execution environment. Never silently relax a check to make the candidat
 
 ## Plan a small coherent change
 
-For each proposed edit, state the task failure or maintenance problem it addresses,
-the requirement it preserves, and how it will be checked. Prefer a focused change
-to an unrelated cleanup. Do not change the product, user preferences, project
-settings, or companion skills just to improve a grade.
+For each edit, state the failure or maintenance problem, the requirement preserved,
+and the check. Keep changes focused. Do not change the product, user preferences,
+project settings, or companion skills to improve a grade.
 
-Challenge instructions that duplicate model capabilities, repeat a check already
-enforced by tooling, or impose unnecessary decomposition. Remove a coherent group
-and compare against the frozen baseline. Preserve explicit user preferences and
-permission boundaries across arms. Absence of a failure in a small suite is limited
-evidence, not proof that an instruction is universally unnecessary.
+Challenge instructions that duplicate model capabilities or tool checks, or split
+tasks unnecessarily. Remove a coherent group and compare with the frozen baseline,
+preserving user preferences and permissions across arms. A small passing suite
+cannot prove that an instruction is universally unnecessary.
 
-Keep deterministic helpers when they provide reliable useful work. Check callers
-before consolidating or retiring one. Add a validator only for an actual contract
-or demonstrated failure; do not compile every emphatic word into a new program.
+Keep useful, reliable deterministic helpers and check callers before consolidation
+or retirement. Add validators only for actual contracts or demonstrated failures.
 
-An independent reviewer receives task requirements, source, and raw failure evidence,
-without the editor's proposed answer. Review ambiguous or consequential changes;
-do not require a panel for every small correction. Resolve disagreement against
-sources or tests. Record unresolved judgment explicitly instead of averaging it away.
+Give an independent reviewer the requirements, source, and raw failure evidence,
+withholding the editor's proposal. Review ambiguous or consequential changes; small
+corrections do not need a panel. Resolve disagreements through sources or tests
+and record those that remain unresolved.
 
 ## Protect the edit boundary
 
@@ -41,10 +37,9 @@ write, snapshot the exact edit target using the existing guard:
 python3 "$HONE_DIR/scripts/check_scope.py" --artifact "$EDIT_PATH" --type "$ARTIFACT_TYPE" --manifest "$RUN_DIR/scope.json" --snapshot --json
 ```
 
-Resolve `HONE_DIR` from the host-injected skill directory, or the discovered actual
-hone directory. `EDIT_PATH` is maintained source, not the installed copy used for
-reading. The guard derives its watch root and artifact scope separately. Report
-narrowed coverage (`root_fallback`) instead of describing it as complete protection.
+Resolve `HONE_DIR` from the host-injected or discovered hone directory. Set
+`EDIT_PATH` to maintained source. The guard derives its watch root and artifact
+scope separately; report `root_fallback` as narrowed coverage.
 
 Preserve a byte-for-byte original snapshot of every file to be changed, including
 pre-existing uncommitted content. Record which paths did not exist. Before applying
@@ -77,7 +72,6 @@ the post-hoc scope guard does not make an unrestricted executor safe.
 
 ## Handoff to verification
 
-Save the candidate identity, exact edits, active scope manifest, current file hashes,
-and the checks to rerun. Re-read changed files to confirm the edit landed. Update
-state to `verify`; do not record a successful outcome until the candidate's actual
-results have been inspected.
+Save the candidate identity, edits, active scope manifest, file hashes, and checks
+to rerun. Read back changes and set state to `verify`. Record success only after
+inspecting the candidate's results.

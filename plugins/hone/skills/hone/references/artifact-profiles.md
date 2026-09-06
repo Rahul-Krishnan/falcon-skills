@@ -2,22 +2,21 @@
 
 ## Discovery
 
-Honor an explicit path. Otherwise inspect the host's actual skill catalog and the
-configured directories for the named type. Resolve symlinks before deciding whether
-two matches are duplicates. In Claude Code, common paths are `.claude/skills/`,
+Honor an explicit path. Otherwise inspect the host's skill catalog and configured
+directories for the named type. Resolve symlinks before identifying duplicates.
+In Claude Code, common paths are `.claude/skills/`,
 `.claude/commands/`, `.claude/hooks/`, and `.claude/scripts/`; shared skills may resolve
 through `.agents/skills/` or a plugin checkout. Do not assume any path is universal.
 
-An installed plugin may have a different maintained source. Read its metadata and
-repository context, then identify `artifact_path` (what runs) and `edit_path` (what
-is maintained). Stop if the source cannot be identified confidently. Never overwrite
-an installation and call that a durable source change. Consult project instructions
-and check for uncommitted work before editing. Discovery grants no write permission.
+Read plugin metadata and repository context to identify `artifact_path` (what runs)
+and `edit_path` (maintained source). Stop if the source is uncertain; changing an
+installation alone is not a durable source edit. Read project instructions and
+check for uncommitted work before editing. Discovery grants no write permission.
 
-Prior tests may be in `evals/`, `<name>-evals/`, or `~/skill-eval/<name>/`. Inspect
-version and intent before reusing them. Prefer the artifact's maintained suite;
-duplicate or divergent suites need an explicit choice. Do not silently choose the
-one with the best grade. New run observations live in an exact, unique run directory.
+Look for prior tests in `evals/`, `<name>-evals/`, or `~/skill-eval/<name>/`; check
+their version and purpose before reuse. Prefer the maintained suite. Explicitly
+choose between duplicate or divergent suites; do not select by grade. Store new
+observations in a unique run directory.
 
 ## Skills and commands
 
@@ -29,9 +28,8 @@ properties. Do not impose handoffs, gates, or state on an attended task by defau
 
 ## Hooks
 
-Read the script and its real registration to determine the input event schema,
-trigger conditions, output contract, and relevant environment. Registration is
-read-only discovery; editing settings needs separate authorization.
+Read the script and registration for the event schema, triggers, output contract,
+and environment. Editing registration settings needs separate authorization.
 
 Invoke the hook against controlled inputs in isolation. Check both trigger and
 non-trigger cases, stdout/stderr, exit status, and actual state effects. Test
@@ -40,16 +38,14 @@ A hook that exits successfully for every input has not demonstrated trigger accu
 
 ## Scripts
 
-Use existing tests or direct subprocess execution with controlled arguments, input,
-and environment. Compare actual output to expected output, including failure cases.
-A non-crashing command can still return the wrong result. Verify output files and
-unchanged unrelated files when relevant. Use the project's runtime rather than
-hardcoding a private virtualenv or assuming the system interpreter has dependencies.
+Use existing tests or subprocesses with controlled arguments, input, and environment.
+Check outputs, including failures; a successful exit alone proves little. Verify
+output files and, where relevant, that unrelated files stayed unchanged. Use the
+project runtime; do not hardcode a private virtualenv or assume system dependencies.
 
 ## Portability
 
-Hone's orchestration currently targets Claude Code. The artifact under evaluation
-may target another model or host, provided its runner and permissions are available.
-Record each configuration; do not infer another host's behavior from a Claude run.
-If only simulation is possible, report that limited result instead of a model-wide
-compatibility or performance claim.
+Hone targets Claude Code but can evaluate other models or hosts when their runners
+and permissions are available. Record each configuration and limit claims to the
+hosts tested. Report simulations as simulations, without general compatibility or
+performance claims.

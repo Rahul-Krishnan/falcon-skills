@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Analyze eval runner results.json and produce a structured summary.
+"""Summarize eval runner results.json for Phase 2 analysis.
 
 Usage:
     python3 analyze_results.py <path_to_results.json>           # human-readable
     python3 analyze_results.py <path_to_results.json> --triage   # JSON triage to stdout
-
-Outputs a concise analysis to stdout that can be consumed by the LLM
-for faster Phase 2 analysis (no need to parse raw JSON).
 """
 
 from __future__ import annotations
@@ -15,10 +12,7 @@ import argparse
 import json
 import sys
 
-# Shared helpers: null-tolerant access, canonical score fallback chain,
-# deterministic_scores.json loaders, and the authoritative thresholds
-# (ACTIONABLE_THRESHOLD = Phase 1 exit gate, CRITERIA_BUG_THRESHOLD =
-# run-wide "the criteria are suspect" bar). See hone_common.py docstrings.
+# Shared score resolution and thresholds keep scoring, triage, and gates aligned.
 from hone_common import (
     ACTIONABLE_THRESHOLD,
     CRITERIA_BUG_THRESHOLD,
@@ -33,15 +27,7 @@ from hone_common import (
 
 
 def _dict_results(results: list) -> list[dict]:
-    """Drop non-dict entries, warning once per entry.
-
-    score_from_results already tolerates a malformed record and keeps going
-    (score_execution.py, the `isinstance(test_result, dict)` guard). Both
-    scripts read the same file through extract_results, so they must agree
-    about malformed entries too: `result.get(...)` on a bare string aborted
-    triage and analyze with an AttributeError on a file score_execution graded
-    without complaint.
-    """
+    """Drop non-dict entries with one warning each, matching score_execution."""
     kept = []
     for entry in results:
         if isinstance(entry, dict):
@@ -55,35 +41,18 @@ def _dict_results(results: list) -> list[dict]:
 
 
 def classify_failure(score: float, all_scores: list[float]) -> str:
-    """Deterministic failure classification.
+    """Classify a test using the run's score distribution.
 
-    Classification priority (evaluated in order, first match wins):
-    1. All scores at the floor -> criteria are broken, not the artifact
-    2. This score at the floor but others passed -> agent variance
-    3. Score below threshold -> genuine quality gap
-    4. Score at or above threshold -> passing
+    Priority: all scores at the floor or multiple scores below the criteria-bug
+    threshold -> criteria_bug; this score at the floor with another above that
+    threshold -> variance; below ACTIONABLE_THRESHOLD -> real_issue; else pass.
 
-    "At the floor" is `at_score_floor`, not `== 0.0`. score_execution clamps
-    every dimension to DIMENSION_FLOOR before the weighted geometric mean, so
-    the worst composite a deterministic run can produce is 0.05 and an exact
-    0.0 never appears. Written against 0.0, bands 1 and 2 were dead on
-    deterministic-only runs — the documented primary mode, since resolve_score
-    prefers the deterministic composite — and `variance` could never be
-    returned at all.
+    Use at_score_floor: deterministic composites bottom out at DIMENSION_FLOOR
+    (0.05), so an exact-zero check misses them. ACTIONABLE_THRESHOLD matches
+    the Phase 1 exit gate (0.8).
 
-    Args:
-        score: the score for this specific test (0.0-1.0, may be from
-            deterministic or LLM source depending on caller)
-        all_scores: scores for ALL tests in the same run (used for
-            criteria_bug detection). May mix score sources when
-            deterministic_scores.json is only partially available.
-
-    The actionable threshold matches SKILL.md's Phase 1 exit gate ("any test
-    scored below 0.8"). Keeping triage on a lower bar than the gate produced a
-    contradiction: a test could be reported as `pass` here while the gate
-    counted it as an actionable failure worth a full Phase 2 round.
-
-    Returns: "criteria_bug" | "variance" | "real_issue" | "pass"
+    score and all_scores use the 0-1 scale and may mix deterministic and judge
+    scores when deterministic_scores.json covers only part of the run.
     """
     if all_scores and all(at_score_floor(s) for s in all_scores):
         return "criteria_bug"
@@ -104,9 +73,7 @@ def triage(path: str) -> dict:
     except (json.JSONDecodeError, OSError) as exc:
         return {"error": str(exc), "classifications": [], "summary": {}}
 
-    # Same key resolution as score_execution (hone_common.extract_results):
-    # reading only `results` reported a skill-creator-format file as a zero-test
-    # run right after score_execution had graded it a D.
+    # Accept the same result layouts as score_execution.
     results, _key = extract_results(data)
     results = _dict_results(results)
     if not results:
@@ -118,8 +85,7 @@ def triage(path: str) -> dict:
     det_per_test = load_deterministic_scores(path)
     inconclusive_ids = load_inconclusive_ids(path)
 
-    # Inconclusive tests were never scored; they must not contribute a
-    # phantom 0.0 to the criteria_bug / variance population checks.
+    # Exclude unscored tests from the criteria-bug and variance population.
     all_scores = []
     for result in results:
         test_id = result.get("test_id", "unknown")
@@ -199,16 +165,13 @@ def analyze(path: str) -> None:
         """Deterministic composite when available, else the LLM judge score."""
         return resolve_score(result, det_per_test)
 
-    # Inconclusive tests were never scored; keep them out of pass/avg math
-    # so "nothing was observed" does not read as a 0.0 failure.
+    # Exclude unscored tests from pass rates and averages.
     conclusive = [
         r for r in results if r.get("test_id", "unknown") not in inconclusive_ids
     ]
 
     score_source = "deterministic" if det_per_test else "llm_judge"
-    # PASS/FAIL here must agree with classify_failure's triage band: a test
-    # below ACTIONABLE_THRESHOLD is a real_issue, so it must not be reported
-    # as passing in the operator summary.
+    # Use the same passing threshold as classify_failure.
     passed = sum(1 for r in conclusive if score_of(r) >= ACTIONABLE_THRESHOLD)
     denom = len(conclusive)
     avg_score = sum(score_of(r) for r in conclusive) / denom if denom else 0.0
@@ -223,9 +186,7 @@ def analyze(path: str) -> None:
         print("No conclusive tests; nothing to score.")
     print()
 
-    # Triage
-    # Floor-aware, matching classify_failure: a deterministic composite bottoms
-    # out at DIMENSION_FLOOR, so `== 0.0` never fired on a deterministic run.
+    # Use the deterministic floor, matching classify_failure.
     all_zero = denom > 0 and all(at_score_floor(score_of(r)) for r in conclusive)
     some_zero = any(at_score_floor(score_of(r)) for r in conclusive) and not all_zero
 
@@ -303,10 +264,7 @@ def analyze(path: str) -> None:
         if isinstance(details, dict):
             cat = get(details, "category", r.get("suite", "unknown"), expected=str)
             composite = get(details, "composite_1_5", 0)
-            # An inconclusive test was never scored. Printing score_of's 0.0
-            # default reported it as `0.000 FAIL`, contradicting the PER-TEST
-            # BREAKDOWN two lines above with exactly the "nothing was observed
-            # reads as a failure" conclusion the rest of this file prevents.
+            # Show unscored tests as inconclusive, matching the per-test breakdown.
             if r.get("test_id", "unknown") in inconclusive_ids:
                 print(f"{cat:<20} {'n/a':>6} {composite:>5.1f} {'INCONCL':>8}")
                 continue
@@ -320,13 +278,7 @@ def analyze(path: str) -> None:
     for r in results:
         details = r.get("details", {})
         if isinstance(details, dict):
-            # typed get, not dict.get: an explicit `"raw_semantic_scores": null`
-            # is a real shape from a judge that returned no per-question scores,
-            # and dict.get hands back that None for a present key. `.items()` on
-            # it aborted analyze() with a traceback here -- after the summary,
-            # per-test breakdown and dimension summary had already printed, so
-            # the operator got a report that looked complete minus its
-            # RECOMMENDED ACTIONS section.
+            # A judge may return raw_semantic_scores: null; typed get makes .items() safe.
             raw = get(details, "raw_semantic_scores", {}, expected=dict)
             cat = get(details, "category", r.get("suite", "unknown"), expected=str)
             for q, s in raw.items():

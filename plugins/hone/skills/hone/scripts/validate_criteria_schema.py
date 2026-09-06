@@ -85,10 +85,8 @@ TEST_CASE_SCHEMA = {
             "tool_usage",
             "business_impact",
         ]),
-        # Optional: phase1-evaluation.md only instructs generating this field
-        # for failure-mode cases (item 8), and score_execution.py falls back
-        # to heuristic profile detection when it is absent. Requiring it made
-        # every doc-shaped item 1-7 test case fail the pre-launch gate.
+        # Optional except for documented failure-mode cases; the scorer uses
+        # heuristic profile detection when absent.
         "test_profile": _enum(
             [
                 "execution",
@@ -164,21 +162,15 @@ def validate_criteria(
     errors: list[ValidationError] = []
     fields_checked = validate_fields(data, CRITERIA_SCHEMA, "", errors)
 
-    # Additional semantic checks beyond schema validation. The list guard
-    # matters: validate_fields above records a clean type error for a null
-    # or non-list test_cases, and this pass must then degrade to "no test
-    # cases" instead of dying on enumerate(None) with a raw traceback
-    # (which also leaves --json consumers with unparseable output).
+    # Run semantic checks after schema validation, tolerating malformed test_cases
+    # so the existing type finding reaches the caller instead of a traceback.
     test_cases = null_safe_get(data, "test_cases", [], expected=list)
     seen_ids: set[str] = set()
     for idx, test_case in enumerate(test_cases):
         if not isinstance(test_case, dict):
             continue
-        # expected=str: a null id must not put None in seen_ids, and an
-        # unhashable id (list/dict) must not TypeError the set membership
-        # check — that traceback killed both validate mode and --audit
-        # (which calls validate_schema first) with empty stdout. The
-        # schema pass above already records the type error for such ids.
+        # Use string IDs for set membership. Schema validation already reports
+        # invalid types; this pass must not crash on unhashable values.
         test_id = null_safe_get(test_case, "id", "", expected=str)
         if test_id in seen_ids:
             errors.append(ValidationError(

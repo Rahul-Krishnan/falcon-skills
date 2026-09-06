@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Structural audit of skill/command/hook/script markdown files.
-
-15-pillar static analysis. Deterministic regex-based scoring.
-No LLM judgment, fully reproducible.
+"""Audit skill, command, hook, and script structure with 15 static pillars.
 
 Usage:
     structural_audit.py <artifact_path> --type skill [--json]
@@ -45,20 +42,10 @@ STEP_NUMBERING = "step_numbering"
 # Types that have multi-step workflow structure
 WORKFLOW_TYPES = {"skill", "command"}
 
-# Pillars that surface findings but don't affect the structural score.
-# They appear in output as WARN instead of PASS/FAIL.
-# ANTI_LAZINESS and AUTONOMOUS_EXECUTION demoted 2026-08-13:
-# they scored old-model failure-mode insurance, not present-day defects.
-# RESEARCH_DEPTH is warning-only because it is literal-name matching against
-# a configurable skill list: informative, but too environment-dependent to
-# cost structural score or to drive a Phase 2 auto-fix that would inject a
-# skill reference the user's machine may not have.
-# DESCRIPTION_GUARDRAILS is deliberately NOT here. Every other non-warning
-# pillar is "skip" at lightweight/standard, which collapsed the default tier's
-# scoring denominator to `security` alone. Guardrails carry that tier because
-# they apply to every skill and command and a missing "when NOT to use" clause
-# is a real routing defect Phase 2 can fix — unlike gates, which improvement
-# preference 7 says attended flows should not be given.
+# Warning-only pillars do not affect structural scores. Anti-laziness and
+# autonomous-execution checks cover legacy model safeguards; research-name
+# matching is environment-dependent. Description guardrails remain scored
+# because they identify routing defects at every skill/command tier.
 WARNING_ONLY_PILLARS = {
     SCRIPT_QUALITY,
     COMPACTION_PROTECTION,
@@ -70,38 +57,17 @@ WARNING_ONLY_PILLARS = {
     RESEARCH_DEPTH,
 }
 
-# Scope-aware pillar priority matrix.
-# Each pillar maps to an effective_priority per complexity tier.
-# "HIGH" = drives Phase 2 improvements, "LOW" = advisory only, "skip" = excluded.
-# Re-derived 2026-08-13: structural insurance (state, gates,
-# handoffs) applies only to complex/unattended artifacts; old-model
-# failure-mode pillars (anti-laziness, compaction, step numbering) no
-# longer drive improvements at any tier.
-# Widened 2026-08-17: the structural pillars are scored at every tier, not just
-# at "complex". Each audit function already declines on its own evidence -- no
-# step transitions makes progress_gates and handoff_interfaces inapplicable,
-# fewer than two steps makes state_persistence inapplicable, no handoff marker
-# makes schema_validation inapplicable -- so "skip" at the low tiers never
-# suppressed a false penalty. All it did was starve the denominator: below
-# "complex" the scored set was {security, description_guardrails}, security
-# passes for every benign artifact, and structural_score could therefore only
-# ever be 0.5 or 1.0. A two-valued number published as a continuous 0-1
-# measurement is not reporting what it claims. These pillars are LOW, not HIGH,
-# at the low tiers: they count toward the score because the mechanism is either
-# present or absent, but they stay advisory and do not drive Phase 2 work.
+# Per-tier priorities: HIGH drives improvements, LOW is advisory, skip excludes.
+# Structural pillars use their own applicability checks and contribute at
+# lower tiers where enabled; gate requirements remain restricted below.
+# Legacy safeguards no longer drive improvements.
 PILLAR_PRIORITY_MATRIX: dict[str, dict[str, str]] = {
     SECURITY: {"lightweight": "HIGH", "standard": "HIGH", "complex": "HIGH"},
-    # state_persistence stays skipped at "lightweight": a two-step lightweight
-    # artifact legitimately has nothing to persist, and this is the one pillar
-    # whose absence at that tier is a design choice rather than a gap.
+    # Skip state persistence at lightweight tier; short artifacts may need no saved state.
     STATE_PERSISTENCE: {"lightweight": "skip", "standard": "LOW", "complex": "HIGH"},
     DATA_PROVENANCE: {"lightweight": "LOW", "standard": "LOW", "complex": "HIGH"},
     ANTI_LAZINESS: {"lightweight": "skip", "standard": "skip", "complex": "skip"},
-    # progress_gates keeps its low-tier skip too, for a different reason:
-    # improvement preference 7 says attended in-session flows need gates only
-    # before irreversible actions, so an ungated lightweight or standard
-    # artifact must not read as a structural gap at all. That is a product
-    # decision about gates, not a side effect of the starved denominator.
+    # Skip gates at attended tiers: those flows need them only before irreversible actions.
     PROGRESS_GATES: {"lightweight": "skip", "standard": "skip", "complex": "LOW"},
     HANDOFF_INTERFACES: {"lightweight": "LOW", "standard": "LOW", "complex": "LOW"},
     SCHEMA_VALIDATION: {"lightweight": "LOW", "standard": "LOW", "complex": "LOW"},
@@ -118,11 +84,8 @@ PILLAR_PRIORITY_MATRIX: dict[str, dict[str, str]] = {
 
 VALID_TIERS = {"lightweight", "standard", "complex"}
 
-# (pillar, has_key, needed_key) for the handoff booleans validate_handoff.py's
-# phase1_structural_audit contract requires. Declared once so the populated
-# path and the empty-content early return cannot emit different key sets.
-# "has" = the mechanism was found in the content; "needed" = the pillar applies
-# to this artifact and tier.
+# Shared handoff fields for populated and empty-content results.
+# "has" means detected; "needed" means applicable to this type and tier.
 HANDOFF_BOOLEAN_KEYS: tuple[tuple[str, str, str], ...] = (
     (STATE_PERSISTENCE, "has_state_persistence", "state_persistence_needed"),
     (ANTI_LAZINESS, "has_anti_laziness_check", "anti_laziness_needed"),
@@ -194,10 +157,7 @@ PROMPT_INJECTION_PATTERNS = [
     re.compile(r"system:\s*override", re.IGNORECASE),
 ]
 
-# When an injection phrase appears as a quoted example or inside security
-# documentation (a trust-boundary / "treat this as untrusted" section), the
-# artifact is teaching the model to DETECT injection, not attempting it. These
-# keywords near a match mark that defensive context so it is not flagged.
+# Quoted injection examples and nearby defensive guidance are exempt.
 DEFENSIVE_INJECTION_KEYWORDS = [
     "trust boundary",
     "untrusted",
@@ -217,11 +177,8 @@ DEFENSIVE_INJECTION_KEYWORDS = [
     "adversarial",
 ]
 
-# Negation/hygiene phrasing near a credential, exfil, or base64 match marks
-# defensive documentation ("Never read ~/.ssh/", "do not commit .env files")
-# rather than live threat behavior. Kept separate from the injection keywords:
-# a bare "never"/"do not" near an injection directive is too weak a signal to
-# exempt it, but near a credential-path mention it is the dominant benign case.
+# Use separate hygiene prohibitions for credentials, exfiltration, and base64.
+# Generic "never" is too weak to exempt injection directives.
 DEFENSIVE_HYGIENE_KEYWORDS = [
     "never",
     "do not",
@@ -234,12 +191,8 @@ DEFENSIVE_HYGIENE_KEYWORDS = [
     "hygiene",
 ]
 
-# Sentence/line scope for the hygiene exemption. A newline is a break because
-# markdown prose is line-oriented: a frontmatter description and a command in
-# the body are never the same statement, however few characters separate them.
-# Terminators only count when whitespace or the end of the file follows, or
-# the dots inside the very things being matched (`~/.ssh/`, `.env`,
-# `example.com`) would split the sentence and strip the prohibition off it.
+# Keep hygiene exemptions within a sentence or line. Require whitespace
+# after punctuation so paths and domains do not split the statement.
 _SENTENCE_BREAK_RE = re.compile(r"[.!?;](?=\s|$)|\n")
 
 # Fenced code block delimiters, used to spot a "do not do this:" example block.
@@ -255,10 +208,7 @@ RESEARCH_PHASE_PATTERNS = [
     re.compile(r"invoke\s+/deep-research", re.IGNORECASE),
 ]
 
-# Skill names the research_depth pillar accepts as a research-delegation
-# step. Not a fixed literal: research pipelines differ per machine, so
-# HONE_RESEARCH_SKILLS (comma-separated) extends the set, mirroring
-# pipeline_skills.py's HONE_SIDE_EFFECTING_SKILLS override.
+# Accepted research skills, extended by comma-separated HONE_RESEARCH_SKILLS.
 DEFAULT_RESEARCH_SKILLS = frozenset({"temper-research", "deep-research"})
 
 
@@ -286,10 +236,7 @@ VERIFIED_SOURCE_PATTERNS = [
     re.compile(r"state file", re.IGNORECASE),
 ]
 
-# Description extraction: frontmatter splitting and field lookup live in
-# hone_common (match_frontmatter / split_frontmatter / frontmatter_field),
-# shared with side_effect_guard.py. Both inline and block-scalar
-# (description: | / description: >) forms are handled there.
+# Use shared frontmatter helpers for inline and block-scalar descriptions.
 
 # Anti-pattern / "when NOT to use" guidance patterns in descriptions
 ANTI_PATTERN_INDICATORS = [
@@ -394,10 +341,9 @@ def _validate_step_sequence(content: str) -> list[str]:
 
 
 def audit_step_numbering(content: str, artifact_type: str) -> PillarResult:
-    """Pillar: Flat integer step labels with no gaps or duplicates.
+    """Check flat, sequential integer step labels.
 
-    WARNING_ONLY — does not affect structural score denominator, but HIGH
-    effective priority for standard/complex tiers drives Phase 2 improvements.
+    Warning-only; effective priority determines whether Phase 2 acts on findings.
     """
     if artifact_type not in WORKFLOW_TYPES:
         return PillarResult(STEP_NUMBERING, True, False, 0, 0)
@@ -413,21 +359,10 @@ def audit_step_numbering(content: str, artifact_type: str) -> PillarResult:
 def _count_pattern_matches(
     content: str, patterns: list[re.Pattern]
 ) -> tuple[int, list[str]]:
-    """Count matches, de-duplicated by source span, and return evidence.
+    """Count distinct source spans and return their evidence.
 
-    Patterns within a family overlap by design: `handoff.*interface` matches
-    everything `\\*\\*Handoff interface` matches, so summing per-pattern counts
-    scored one marker twice. Two genuine `**Handoff interface (...)**` lines
-    were reported as `count_found=4`, which flipped an honest 2-of-8 fail into
-    a 4-of-8 pass against the pillar's `found >= expected * 0.5` bar, printed
-    each marker twice in evidence that then contradicted its own count, and
-    doubled the `handoff_count` denominator that audit_schema_validation
-    divides by. One span in the source is one mechanism, however many patterns
-    recognize it.
-
-    Overlapping spans (not just identical ones) collapse, and the longest match
-    at a given position wins, so the more specific pattern supplies the
-    evidence text.
+    Collapse overlapping matches, keeping the longest at a position. Multiple
+    patterns recognizing one marker must not inflate coverage or denominators.
     """
     spans = []
     for pattern in patterns:
@@ -472,9 +407,7 @@ def audit_progress_gates(content: str, artifact_type: str) -> PillarResult:
         evidence.append(
             f"Ungated: {expected - found} of {expected} transitions lack gates"
         )
-    # Sequence findings are owned by audit_step_numbering (WARNING_ONLY).
-    # Progress_gates no longer flips on sequence issues, keeping concerns
-    # orthogonal: gates = "transitions gated?", step_numbering = "labels clean?".
+    # Keep step-label findings in audit_step_numbering; progress_gates checks gates.
 
     return PillarResult(PROGRESS_GATES, passed, True, found, expected, evidence)
 
@@ -704,11 +637,9 @@ def _match_sentence(content: str, start: int, end: int) -> str:
 
 
 def _fenced_negative_example(content: str, start: int, keywords: list[str]) -> bool:
-    """True when the match sits in a fenced block introduced as a bad example.
+    """Detect fenced commands introduced as bad examples.
 
-    Covers the documented "do not do this:" followed by a fenced command. The
-    preamble is the fence's own line plus the two lines above it — enough to
-    carry the introduction, short enough that unrelated prose cannot reach it.
+    Inspect the fence line and two preceding lines for the introduction.
     """
     fences = list(_FENCE_RE.finditer(content))
     for opener, closer in zip(fences[0::2], fences[1::2]):
@@ -721,18 +652,10 @@ def _fenced_negative_example(content: str, start: int, keywords: list[str]) -> b
 
 
 def _is_defensive_hygiene_context(content: str, start: int, end: int) -> bool:
-    """True if a credential/exfil/base64 match is documentation, not behavior.
+    """Detect quoted, prohibited, or fenced-negative security examples.
 
-    Deliberately tighter than the injection check above, which can afford a
-    240-char window because its keywords are specific. The hygiene list is
-    "never", "do not", "avoid" and friends, which appear in ordinary skill
-    prose everywhere — and pillar 10 *requires* a "Do NOT use ..." clause in
-    the description, landing within 240 chars of the top of the body. A live
-    `curl --data @~/.ssh/id_rsa` therefore passed the pillar outright in any
-    artifact carrying the guardrail every skill is told to have.
-
-    So the exemption attaches to the match site: quoted/backticked, sharing a
-    sentence with a prohibition, or inside a fenced negative example.
+    Attach exemptions to the match site. A broad window could let an unrelated
+    "Do NOT use" description exempt a live credential or exfiltration command.
     """
     keywords = DEFENSIVE_HYGIENE_KEYWORDS + DEFENSIVE_INJECTION_KEYWORDS
     quote_chars = {'"', "'", "`"}
@@ -749,10 +672,8 @@ def audit_security(content: str, artifact_type: str) -> PillarResult:
     """Pillar 9: Scan for security threat patterns."""
     findings = []
 
-    # Credential/exfil/base64 matches get a defensive-context exemption, but a
-    # site-scoped one: prose documenting correct hygiene ("Never read ~/.ssh/
-    # or .env credentials.") is guidance, not a threat, while the same command
-    # on its own line is behavior regardless of what the rest of the file says.
+    # Apply hygiene exemptions at the match site; unrelated prose cannot excuse
+    # a command on its own line.
     for label, patterns in (
         ("CREDENTIAL", CREDENTIAL_PATTERNS),
         ("EXFILTRATION", EXFIL_PATTERNS),
@@ -800,15 +721,10 @@ def _extract_description(content: str) -> str:
 
 
 def audit_description_guardrails(content: str, artifact_type: str) -> PillarResult:
-    """Pillar 10: Check description includes anti-pattern guidance.
+    """Check skill and command descriptions for when-not-to-use guidance.
 
-    Scans the artifact's description (from YAML frontmatter) for negation
-    patterns that tell the LLM when NOT to use this artifact. Descriptions
-    survive context compaction and are the primary signal for skill routing,
-    so anti-pattern guidance here prevents false-positive invocations.
-
-    Applicable to skills and commands only (hooks/scripts don't have
-    triggering descriptions).
+    Descriptions guide routing and survive compaction. Hooks and scripts lack
+    triggering descriptions and are exempt.
     """
     if artifact_type not in WORKFLOW_TYPES:
         return PillarResult(DESCRIPTION_GUARDRAILS, True, False, 0, 0)
@@ -893,14 +809,10 @@ RESUME_PATTERNS = [
 
 
 def audit_compaction_protection(content: str, artifact_type: str) -> PillarResult:
-    """Pillar 12: Check multi-step artifacts have context compaction protection.
+    """Check multi-step skills and commands for compaction recovery.
 
-    Long-running skills and commands lose early instructions during context
-    compaction. This pillar checks for patterns that enable recovery:
-    explicit compaction sections, re-read instructions for reference files,
-    intermediate result persistence to disk, and resume/recovery instructions.
-
-    Applicable to multi-step skills and commands only (2+ step transitions).
+    Look for compaction sections, reference re-reads, persisted results, or resume
+    instructions. Applies only when there are at least two step transitions.
     """
     if artifact_type not in WORKFLOW_TYPES:
         return PillarResult(COMPACTION_PROTECTION, True, False, 0, 0)
@@ -1165,7 +1077,7 @@ VALIDATION_CONTEXT_PATTERNS = [
 ]
 
 
-# Gate event patterns (Pillar 15) — checks that skill writes structured gate events
+# Gate event patterns (Pillar 15): instructions to write structured events.
 GATE_EVENT_PATTERNS = [
     re.compile(r'"gates"\s*:\s*\[', re.IGNORECASE),
     re.compile(r'\bgates\[\]\b', re.IGNORECASE),
@@ -1177,13 +1089,10 @@ GATE_EVENT_PATTERNS = [
 
 
 def audit_gate_events(content: str, artifact_type: str) -> PillarResult:
-    """Pillar 15: Check multi-step skills/commands instruct writing structured gate events.
+    """Check instructions to append gate events to workflow-state gates[].
 
-    Skills should write gate event JSON to the workflow state file's gates[] array
-    at each phase transition. This enables deterministic compliance checking by
-    score_gate_compliance instead of keyword counting. See references/gate-event-schema.json.
-
-    Surfaces as WARN (not FAIL) until gate event emission is bootstrapped across all skills.
+    Structured events support deterministic score_gate_compliance checks;
+    see references/gate-event-schema.json. Report WARN during adoption.
     """
     if artifact_type not in WORKFLOW_TYPES:
         return PillarResult(GATE_EVENTS, True, False, 0, 0)
@@ -1213,18 +1122,11 @@ def audit_gate_events(content: str, artifact_type: str) -> PillarResult:
 
 
 def audit_autonomous_execution(content: str, artifact_type: str) -> PillarResult:
-    """Pillar 14: All skills and commands must document --auto mode.
+    """Check skills and commands for documented --auto behavior.
 
-    Every skill and command must advertise --auto mode — even if autonomous execution
-    is inappropriate, the flag must be present and exit early with an explanation.
-    This ensures the caller can always pass --auto without being silently blocked.
-
-    When --auto is documented, also verifies that mid-flow interactive blocking calls
-    (AskUserQuestion, "confirm with user") have explicit --auto bypass paths, rather
-    than silently blocking forever in an unattended run.
-
-    FAIL when: no autonomous mode is documented (required for all skills/commands).
-    Hooks and scripts are exempt (they have no argument interface).
+    Require either autonomous execution or an explained early exit, plus bypasses
+    for mid-flow interaction. Hooks and scripts are exempt. The audit returns
+    FAIL if no mode is documented; pillar policy determines its scoring effect.
     """
     if artifact_type not in WORKFLOW_TYPES:
         return PillarResult(AUTONOMOUS_EXECUTION, True, False, 0, 0)
@@ -1266,9 +1168,7 @@ def audit_autonomous_execution(content: str, artifact_type: str) -> PillarResult
         return PillarResult(AUTONOMOUS_EXECUTION, True, True, 1, 1, evidence)
 
     if validation_ctx_count > 0:
-        # Blocking calls present but all appear to be in validation gates
-        # (STOP/Condition sections), which is correct — they fire before the workflow
-        # starts and are appropriate even in --auto mode.
+        # Validation-gate interaction before the workflow is permitted in --auto mode.
         evidence = [
             f"--auto mode documented; {block_count} interactive call(s) appear in "
             f"validation gates ({validation_ctx_count} gate marker(s)), not mid-flow"
@@ -1388,10 +1288,7 @@ def audit(
         complexity_tier = "standard"
 
     if not content or not content.strip():
-        # Same key set as the populated path: validate_handoff.py requires
-        # `warnings` and the eight has_*/*_needed booleans, so omitting them
-        # failed an empty or truncated artifact at the gate with a schema
-        # error instead of the real "artifact is empty" finding.
+        # Emit the full handoff schema so the finding remains "artifact is empty".
         empty_booleans = {
             key: False
             for pair in HANDOFF_BOOLEAN_KEYS
@@ -1446,14 +1343,8 @@ def audit(
         security_pillar and security_pillar.applicable and not security_pillar.passed
     )
 
-    # A denominator of "security alone" is not a measurement of structure. The
-    # security scan reports the absence of threat patterns, which every ordinary
-    # artifact satisfies, so any hook or script with no hit scored a perfect 1.0
-    # at every tier — and an empty denominator failed open to 1.0 outright.
-    # Skills and commands escape this because description_guardrails is scored
-    # at every tier; hooks and scripts have no such pillar, and inventing one
-    # would fabricate a different number rather than fix the missing evidence.
-    # So: no non-security scoring pillar means no structural score at all.
+    # Security alone measures no structure. Without a non-security scoring
+    # pillar, report no structural score instead of a fabricated perfect score.
     substantive_pillars = [p for p in scoring_pillars if p.name != SECURITY]
     score_inconclusive = not substantive_pillars
 
@@ -1492,11 +1383,7 @@ def audit(
         ).get(complexity_tier, "LOW")
         pillar_dicts.append(pillar_dict)
 
-    # Handoff booleans for the structural_audit interface validated by
-    # validate_handoff.py. Deterministically derived from pillar results:
-    # "has" = the mechanism was found in the content (count_found > 0),
-    # "needed" = the pillar applies to this artifact/tier. Without these,
-    # the script's own output could not pass the schema it feeds.
+    # Emit required handoff booleans from pillar results: detected vs applicable.
     by_name = {pillar.name: pillar for pillar in pillars}
     handoff_booleans = {}
     for pillar_name, has_key, needed_key in HANDOFF_BOOLEAN_KEYS:

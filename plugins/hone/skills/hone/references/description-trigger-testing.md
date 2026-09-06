@@ -1,31 +1,30 @@
 # Description triggering
 
-Run this when the description changed, the supported task scope changed, or a
-model/host migration could affect discovery. Otherwise existing routing coverage
-can remain a regression test. Honor `--skip-trigger-test` and report the omission.
+Test routing after description or task-scope changes, or model/host migrations
+that could affect discovery. Otherwise retain existing regression coverage. Honor
+`--skip-trigger-test` and report the omission.
 
 Freeze realistic should-trigger and near-miss prompts before tuning the description.
 Include competing skill descriptions from the actual host, user phrasing, and both
 over-triggering and under-triggering cases. Do not generate only paraphrases of the
 current description. Reserve final queries the editor has not seen.
 
-Prefer observing actual skill selection in the target host's event stream. The
-installed skill-creator trigger runner can help after checking how it loads skills,
-what permissions it uses, and where it writes temporary files. Its early exit tests
-selection only, not completion of the task. Follow the host's permission rules.
+Observe skill selection in the target host's event stream where possible. Before
+using skill-creator's trigger runner, check its skill loading, permissions, and
+temporary-file paths. It exits after selection and does not test task completion.
+Follow host permission rules.
 
-If actual routing is unavailable, use an independent text classification exercise
-with the skill catalog. Label it a routing simulation. It cannot prove that the
-host registered or invoked the skill. Never claim that specifying a different
-sampling temperature exercised a distinct model or effort setting.
+If routing cannot be observed, independently classify prompts against the skill
+catalog and label the result a routing simulation. This cannot prove registration
+or invocation. A different sampling temperature is not a distinct model or effort
+setting.
 
 Record expected selection, observed selection, trial count, and target configuration.
 Report false positives and false negatives separately. Preserve correct near-miss
 behavior when fixing missed triggers. Add exclusion wording only where it clarifies
 a real boundary; no particular phrase is mandatory.
 
-Once queries influence edits, they are development queries. Judge the final frozen
-description on fresh acceptance queries, or report that coverage remains limited.
-Store cases and observations in the run directory, without creating duplicate live
-suites in multiple installation paths. Do not manufacture a confidence claim from
-an arbitrary overall accuracy threshold.
+Queries used to guide edits become development queries. Test the frozen final
+description on fresh acceptance queries or report limited coverage. Store cases
+and observations in the run directory, without duplicate live suites. Do not infer
+confidence from an arbitrary overall accuracy threshold.

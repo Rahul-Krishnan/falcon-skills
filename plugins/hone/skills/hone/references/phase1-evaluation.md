@@ -2,10 +2,9 @@
 
 ## Define the question
 
-Read the artifact, its relevant dependencies, existing tests, and prior failures.
-Resolve installed copies to maintained source before any edit. Explain the assumed
-scope. A broken referenced script, a reproducible wrong result, and an unnecessary
-instruction are different hypotheses and need different evidence.
+Read the artifact, relevant dependencies, tests, and prior failures. Resolve the
+maintained source before editing and state the assumed scope. Match evidence to
+the hypothesis: a broken script, wrong result, or unnecessary instruction.
 
 Classify important instructions:
 
@@ -22,11 +21,10 @@ whose retrieval is the skill's contribution remain part of what is being tested.
 
 ## Freeze cases before changing the artifact
 
-Start with observed failures and representative successful tasks. Write the prompt,
-fixtures, expected outcome, allowed side effects, checks, and evidence requirements
-for each case. Cover when behavior should happen and when it should not. For
-example: ask when input is indispensable, proceed when it is already supplied,
-verify a consequential change, and stop after sufficient verification.
+Start with observed failures and representative successes. For each case, record
+the prompt, fixtures, expected outcome, allowed side effects, checks, and required
+evidence. Cover triggers and non-triggers: ask for indispensable missing input,
+proceed when supplied, verify consequential changes, and stop once verified.
 
 Use task-specific deterministic checks for concrete properties: expected stdout
 and exit code, file contents, required JSON fields, unchanged unrelated files, or
@@ -35,11 +33,10 @@ correctness that needs expertise, and preference fidelity. Literal matches are
 appropriate for contractual literals, not for whether prose sounds correct.
 Do not derive required output vocabulary from the instruction file.
 
-Identify critical requirements in advance. A confirmed violation blocks the
-candidate regardless of how many other cases pass. Validate graders on a known
-correct result and a deliberately wrong result where feasible; a grader that accepts
-both cannot establish the improvement. This includes script tests: a zero exit
-code alone is not evidence of the correct result.
+Identify critical requirements before testing; any confirmed violation blocks the
+candidate. Where feasible, validate graders against known correct and deliberately
+wrong results. A grader that accepts both proves nothing; neither does a script
+test that checks only for exit code zero.
 
 Keep development cases separate from final acceptance cases. The editor may see
 development failures; it must not see held-out prompts or expected answers before
@@ -47,9 +44,9 @@ the final candidate is frozen. A main agent cannot unsee cases it generated: use
 an independent case author/evaluator, or label the set as development coverage.
 Once a held-out result informs an edit, that case becomes development coverage.
 
-Cheap passing regression tests remain valuable. Add harder cases for new capability
-rather than replacing all passing tests. A handful of cases can reproduce a defect
-but does not establish general equivalence or statistical power.
+Keep cheap passing regressions and add harder cases for new capabilities. A few
+cases can reproduce a defect but cannot establish general equivalence or
+statistical power.
 
 A suite can use the repository's v3 outcome format: `schema_version: 3`,
 `measurement: "outcomes"`, `project`, `skill_name`, and `test_cases`. Each case has
@@ -74,10 +71,9 @@ or different configurations limit comparability. Do not silently substitute a mo
 when the requested one cannot run. Model names belong in experiment configuration,
 not permanent assumptions that one family is always stronger than another.
 
-Set the round, trial, concurrency, and time budgets before launching. Use paired
-trials from clean equivalent environments. Keep all copies isolated from each
-other's outputs and previous history. A missing tool or broken fixture is a harness
-failure, not a model failure. Do not keep rerunning only the losing arm until it wins.
+Set round, trial, concurrency, and time budgets before launch. Pair trials in clean,
+equivalent environments, isolated from other trials' outputs and history. Classify
+missing tools and broken fixtures as harness failures. Do not selectively retry losses.
 
 ## Execute and collect evidence
 
@@ -95,10 +91,10 @@ an `execution_timeline` and then treat that declaration as observed execution.
 If native events are unavailable, mark trace checks unmeasured; file-based outcomes
 may still be measurable through independent reads and assertions.
 
-Record elapsed time and reported token usage when available. Unknown usage stays
-unknown; output characters are not total token consumption. Compare resource use
-only after required outcome checks pass. Reduced instruction length by itself is a
-maintenance improvement, not evidence of faster or better model execution.
+Record elapsed time and reported token usage when available; do not estimate total
+tokens from output characters. Compare resource use only after required checks pass.
+Shorter instructions alone show a maintenance improvement, not better or faster
+execution.
 
 ## Use existing tools selectively
 
@@ -116,9 +112,8 @@ compared configurations and actual usage fields, and never let a two-arm headlin
 stand in for the full three-arm matrix. These helpers are optional; native tools
 and direct artifact assertions remain sufficient when they are unavailable.
 
-Inspect broken references, frontmatter, and executable dependencies with existing
-validators. The legacy structural audit may provide hints, but its style pillars
-and numeric grade do not decide whether this artifact works.
+Use existing validators for references, frontmatter, and executable dependencies.
+The legacy audit's style pillars and grade are hints, not evidence that the artifact works.
 
 ## Handoff to improvement
 

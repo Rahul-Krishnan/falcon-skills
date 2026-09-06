@@ -217,13 +217,7 @@ class TestDeterministicLoaders(unittest.TestCase):
 
 
 class TestNonStringTestId(unittest.TestCase):
-    """A non-string test_id must degrade, not raise TypeError.
-
-    dict.get hashes its key even on an empty dict, and set.add hashes its
-    member, so an unhashable test_id (list, dict) crashed resolve_score and
-    both loaders with a raw traceback and no JSON on stdout — starving the
-    Phase 2 triage gate.
-    """
+    """Invalid test IDs must fall back without crashing dict or set operations."""
 
     def test_resolve_score_tolerates_unhashable_test_id(self):
         result = {"test_id": ["a"], "score": 0.7}
@@ -468,25 +462,13 @@ class TestFrontmatterExtraction(unittest.TestCase):
 
 
 class TestHaltTail(unittest.TestCase):
-    """One definition of a halt tail, shared by validate_gates and the scorer.
-
-    Both used to carry their own copy and the copies had drifted:
-    validate_gates accepted a tail of `convergence` alone, and neither checked
-    that the trailing `convergence` had actually failed. `convergence` has
-    since left the halt vocabulary entirely -- hone never emitted it.
-    """
+    """Validation and scoring must share the same halt-tail rules."""
 
     def _gate(self, step, result="fail"):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
 
     def test_empty_tail_is_a_halt_only_for_the_exit_event(self):
-        """Nothing after the fail is a halt only when the fail IS the exit.
-
-        SKILL.md mandates `workflow_exit` before any exit, so a run whose last
-        recorded gate is a failing *other* step stopped emitting gates before
-        the event it owed. Reading that as a halt scored an executor that
-        emitted fewer events above one that emitted the honest tail.
-        """
+        """An empty tail is a halt only when the failed step is workflow_exit."""
         self.assertTrue(is_halt_tail([], "workflow_exit"))
         self.assertFalse(is_halt_tail([], "phase3_exit"))
         self.assertFalse(is_halt_tail([], None))
@@ -501,18 +483,7 @@ class TestHaltTail(unittest.TestCase):
         ))
 
     def test_an_unreached_step_before_the_exit_is_not_a_halt(self):
-        """Regression (#14): an invented event must not launder a fail.
-
-        `convergence` sat in HALT_SEQUENCE_STEPS while hone emitted no such
-        gate, so an executor that appended one turned every failed gate into a
-        compliant halt and the eval paid for a step that never ran.
-
-        Phase 3 now really does emit `convergence` -- but only Phase 3 does. A
-        gate that failed BEFORE Phase 3 ran is still proof the run never
-        reached it, so a `convergence` behind such a fail is still invented.
-        This is the half of #14's fix that must survive; the halt the same
-        emission order makes legitimate is asserted in TestHaltTailVocabulary.
-        """
+        """Convergence after a failed pre-Phase-3 gate cannot excuse that failure."""
         for failed_step in ("phase1_to_phase2", "phase2_to_phase3", "handoff_x"):
             for result in ("pass", "fail"):
                 for invented in ("convergence", "made_up_step"):
@@ -556,21 +527,7 @@ class TestHaltTail(unittest.TestCase):
 
 
 class TestHaltTailVocabulary(unittest.TestCase):
-    """The tail vocabulary depends on which gate failed, not on a flat set.
-
-    Two properties have to hold at the same time, and a flat set can only ever
-    hold one of them. Phase 3 emits `phase3_exit` (reference step 6) and THEN
-    `convergence` (step 7), so:
-
-      * behind a failed `phase3_exit` -- the documented regression auto-revert
-        halt -- a `convergence` in the tail is an event the run really did
-        emit, and the tail is a halt;
-      * behind a gate that failed before Phase 3 ran, the same `convergence`
-        was invented, and the tail is not a halt (#14's bypass).
-
-    An earlier revision put `convergence` back in the flat HALT_SEQUENCE_STEPS
-    to get the first property and silently reopened the second.
-    """
+    """Allow convergence after a failed phase3_exit, but not after pre-Phase-3 failures."""
 
     def _gate(self, step, result="pass"):
         return {"step": step, "judge": "self-check", "result": result, "ts": "t"}
@@ -613,12 +570,7 @@ class TestHaltTailVocabulary(unittest.TestCase):
         ))
 
     def test_the_failing_step_is_not_admitted_into_its_own_tail(self):
-        """Phase 3 re-emits both events every round.
-
-        Admitting the failing step back into its own tail would score a run
-        that failed `phase3_exit`, ignored the mandated immediate halt, and
-        looped through another whole round as though it had stopped.
-        """
+        """The failing step cannot reappear in its own halt tail as another round."""
         self.assertFalse(is_halt_tail(
             [
                 self._gate("phase3_exit", "fail"),
@@ -705,14 +657,7 @@ class TestFailKinds(unittest.TestCase):
 
 
 class TestSettledByRetry(unittest.TestCase):
-    """A documented retry settles a fail, on terms set by what the fail meant.
-
-    The exit-2 ledger repair emits `convergence:fail`, rewrites the ledger,
-    re-runs, and emits a second `convergence` that fails whenever the re-run
-    returns escalate or capped. The first fail is then neither terminal (the
-    halt tail slice is exclusive of the failing step) nor followed by a pass,
-    so a correct repair scored exactly as an ignored halt did.
-    """
+    """An adjacent ledger-repair retry may fail too; account for each attempt separately."""
 
     EXIT_2_REPAIR = [_g("convergence", "fail"), _g("workflow_exit")]
 
@@ -722,16 +667,7 @@ class TestSettledByRetry(unittest.TestCase):
             self.EXIT_2_REPAIR, "convergence", "ledger_missing"))
 
     def test_the_same_repair_undeclared_settles_nothing(self):
-        """The migration cost, asserted rather than assumed.
-
-        `convergence` has a vocabulary, so an event that declares nothing
-        cannot say it was the repairable exit-2 failure, and "cannot tell"
-        resolves to "refuse" here as everywhere. Every state file written
-        before `reason` existed is in this row and loses this settlement on a
-        repair that was correct. The alternative -- letting the undeclared
-        event keep the retry -- is what made a truthful `escalate` score
-        WORSE than silence, since `escalate` forfeits it.
-        """
+        """Legacy undeclared repairs lose retry credit so silence cannot beat truthful escalation."""
         self.assertFalse(is_settled_by_retry(self.EXIT_2_REPAIR,
                                              "convergence"))
 
@@ -745,16 +681,7 @@ class TestSettledByRetry(unittest.TestCase):
                                              "convergence"))
 
     def test_a_halt_orders_retry_is_fail_closed_on_whatever_follows_it(self):
-        """The property, not one ordering of it.
-
-        For a halt order, an adjacent retry settles the fail ONLY when
-        everything after the retry is that halt's own tail. Any step the halt
-        vocabulary does not admit -- whatever it is, wherever the reviewer
-        finds the next one -- makes the fail unaccounted. This is the
-        asymmetry the restriction is for: over-strict is a lost quarter-point
-        on `gate_compliance`, permissive is a run credited for ignoring a
-        halt.
-        """
+        """Any event outside the halt vocabulary after a halt-ordering retry invalidates it."""
         vocabulary = halt_tail_vocabulary("convergence")
         intruders = [
             step for step in (
@@ -827,13 +754,7 @@ class TestAuthorizedRestart(unittest.TestCase):
     """A recorded halt plus a recorded `resume` is the one way past a halt order."""
 
     def test_a_recorded_halt_then_resume_authorizes_the_restart(self):
-        """`capped` in --confirm mode: the loop stops, the human restarts it.
-
-        `workflow_exit` comes BEFORE the `resume`, because the reference puts
-        the human gate outside and after the FORCED halt: asking is what
-        happens once the loop has stopped. The halt declares `capped`, which
-        is what says it is the one `convergence:fail` a human may restart.
-        """
+        """A capped --confirm restart must record its exit before resume."""
         tail = [_g("workflow_exit"), _g("resume"),
                 _g("phase2_to_phase3"), _g("phase3_exit"),
                 _g("convergence", "fail", "capped"), _g("workflow_exit")]
@@ -878,13 +799,7 @@ class TestAuthorizedRestart(unittest.TestCase):
         self.assertFalse(is_authorized_restart(tail, "convergence"))
 
     def test_only_documented_restarts_are_authorized(self):
-        """A `resume` is not a universal laundering suffix.
-
-        `convergence` has the `capped` human gate and `workflow_exit` has the
-        cross-session resume; no other gate has a documented way back from
-        its own halt, so appending an exit and a `resume` behind one settles
-        nothing.
-        """
+        """Only documented resumable steps can be settled by exit followed by resume."""
         for step in ("phase3_exit", "phase1_to_phase2", "phase2_to_phase3"):
             with self.subTest(step=step):
                 tail = [_g("workflow_exit"), _g("resume"),
@@ -898,12 +813,7 @@ class TestFailIsAccounted(unittest.TestCase):
     """The one predicate both callers now share."""
 
     def test_the_documented_exit_2_repair_is_accounted(self):
-        """convergence:fail (ledger_missing) -> re-run -> convergence:fail.
-
-        The re-run's own event declares the verdict it came back with, which
-        is `capped` here; the docs re-attempt neither halt verdict, so that
-        second fail is accounted for by its halt tail rather than by a retry.
-        """
+        """A ledger_missing retry that returns capped is settled by its halt tail."""
         gates = [
             _g("phase1_to_phase2"), _g("phase2_to_phase3"), _g("phase3_exit"),
             _g("convergence", "fail", "ledger_missing"),
@@ -1017,13 +927,7 @@ NON_DECLARATIONS = (
 
 
 class TestHaltReasonVocabulary(unittest.TestCase):
-    """The closed vocabulary, stated once and mirrored nowhere in code.
-
-    `convergence:fail` is three different events wearing one name, and the
-    settlement rules for them are opposites. The vocabulary is what the
-    declaration is read against, and it lives in hone_common because a
-    security predicate must not change behaviour when a data file is missing.
-    """
+    """Keep failure vocabularies in code so missing reference files cannot alter behavior."""
 
     def test_the_vocabulary_is_the_three_documented_failures(self):
         self.assertEqual(
@@ -1031,13 +935,7 @@ class TestHaltReasonVocabulary(unittest.TestCase):
             frozenset({"ledger_missing", "escalate", "capped"}))
 
     def test_only_convergence_has_a_vocabulary(self):
-        """A step earns one exactly when a predicate reads its declaration.
-
-        `reason` is free-form annotation everywhere else (SKILL.md puts
-        `corrupt_state_file` on a `workflow_exit` and "prior evaluation
-        reused" on a `fixonly_entry`), so closing the enum over every event
-        would invalidate documented examples for no gain.
-        """
+        """Only steps whose predicates read reasons get a closed vocabulary."""
         self.assertEqual(set(HALT_REASONS), {"convergence"})
         for step in ("workflow_exit", "phase3_exit", "phase2_to_phase3",
                      "handoff_interfaces", "scope_verify", "resume"):
@@ -1060,12 +958,7 @@ class TestHaltReasonVocabulary(unittest.TestCase):
         self.assertIn("escalate", HALT_REASONS["convergence"])
 
     def test_the_published_schema_mirrors_the_vocabulary(self):
-        """references/gate-event-schema.json is what executors read.
-
-        hone_common is authoritative and the schema mirrors it; a drift
-        between them is an executor told to write a word no predicate accepts,
-        which is the fail-closed direction but still a bug.
-        """
+        """The executor-facing schema must mirror hone_common's reason vocabulary."""
         schema_path = (Path(__file__).resolve().parent.parent
                        / "references" / "gate-event-schema.json")
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -1102,14 +995,7 @@ class TestHaltReasonVocabulary(unittest.TestCase):
 
 
 class TestDeclarationGatedRestart(unittest.TestCase):
-    """The KNOWN GAP closed: only `capped` reaches the human gate.
-
-    `escalate` and `capped` produce identical event sequences -- the halt, the
-    exit, the grant, another round -- so no predicate over the list could tell
-    them apart. The reference is explicit that continuing after `escalate` is
-    a fresh `/hone` invocation, so the event says which verdict it carried and
-    the predicate reads it.
-    """
+    """Identical restart events qualify for capped but not escalate."""
 
     TAIL = [_g("workflow_exit"), _g("resume"), _g("phase2_to_phase3"),
             _g("phase3_exit"), _g("convergence", "fail", "capped"),
@@ -1134,13 +1020,7 @@ class TestDeclarationGatedRestart(unittest.TestCase):
             is_authorized_restart(self.TAIL, "convergence", "ledger_missing"))
 
     def test_no_usable_declaration_authorizes_no_restart(self):
-        """Fail-closed over every non-answer, including the legacy one.
-
-        A `convergence:fail` written before this field existed carries no
-        reason and is no longer resumable. That is the conservative direction:
-        it costs gate score on a correct legacy capped-and-resumed run and
-        cannot credit one that ignored an escalate.
-        """
+        """Missing or invalid reasons refuse restart, including legacy states."""
         for label, value in NON_DECLARATIONS:
             with self.subTest(case=label):
                 self.assertFalse(
@@ -1149,12 +1029,7 @@ class TestDeclarationGatedRestart(unittest.TestCase):
                     fail_is_accounted(self.TAIL, "convergence", value))
 
     def test_a_step_with_no_vocabulary_needs_no_declaration(self):
-        """`workflow_exit:fail` has exactly one meaning, so nothing to declare.
-
-        The requirement lands where the ambiguity is. Widening it to every
-        resumable step would break the documented cross-session resume for no
-        gain, because that step's `fail` is not two halts sharing a name.
-        """
+        """workflow_exit has no ambiguous failure reason and may resume without one."""
         tail = [_g("resume"), _g("phase2_to_phase3"), _g("phase3_exit"),
                 _g("convergence"), _g("workflow_exit")]
         self.assertTrue(is_authorized_restart(tail, "workflow_exit"))
@@ -1186,19 +1061,8 @@ class TestDeclarationGatedRestart(unittest.TestCase):
 
 
 class TestDeclarationGatedRetry(unittest.TestCase):
-    """The CONSERVATIVE ON PURPOSE restriction, which applies to every retry.
-
-    A revision of `is_settled_by_retry` lifted the rule for a declared
-    `ledger_missing`, on the reasoning that the exit-2 repair's re-run drives
-    the round and owes nothing behind it. The reasoning about the repair is
-    right and the concession was still a bypass: the honest repair's event
-    sequence is byte-identical to the round 6 laundering shape, `reason` is
-    written by the run being scored, and nothing corroborates it -- so the
-    declaration separated the two only for an executor that chose to tell the
-    truth. These tests pin the withdrawal: `ledger_missing` is read only as
-    the one reason a retry may settle AT ALL, under the same blunt rule an
-    undeclared fail gets.
-    """
+    """ledger_missing permits retry but cannot relax the halt-tail rule.
+    Executor-written reasons do not distinguish honest repairs from ignored halts."""
 
     # The exit-2 repair whose re-run came back `in_progress`: the second
     # `convergence` passes and the run goes on to another round. Also, step
@@ -1209,12 +1073,7 @@ class TestDeclarationGatedRetry(unittest.TestCase):
     ]
 
     def test_declaring_the_repair_does_not_buy_the_extra_round(self):
-        """The exploit, closed. Lying must not beat telling the truth.
-
-        This shape is the round 6 laundering sequence. Every reading of it
-        refuses, so an executor that ignored an `escalate` cannot launder the
-        halt by writing `ledger_missing` into the event it already controls.
-        """
+        """The extra-round bypass must fail for every declared reason."""
         for reason in (None, "ledger_missing", "escalate", "capped"):
             with self.subTest(reason=reason):
                 self.assertFalse(fail_is_accounted(
@@ -1228,12 +1087,7 @@ class TestDeclarationGatedRetry(unittest.TestCase):
                     self.CONTINUING_REPAIR, "convergence", value))
 
     def test_the_declared_repair_still_owes_a_halt_tail_behind_the_retry(self):
-        """The `workflow_exit` requirement is not dropped by declaring.
-
-        `[convergence:pass]` alone is a run that repaired the ledger and then
-        stopped emitting gates before its mandated exit. It refuses whatever
-        the fail declared, which is the shape `is_halt_tail` exists to catch.
-        """
+        """A declared reason cannot waive the required workflow_exit."""
         for reason in (None, "ledger_missing"):
             with self.subTest(reason=reason):
                 self.assertFalse(fail_is_accounted(
@@ -1260,13 +1114,7 @@ class TestDeclarationGatedRetry(unittest.TestCase):
                                            "ledger_missing"))
 
     def test_a_declared_forced_halt_has_no_retry_at_all(self):
-        """Stricter than the rule it replaces, and deliberately.
-
-        Neither `escalate` nor `capped` is re-attempted anywhere in the docs,
-        so a second `convergence` behind one is not a repair. Such a fail is
-        accounted for by its halt tail, or for `capped` by a restart, or not
-        at all.
-        """
+        """Neither escalate nor capped permits retry; they need a halt or authorized restart."""
         for reason in ("escalate", "capped"):
             for tail in (self.CONTINUING_REPAIR,
                          [_g("convergence", "fail"), _g("workflow_exit")]):
@@ -1282,12 +1130,7 @@ class TestDeclarationGatedRetry(unittest.TestCase):
             is_settled_by_retry(tail, "convergence", "ledger_missing"))
 
     def test_the_re_run_still_has_to_account_for_itself(self):
-        """A repair whose re-run halts is settled; one that carries on is not.
-
-        The re-run is a fresh verdict. When it comes back `escalate` and the
-        run then halts, both events are accounted -- the honest repair costs
-        nothing. When the run instead does another round, neither is.
-        """
+        """A repair followed by its halt gets credit; one followed by another round does not."""
         halted = [
             _g("convergence", "fail", "ledger_missing"),
             _g("convergence", "fail", "escalate"),
@@ -1317,20 +1160,8 @@ class TestDeclarationGatedRetry(unittest.TestCase):
 
 
 class TestDeclarationDoesNotRegressTheKnownShapes(unittest.TestCase):
-    """Every shape the four previous rounds settled, re-asserted here.
-
-    Restated in one place so the next change to this area has a single list
-    to run. All but one read exactly as they did before the declaration
-    existed, because their step has no vocabulary (`phase3_exit`,
-    `handoff_<name>`) or because the shape was refused either way.
-
-    THE ONE THAT MOVED is the undeclared exit-2 in-place repair, and it moved
-    on purpose. A `convergence:fail` that declares nothing forfeits the retry
-    along with the restart, so this shape is no longer accounted. That costs
-    gate score on a correct legacy run, and it is the price of the invariant:
-    while the undeclared event kept the retry, a truthful `escalate` -- which
-    forfeits it -- scored strictly worse than silence or a typo.
-    """
+    """Preserve prior settlement cases, except undeclared repairs now forfeit retry
+    credit so silence cannot outperform truthful halt reasons."""
 
     def test_the_documented_shapes_hold(self):
         EXIT_2_REPAIR = [_g("convergence", "fail"),
@@ -1382,30 +1213,10 @@ class TestDeclarationDoesNotRegressTheKnownShapes(unittest.TestCase):
 
 
 class TestNoDeclarationBeatsTheTruth(unittest.TestCase):
-    """The invariant as a property, over the full cross product.
-
-    Three sets of hand-picked cases missed this twice, in opposite
-    directions, so it is asserted here as a property over generated event
-    tails rather than as more examples. The two halves:
-
-    NO DECLARATION MAY EXCEED THE PRE-`reason` BASELINE. Round 1 broke this:
-    a declared `ledger_missing` reached a retry the same events could not
-    otherwise reach, so lying paid. The baseline is what the same tail scored
-    when `reason` was read by nothing -- halt tail OR restart OR blunt retry,
-    all ungated.
-
-    NO NON-DECLARATION MAY BEAT A DECLARATION. Round 2 broke this: the retry
-    guard subtracted only when the reason RESOLVED, so absent, empty and
-    misspelled values kept a retry that a truthful `escalate` or `capped`
-    forfeited, and telling the truth cost 0.1667 of gate_compliance. Both
-    guards are now written `declared_halt_reason(...) not in <SET>` so that
-    `None` fails the membership test, which is the shape that satisfies both
-    halves at once.
-
-    The non-answers cover the reviewer's whole list: each vocabulary value,
-    absent, empty, whitespace, unknown, near-miss (case and padding), and the
-    wrong types.
-    """
+    """Check both declaration invariants over generated tails: no reason exceeds
+    the pre-reason baseline, and no missing or invalid reason outperforms a
+    vocabulary value. Include absent, empty, whitespace, unknown, near-match,
+    and wrongly typed values."""
 
     NON_ANSWERS = (
         None, "", "   ", "\t\n", "nope", "escalate: f1,f2 open 4 rounds",
@@ -1417,18 +1228,9 @@ class TestNoDeclarationBeatsTheTruth(unittest.TestCase):
 
     @staticmethod
     def _baseline(tail, step):
-        """What this tail settled before `reason` was read at all.
-
-        A FROZEN COPY of the two predicates as they stood on main, not a
-        re-derivation from the live ones. Deriving the baseline by feeding
-        each gated predicate the reason that does not gate it looks
-        equivalent and is not: the baseline then moves whenever the predicate
-        does, so a change that loosened the rule for `ledger_missing` -- the
-        round-1 bug, exactly -- would raise the baseline with it and pass.
-        Verified by mutation: the derived form missed that; this one catches
-        it. Update this copy only when `is_halt_tail` itself changes, and
-        never to make a failing assertion pass.
-        """
+        """Frozen pre-reason predicates provide an independent baseline. Deriving it
+        from live predicates would hide widened retry rules; mutation testing caught
+        that weakness. Update only when is_halt_tail changes, never to silence failures."""
         def restart(gates):
             if step not in RESUMABLE_STEPS:
                 return False
@@ -1465,12 +1267,7 @@ class TestNoDeclarationBeatsTheTruth(unittest.TestCase):
         return is_halt_tail(tail, step) or restart(tail) or retry(tail)
 
     def _tails(self):
-        """Every tail up to length 3 over a pool of steps and both results.
-
-        Exhaustive rather than random: at these lengths the cross product is
-        small enough to enumerate, and an enumerated property does not depend
-        on a seed to stay reproducible.
-        """
+        """Enumerate every tail up to length three over the step/result pool."""
         events = [_g(step, result)
                   for step in self.STEP_POOL for result in ("pass", "fail")]
         for length in range(4):
@@ -1509,13 +1306,7 @@ class TestNoDeclarationBeatsTheTruth(unittest.TestCase):
                                 f"tail={tail}")
 
     def test_a_step_with_no_vocabulary_ignores_the_field_entirely(self):
-        """`reason` is free-form annotation everywhere outside HALT_REASONS.
-
-        Closing the enum globally would invalidate SKILL.md's own examples
-        (`corrupt_state_file` on a `workflow_exit`), so the predicates must
-        read nothing at all on those steps -- which also means no value can
-        change an outcome there, in either direction.
-        """
+        """Reasons outside HALT_REASONS remain free text and cannot change outcomes."""
         for step in self.STEP_POOL:
             if step_declares_reason(step):
                 continue

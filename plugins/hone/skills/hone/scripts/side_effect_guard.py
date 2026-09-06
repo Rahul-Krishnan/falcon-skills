@@ -25,10 +25,8 @@ import re
 import sys
 from pathlib import Path
 
-# Shared pattern set + frontmatter helpers; the bash patterns, the
-# delegation regex, and the sandbox header are also consumed by
-# validate_eval_criteria.py's hygiene and allowed-tools checks, so edits to
-# any of them belong in hone_common, not here.
+# Edit shared patterns, delegation detection, and sandbox headers in
+# hone_common; validate_eval_criteria also consumes them.
 from hone_common import (
     BASH_SIDE_EFFECT_PATTERNS,
     DELEGATION_RE,
@@ -41,10 +39,8 @@ from hone_common import (
 # Canonical skill list shared with validate_eval_criteria.py; add names there.
 from pipeline_skills import SIDE_EFFECTING_SKILLS
 
-# Simulated responses per pattern label — guard-specific metadata layered on
-# the shared patterns. Every shared pattern must have a response here; a
-# missing one fails loud at import time (KeyError) rather than silently
-# sandboxing without a simulation line.
+# Guard-specific responses for shared patterns. Missing labels raise KeyError
+# at import rather than silently omit simulation instructions.
 _SIMULATED_RESPONSES = {
     "git push": "Branch pushed to remote successfully",
     "git push --force": "Force pushed to remote",
@@ -58,10 +54,8 @@ _SIMULATED_RESPONSES = {
     "printf > file": "file written",
     "echo > file": "file written",
     "cp": "file copied",
-    # Destructive group. Each response reports the outcome the skill expected
-    # and nothing else: it must never name a substitute command, because the
-    # executor reading it would then run that substitute for real. "Do not
-    # execute, report this instead" is the whole contract.
+    # Describe simulated outcomes without suggesting substitute commands the
+    # executor might run for real.
     "rm": "removed (simulated: nothing was deleted)",
     "trash": "moved to trash (simulated: nothing was moved)",
     "find -delete": "matching files removed (simulated: nothing was deleted)",
@@ -85,33 +79,16 @@ BASH_SIDE_EFFECTS = [
     for pattern, label in BASH_SIDE_EFFECT_PATTERNS
 ]
 
-# MCP tool name patterns to remove from allowed_tools, matched as substrings
-# against each tool name (see scan_artifact for why substrings and not \b
-# regexes).
-#
-# Most entries are underscore-anchored write verbs rather than tool names, so
-# a newly connected server's delete_/deploy_/save_ tools are covered the day
-# it appears instead of the day someone remembers to edit this list. Three
-# properties are load-bearing:
-#   - the leading underscore keeps the fragment matching a tool NAME segment
-#     (mcp__gmail__trash_message, slack_send_message) and not a stray English
-#     word;
-#   - the trailing underscore, where present, is what keeps a read-only
-#     sibling out: "_deploy_" catches deploy_to_vercel but not
-#     get_deployment, "_publish_" catches nothing in get_publishable_keys;
-#   - read-only verbs (list_, get_, search_, read_) are deliberately absent:
-#     this guard narrows what an unattended eval can change, not what it can
-#     look at.
+# Match MCP write-name fragments as substrings. Leading underscores anchor
+# tool-name segments; trailing underscores distinguish _deploy_ from
+# get_deployment and _publish_ from get_publishable_keys. Omit read verbs.
 _MCP_TOOL_BLOCKLIST_BASE = [
     # Original chat entries, kept as whole names because artifacts name them
     # in prose without the mcp__ prefix.
     "google_chat",
     "send_message",
     "send_message_as_user",
-    # Deletion and archival: memory_delete, delete_branch, delete_event,
-    # delete_comment, trash_message, trash_thread, trash_file. "_trash"
-    # deliberately does not match untrash_*, which restores rather than
-    # destroys.
+    # Deletion and archival patterns. _trash excludes untrash_* restoration.
     "_delete",
     "_trash",
     "_remove",
@@ -153,12 +130,7 @@ _MCP_TOOL_BLOCKLIST_BASE = [
 
 
 def _blocklist_from_env() -> list[str]:
-    """Extra patterns from HONE_MCP_TOOL_BLOCKLIST (comma-separated).
-
-    Mirrors pipeline_skills.SIDE_EFFECTING_SKILLS' HONE_SIDE_EFFECTING_SKILLS
-    hatch: a server this list has never heard of can be covered without
-    editing the module.
-    """
+    """Read comma-separated HONE_MCP_TOOL_BLOCKLIST additions."""
     raw = os.environ.get("HONE_MCP_TOOL_BLOCKLIST", "")
     return [item.strip().lower() for item in raw.split(",") if item.strip()]
 
@@ -176,29 +148,21 @@ MCP_TOOL_REF_RE = re.compile(r"mcp__[a-z0-9_.-]+__[a-z0-9_]+")
 # hone_common.SANDBOX_HEADER (shared so validate_eval_criteria.py can exempt
 # the block from its hygiene scan).
 
-# Harness tools exempt from the allowed-tools intersection: Skill invokes the
-# artifact under test, AskUserQuestion is added for error-handling tests, and
-# ToolSearch loads deferred tools like AskUserQuestion (score_execution.py
-# scores that attempt as gate evidence). Artifacts never declare any of these.
+# Exempt harness tools: Skill invokes the artifact, AskUserQuestion handles
+# error tests, and ToolSearch loads deferred tools. Artifacts do not declare them.
 HARNESS_TOOLS = frozenset({"skill", "askuserquestion", "toolsearch"})
 
 # Read-only default used when filtering would otherwise empty a test case's
 # allowed_tools (which the criteria schema rejects as invalid).
 SAFE_FALLBACK_TOOLS = ("Read", "Grep", "Glob")
 
-# File types read during the bundle scan. A skill's destructive work almost
-# never lives in SKILL.md: SKILL.md says "run scripts/purge.py" and purge.py
-# is the file that calls rm -rf. hone, workout, smithy and humanize are all
-# shaped this way, so a scan of the markdown alone reported "no side effects"
-# for exactly the artifacts with the largest blast radius.
+# Scan bundled code as well as markdown: side effects may live only in scripts.
 SCANNED_SUFFIXES = frozenset(
     {".md", ".py", ".sh", ".bash", ".zsh", ".js", ".mjs", ".ts", ".rb", ".pl"}
 )
 
-# Directories skipped by the bundle scan: caches, VCS internals, vendored
-# dependencies, and eval output (which holds the criteria this guard writes,
-# sandbox block and all, so scanning it would re-detect the guard's own
-# simulation lines as artifact behaviour).
+# Skip caches, VCS internals, dependencies, and eval output. Eval output can
+# contain this guard's simulation text and must not be scanned as behavior.
 SKIPPED_SCAN_DIRS = frozenset(
     {
         "__pycache__",
@@ -212,19 +176,12 @@ SKIPPED_SCAN_DIRS = frozenset(
     }
 )
 
-# Bounds. This scan runs before every eval, and an artifact can sit anywhere —
-# a hook checked in next to a whole repo — so the walk stops at a file count
-# and a byte budget instead of reading whatever happens to be beneath it.
+# Bound file count and bytes: the artifact may sit beside an entire repository.
 MAX_SCAN_FILES = 200
 MAX_SCAN_BYTES = 2_000_000
 
-# Fail-closed delegation detection: any /slash-command in the artifact that is
-# not a known side-effecting skill is still treated as side-effecting, because
-# an unlisted user pipeline (/deploy, /release) escaping the sandbox can run a
-# real `git push` during an unattended eval. DELEGATION_RE and
-# DELEGATION_STOPLIST live in hone_common (imported above), shared with
-# validate_eval_criteria.py so the sandboxer and the auditor agree on what
-# counts as a slash invocation.
+# Sandbox unknown slash commands too. Share detection with
+# validate_eval_criteria through hone_common.
 
 
 def _base_tool_name(tool: str) -> str:
@@ -237,12 +194,8 @@ def _base_tool_name(tool: str) -> str:
     return re.split(r"[(\s:]", tool.strip(), maxsplit=1)[0].lower()
 
 
-# Outcomes of reading the artifact's declared `allowed-tools:` frontmatter.
-# The three states are distinct on purpose. ABSENT means the artifact declared
-# no prohibition, so no filter applies. PARSED carries the declared list.
-# UNPARSED means the key is present but this parser could not read it, which
-# used to collapse into ABSENT — reading a declaration the guard cannot
-# understand as permission to skip filtering, the opposite of what it said.
+# Keep absent, parsed, and unparsed declarations distinct. Only absence
+# permits skipping the artifact-tool intersection.
 TOOLS_ABSENT = "absent"
 TOOLS_PARSED = "parsed"
 TOOLS_UNPARSED = "unparsed"
@@ -253,12 +206,7 @@ _ALLOWED_TOOLS_LINE_RE = re.compile(
 
 
 def _split_tool_items(raw: str) -> list[str]:
-    """Split a comma-separated tool list on commas at bracket depth 0.
-
-    `Bash(ls:*, du:*, rm:*)` is one declaration, not three: those commas
-    belong to the scope. A plain `raw.split(",")` tore it into fragments like
-    `du:*)` whose base name matched no tool at all.
-    """
+    """Split tool lists at bracket depth zero, preserving scoped Bash commas."""
     items: list[str] = []
     depth = 0
     current: list[str] = []
@@ -284,12 +232,7 @@ def _unquote(value: str) -> str:
 
 
 def _join_multiline_flow(frontmatter: str) -> str | None:
-    """Rejoin an `allowed-tools: [` flow sequence that spans several lines.
-
-    frontmatter_field returns only the field line's tail, which for this shape
-    is a bare "[", so the parser saw an unterminated bracket and gave up.
-    Returns the whole `[...]` collapsed onto one line, None if never closed.
-    """
+    """Join a multiline allowed-tools flow sequence; return None if unclosed."""
     m = _ALLOWED_TOOLS_LINE_RE.search(frontmatter)
     if m is None:
         return None
@@ -325,10 +268,7 @@ def parse_allowed_tools_frontmatter(content: str) -> tuple[list[str] | None, str
         return None, TOOLS_ABSENT
     value = frontmatter_field(fm, "allowed-tools")
     if value is None:
-        # frontmatter_field returns None both for an absent key and for a bare
-        # key with nothing under it. Those are different declarations, so
-        # re-check the raw text rather than reporting the second as ABSENT and
-        # granting the criteria everything.
+        # Distinguish an absent declaration from an empty one in the raw text.
         if _ALLOWED_TOOLS_LINE_RE.search(fm):
             return None, TOOLS_UNPARSED
         return None, TOOLS_ABSENT
@@ -364,11 +304,8 @@ def parse_allowed_tools_frontmatter(content: str) -> tuple[list[str] | None, str
     return None, TOOLS_UNPARSED
 
 
-# Bash scope heads that are destructive whatever their arguments, mapped to
-# the sandbox label that simulates them. scan_artifact can only see prose, and
-# a cleanup skill routinely describes what it deletes without spelling the
-# command out, so the declared scope is the only signal that it deletes at all:
-# memory-cleanup declares Bash(rm:*) and names no command in its body.
+# Destructive Bash scopes supply sandbox labels even when the artifact
+# never spells out the destructive command in its body.
 DESTRUCTIVE_SCOPE_COMMANDS = {
     "rm": "rm",
     "rmdir": "rm",
@@ -412,19 +349,9 @@ def scan_artifact(content: str, self_names: frozenset[str] = frozenset()) -> dic
         if re.search(pattern, content, re.IGNORECASE):
             bash_hits.append(label)
 
-    # Substring match, mirroring the guard_criteria removal filter: real MCP
-    # tool names join segments with underscores (mcp__server__tool_name), and
-    # underscores are word characters, so \b-bounded regexes never fire inside
-    # them (\bsend_message\b cannot match ...slack_send_message). Lookaround
-    # boundaries fail the same way on the leading "_".
-    #
-    # Verb fragments are matched against the mcp__server__tool names found in
-    # the text rather than against the prose, because "_write_" and "_create_"
-    # also occur in ordinary Python (`_write_report`), and now that the scan
-    # reads a skill's bundled scripts, matching those against the raw text
-    # would report an MCP write tool for every skill that ships code. Whole
-    # names keep matching the raw text, so an artifact that says "posts to
-    # google_chat" without the mcp__ prefix is still caught.
+    # MCP names use underscores, so word-boundary regexes miss embedded verbs.
+    # Match verb fragments only within MCP names to avoid Python identifiers
+    # like _write_report. Whole-name patterns may also match prose.
     content_lower = content.lower()
     mcp_names = {m.group(0) for m in MCP_TOOL_REF_RE.finditer(content_lower)}
     mcp_hits: list[str] = []
@@ -439,13 +366,8 @@ def scan_artifact(content: str, self_names: frozenset[str] = frozenset()) -> dic
     # Detect invocations of known side-effecting skills/commands
     delegated: list[str] = []
     for skill_name in SIDE_EFFECTING_SKILLS:
-        # self_names is checked here as well as in the unknown loop below. The
-        # artifact under test is the eval's entry point, so sandboxing its own
-        # name instructs the executor to simulate the very invocation being
-        # measured: the run scores nothing while the guard summary still
-        # reports test cases modified, and nothing signals the neutered eval.
-        # A pipeline skill evaluating itself (quench, forge, present) is the
-        # normal case, not an edge one.
+        # Exclude self-invocation in both delegation loops so the eval still runs
+        # the artifact under test.
         if skill_name in self_names:
             continue
         # Match /skill-name or Skill("skill-name") or skill: "skill-name"
@@ -478,12 +400,7 @@ def scan_artifact(content: str, self_names: frozenset[str] = frozenset()) -> dic
 def build_sandbox_context(
     bash_commands: list[str], delegated_skills: list[str]
 ) -> str:
-    """Build runner_context simulation block for detected side effects.
-
-    Each section is emitted only when it has entries. The command preamble
-    used to print unconditionally, so an artifact whose side effects are all
-    delegations announced a list of commands and then showed none.
-    """
+    """Build simulation instructions, omitting sections without findings."""
     lines = [f"\n\n{SANDBOX_HEADER}"]
     matched = [
         (label, response)
@@ -528,11 +445,10 @@ def guard_criteria(
     delegated_skills: list[str],
     artifact_allowed_tools: list[str] | None = None,
 ) -> dict:
-    """Modify criteria to sandbox side effects. Returns summary of changes.
+    """Sandbox side effects and return a change summary.
 
-    If artifact_allowed_tools is provided (non-None), each test case's
-    `allowed_tools` is intersected with it — tools not declared by the
-    artifact itself are removed.
+    When artifact_allowed_tools is provided, intersect each test's tool list
+    with it, subject to the harness-tool exemptions.
     """
     sandbox_context = (
         build_sandbox_context(bash_commands, delegated_skills)
@@ -543,10 +459,7 @@ def guard_criteria(
     tools_removed: list[str] = []
     fallbacks_applied = 0
 
-    # Filter against the full MCP_TOOL_BLOCKLIST, not just scan hits:
-    # mcp_tools only carries patterns the artifact text happens to name, and
-    # LLM-generated criteria can grant a dangerous tool the artifact never
-    # mentions. Keying the filter off artifact text alone fails open.
+    # Filter the full MCP blocklist: criteria may grant tools absent from artifact text.
     blocked_patterns = set(mcp_tools) | set(MCP_TOOL_BLOCKLIST)
 
     for tc in criteria.get("test_cases", []):
@@ -566,11 +479,8 @@ def guard_criteria(
                 tools_removed.extend(removed)
                 modified = True
 
-        # Intersect with artifact-declared allowed_tools frontmatter.
-        # Any tool not declared by the artifact is removed from the test case,
-        # except harness tools (Skill, AskUserQuestion), which the eval itself
-        # needs and no artifact declares. Comparison is on base tool names so
-        # a declared scoped form like Bash(git:*) keeps a test's plain Bash.
+        # Intersect declared tools by base name, preserving harness exemptions.
+        # A scoped Bash declaration can retain a test's plain Bash.
         if artifact_allowed_tools is not None:
             current = tc.get("allowed_tools", [])
             if current:
@@ -587,15 +497,10 @@ def guard_criteria(
                     tools_removed.extend(removed)
                     modified = True
 
-        # Never write allowed_tools: [] — the criteria schema declares it
-        # non_empty, and the next mandatory validation step has no backup to
-        # restore. Fall back to the declared frontmatter set (MCP-filtered),
-        # else a read-only default.
+        # The schema requires a nonempty tool list. Fall back to MCP-filtered
+        # declared tools, then read-only defaults.
         if tc.get("allowed_tools") == [] and modified:
-            # Filter against blocked_patterns (scan hits + full blocklist),
-            # exactly like the removal filter above: filtering on scan hits
-            # alone re-adds the very tool the blocklist just removed whenever
-            # the artifact frontmatter declares it.
+            # Apply the full blocklist here too so fallback cannot restore blocked tools.
             fallback = [
                 t
                 for t in (artifact_allowed_tools or [])
@@ -624,19 +529,11 @@ def guard_criteria(
 
 
 def collect_scan_text(artifact_path: Path) -> tuple[str, list[str]]:
-    """Artifact text plus every file the artifact ships beside it.
+    """Read the artifact and its bundled files, returning text and relative paths.
 
-    Returns (combined_text, relative paths of the bundled files read). The
-    walk covers the artifact's own directory tree — scripts/, references/ and
-    any other subdirectory — which is where a skill keeps the code that
-    actually deletes and publishes; the previous scan read SKILL.md and
-    references/*.md only, so a SKILL.md whose whole body was
-    `python3 scripts/purge.py` matched no pattern and scanned clean.
-
-    The walk stays inside artifact_path.parent: symlinks are not followed and
-    any entry resolving outside that root is skipped, so it can never wander
-    up into the operator's home directory. MAX_SCAN_FILES and MAX_SCAN_BYTES
-    bound the cost.
+    Scan the whole artifact directory, including scripts that perform operations
+    only referenced by the entry file. Skip symlinks and paths resolving outside
+    the root; MAX_SCAN_FILES and MAX_SCAN_BYTES bound the scan.
     """
     text = artifact_path.read_text(errors="replace")
     bundled: list[str] = []
@@ -698,9 +595,7 @@ def main() -> int:
         print(f"Error: criteria not found: {criteria_path}", file=sys.stderr)
         return 1
 
-    # Scan the artifact and everything it ships alongside it: scripts/,
-    # references/ at any depth, and non-markdown reference files, all of which
-    # the old references/*.md glob missed.
+    # Scan bundled scripts and nested references, including non-markdown files.
     artifact_content, bundled_files = collect_scan_text(artifact_path)
 
     # Scan for side effects. The artifact's own names never count as
@@ -729,9 +624,7 @@ def main() -> int:
             file=sys.stderr,
         )
 
-    # A declared destructive scope counts as a detected command even when the
-    # body never spells the invocation out. Without this, a skill whose whole
-    # job is deletion scanned clean and its unattended eval ran holding real rm.
+    # Declared destructive scopes count even when the body omits the command.
     declared_destructive = declared_destructive_labels(artifact_allowed)
     for label in declared_destructive:
         if label not in bash_commands:
@@ -755,11 +648,8 @@ def main() -> int:
         criteria, bash_commands, mcp_tools, delegated_skills, artifact_allowed
     )
 
-    # Genuinely clean only when the artifact shows no signals AND the guard
-    # removed nothing from the criteria themselves. An unparseable
-    # allowed-tools declaration is never clean: the artifact asked for a
-    # narrower toolset than the criteria grant and the guard could not honour
-    # it, which the operator has to see rather than read "no side effects".
+    # Report clean only when neither the scan nor criteria filtering finds issues.
+    # An unparseable declaration must remain visible.
     if (
         not bash_commands
         and not mcp_tools

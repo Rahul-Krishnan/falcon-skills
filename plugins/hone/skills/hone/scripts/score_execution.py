@@ -44,33 +44,13 @@ NEGATION_CUES = re.compile(
     re.IGNORECASE,
 )
 
-# How far back to look for a negation cue preceding a forbidden-phrase match.
-# Wide enough to span a coordinated list under one denial ("did not reach the
-# audit, criteria generation, or the eval runner"): at 40 the cue fell outside
-# the window for every item after the first, so a correct halt that enumerated
-# what it skipped scored as if it had done those things. The sentence-break
-# trim below, not this constant, is what stops a cue in a previous sentence
-# from excusing the current one.
+# Negation lookback spans coordinated lists. Sentence and clause boundaries
+# below prevent a denial from covering unrelated progress.
 NEGATION_WINDOW = 160
 
-# Clause boundaries inside a sentence. A negation only excuses the clause it
-# governs: "Skipping the audit and proceeding to Phase 2" negates the audit,
-# not the forward progress that follows the conjunction. Without this the
-# lookback credited any cue sharing a sentence with the forbidden phrase, so
-# a run that announced the forbidden behaviour verbatim scored 1.0.
-# "or" is deliberately absent: it coordinates the *scope* of a single denial
-# ("I did not run the audit or proceed to Phase 2") far more often than it
-# starts a new positive clause.
-#
-# The dash and the causal/resultative conjunctions join a full second clause
-# exactly as a comma splice does, and until they were listed here a cue up to
-# NEGATION_WINDOW characters back excused the clause after them: "No files
-# were found in the target directory - the structural audit ran anyway" read
-# the forward progress as denied. The window is 160 characters (see above) so
-# that a coordinated list stays under one denial; that width is only safe if
-# every real clause boundary inside the sentence is a break, which is what
-# these add. "yet" is deliberately absent -- "has not yet run the structural
-# audit" would break between the cue and the phrase.
+# Clause boundaries end a negation scope. Keep "or" for coordinated denials
+# and "yet" for phrases such as "has not yet run". Dashes and causal/result
+# conjunctions can introduce positive clauses within the same sentence.
 CLAUSE_BREAK_RE = re.compile(
     r",|;|\s+--?\s+|\s*[\u2013\u2014]\s*"
     r"|\bthen\b|\band\b|\bbut\b|\bso\b|\bbecause\b"
@@ -85,43 +65,15 @@ CLAUSE_BREAK_RE = re.compile(
 # comma's conditional treatment rather than the semicolon's hard break.
 LIST_SEPARATOR_RE = re.compile(r"\A(?:,|\s*-{1,2}\s*|\s*[\u2013\u2014]\s*)\Z")
 
-# A comma separates list items or splices two clauses, and the two need
-# opposite treatment. "did not reach A, B, or C" is one denial covering three
-# items, so breaking at every comma left each item after the first with a
-# cue-free window. "Skipped the audit, ran Phase 1" is a splice, and reading
-# through that comma hands the second clause the first one's denial --
-# excusing the forward progress `required_absent` exists to catch.
-#
-# A comma is therefore a hard break unless the sentence shows positive
-# evidence of a list: an "or"/"nor" coordinating the items, which is the
-# widening the design rationale accepts. Everything else breaks, as it did
-# before the widening.
-#
-# Testing the shape of the clause after the comma instead does not work. That
-# rule read a splice as a list whenever the second clause failed to start with
-# a known finite verb or subject pronoun, so a noun subject ("Skipped the
-# structural audit, Phase 2 was entered anyway", "..., the run proceeded to
-# Phase 2") inherited the first clause's denial -- a false negative
-# unconditional comma breaks did not have. Widening that opener vocabulary to
-# determiners and nouns only moves the boundary, and narrowing it to subject
-# pronouns re-breaks a list of verb phrases ("did not run the audit, validate
-# the handoff, or score the results"), whose conjuncts are verb-initial by
-# construction. The coordinator is the signal that separates the two shapes
-# without a vocabulary to maintain.
-#
-# Residual gap: a splice that happens to carry a later "or" stays excused.
-# That is the conservative direction, and separating those for certain needs a
-# parser, not a regex. A semicolon remains a hard break unconditionally.
+# Treat commas as clause breaks unless or/nor marks a coordinated list.
+# This preserves "did not reach A, B, or C" without excusing "Skipped A, ran B".
+# Classifying by the next verb or subject misses noun subjects and breaks
+# verb-phrase lists. A later "or" can still make a splice ambiguous; resolving
+# that fully needs parsing. Semicolons always break scope.
 LIST_CONTINUATION_RE = re.compile(r"\b(?:or|nor)\b", re.IGNORECASE)
 
-# What may sit between the comma and the phrase for the comma to still be a
-# list separator rather than a clause boundary. A coordinator alone is not
-# enough: `LIST_CONTINUATION_RE` scans the rest of the sentence, so an "or"
-# anywhere past the phrase used to make the comma transparent, and
-# "Skipped the audit, the run proceeded to Phase 2 or halted" inherited the
-# denial from a clause it does not belong to. In a real list the run-up to
-# each item is glue ("A, B, or the C"); in a comma splice it is a clause with
-# its own subject and verb ("the run proceeded to").
+# A list item permits only connecting words between comma and phrase. An "or"
+# later in the sentence alone must not excuse "the run proceeded to Phase 2".
 LIST_ITEM_GLUE_RE = re.compile(
     r"^[\s,]*(?:(?:or|and|nor|the|a|an|its|their|any|then)\b[\s,]*)*$",
     re.IGNORECASE,
@@ -178,14 +130,9 @@ GRADE_THRESHOLDS = [
     (0.0, "F"),
 ]
 
-# Step marker patterns, case-insensitive. These markers are searched for as
-# literals in the execution transcript, so the numeric form must capture its
-# heading title: the bare marker "## 1." sent score_workflow_sequence hunting
-# for "1.", "2.", "3.", which any ordered list or ascending version number
-# satisfies. structural_audit.py keeps the looser form — it only counts step
-# transitions. Separators are [ \t], not \s, so the title has to be on the
-# same line; \s spans newlines, which let an untitled `## 1.` borrow the next
-# heading as its title.
+# Numeric step markers must include their heading title; bare numbers also
+# match ordinary lists and versions. Use horizontal whitespace to keep titles
+# on the same line. structural_audit only counts transitions and is looser.
 STEP_PATTERNS = [
     re.compile(r"^#{2,4}\s+(?:Step|Phase|Stage)\s+\d+", re.MULTILINE | re.IGNORECASE),
     re.compile(r"^#{2,4}\s+Part\s+[A-Z]", re.MULTILINE | re.IGNORECASE),
@@ -197,51 +144,17 @@ STEP_PATTERNS = [
 # keyword-counting cap.
 ECHOED_GATE_CAP = 0.7
 
-# Minimum number of structured gate events gate_compliance will divide by.
-# A run that emits fewer has its missing evidence counted as neutral
-# (NEUTRAL_GATE_CREDIT each) in both halves of the ratio, so the dimension's
-# range narrows to what the run actually demonstrated.
+# Pad structured gate evidence below this count with NEUTRAL_GATE_CREDIT.
+# Without a floor, one passing event scores 1.0 and under-reporting improves
+# the score. The floor limits one event's contribution to 0.25, still above
+# the 0.1 regression threshold.
 #
-# Why a floor at all: the denominator is the number of gate events the
-# executor chose to emit, so without one it is self-selected. One pass event
-# scored 1.0; five events with one malformed scored 0.8. Emitting less bought
-# a better score, and the whole 0..1 range was reachable from a single
-# judgment on a single event -- on a dimension Phase 3 auto-reverts on when it
-# moves more than 0.1 (references/phase3-reevaluation.md step 5).
-#
-# Why 4, measured over 289 scored gate_compliance records in ~/skill-eval
-# (144 deterministic_scores.json files, 124 of them on the structured path):
-#
-#   gates in test |  1     2     3   |  4    5    6    7   8   9  10  12  14
-#   tests         | 38    28    27   |  7    7    8    1   3   1   2   1   1
-#   share         | 30.6% 22.6% 21.8%| 5.6% 5.6% 6.5% ...
-#
-#   - Every one of the 21 records where halt adjudication actually fires
-#     (an expected-fail gate, the most delicate predicate in this file) sits
-#     at 1, 2 or 3 gates: {1: 9, 2: 9, 3: 3}. 4 is the smallest floor that
-#     reaches all of them.
-#   - 4 is the first bucket past the distribution's elbow: the per-bucket
-#     share falls 21.8% -> 5.6%, a factor of ~3.9, between 3 and 4.
-#   - 4 does not exceed the mandatory gate sequence a complete run owes,
-#     which is FIVE events since `convergence` became mandatory
-#     (phase1_to_phase2, phase2_to_phase3, phase3_exit, convergence,
-#     workflow_exit; see SKILL.md > Gate Events). That bound is the reason,
-#     not the equality: a floor at or below the mandatory length never pads a
-#     complete run, so 1.0 still means "emitted what it owed, all compliant"
-#     rather than "emitted one event, and it was fine". An earlier revision
-#     of this comment read 4 AS the mandatory length, which was true only
-#     before `convergence` joined it.
-#   - 4 is the first integer above the measured mean of 3.00 gates per test,
-#     so for a test of typical size the real evidence still outweighs the
-#     padding. A larger floor (10 is where one event's move first falls under
-#     the 0.1 revert threshold on the raw ratio) would invert that for 96.8%
-#     of tests: the prior, not the observation, would set the score.
-#
-# The floor bounds, it does not eliminate: one gate event can still move the
-# dimension by up to 1/4 = 0.25, which is above the 0.1 threshold. Getting
-# under 0.1 is not reachable from this data without the padding dominating
-# every real observation. What it removes is the case where one judgment
-# moves the dimension across its entire range, which was 30.6% of tests.
+# Chosen from 289 gate records across 144 score files (124 structured): 38,
+# 28, and 27 tests had 1, 2, and 3 gates; all 21 halt cases were in those
+# buckets. Four is the first integer above the mean of 3.00, where frequency
+# drops from 21.8% to 5.6%, and is below the five mandatory full-run events.
+# A floor of 10 would reduce sensitivity further but make padding dominate
+# 96.8% of tests. Keep complete runs unpadded.
 GATE_EVIDENCE_FLOOR = 4
 
 # What an un-emitted gate event is worth when padding to the floor: neither
@@ -251,32 +164,17 @@ GATE_EVIDENCE_FLOOR = 4
 NEUTRAL_GATE_CREDIT = 0.5
 
 # Gate/validation keywords
-# Inflected forms must match: a response discussing "gates[]", "validation",
-# or "validate_handoff.py" is discussing gates, and the bare-stem \b anchors
-# missed all three (\bgate\b fails on "gates", \bvalidate\b fails on
-# "validation" and on "validate_handoff").
-# No closing anchor at all was too loose, though: the stems then matched
-# "gateway", "stopwatch", and "stopped", and the legacy fallback divides the
-# match count by expected_gates, so a halt narrative saying "stopping" hit the
-# 0.7 keyword ceiling with no gate evidence. `(?![^\W_])` closes that without
-# \b's failure mode: `_` is a word char, so \b would put "validate_handoff"
-# back out of reach.
+# Match gate/validation inflections and names such as validate_handoff.py.
+# The final boundary allows underscores while excluding gateway, stopwatch,
+# and stopped, which otherwise inflate legacy keyword scores.
 GATE_KEYWORDS = re.compile(
     r"\b(?:gates?|checklists?|validat(?:e|es|ed|ing|ion|ions|or|ors)"
     r"|STOP|rubrics?|interaction schema)(?![^\W_])",
     re.IGNORECASE,
 )
 
-# A leading interrogative closed by a question mark is a clarification request
-# whatever nouns it uses. Without it, the documented argument-validation
-# fallback ("What artifact type do you want to hone? ...") matched no
-# clarification phrase and scored as no communication at all.
-# `[^?]` spanned newlines, so any line opening with an interrogative word
-# paired with a question mark up to 200 characters later -- on some entirely
-# different line -- counted as a clarification request. `[^?\n]` keeps the
-# question on the line that opens it, which is the shape the documented
-# fallback actually has. Which line that may be is `_opens_with_question`'s
-# business, below; this pattern only says what a question looks like.
+# A clarification question must open with an interrogative and end on the
+# same line. _opens_with_question determines whether it opens the response.
 INTERROGATIVE_OPENER = re.compile(
     r"^[ \t]*(?:what|which|who|where|how)\b[^?\n]{0,200}\?",
     re.IGNORECASE | re.MULTILINE,
@@ -284,27 +182,11 @@ INTERROGATIVE_OPENER = re.compile(
 
 
 def _opens_with_question(response: str) -> bool:
-    """True when the response *starts* with a clarification question.
+    """True when the first non-empty response line is a clarification question.
 
-    Keeping the question on its own line was not enough on its own: a
-    narration that stops to ask a rhetorical question ("Run complete.\\nHow
-    does the resume protocol work? It re-reads SKILL.md.\\nAll 9 steps done.")
-    matched mid-response and scored as a clarification the executor never
-    requested -- the same false positive the word-boundary work on "ask" and
-    "user" below it was written to close.
-
-    The documented fallback has no such ambiguity: when AskUserQuestion is
-    unavailable, SKILL.md's argument-validation conditions say the entire
-    response is the question and its options, "no preamble, no closing line".
-    So the question opens the response or it is not that fallback. Anchoring
-    to the first non-empty line (rather than to position 0) keeps a leading
-    blank line from disqualifying it.
-
-    Residual: a response that opens by restating a question it then answers --
-    the shape a knowledge-extraction prompt invites -- still matches. Telling
-    a restated question from a real one is not something a regex settles, and
-    the branch this feeds scores 0.9, not a full score.
-    """
+    The documented AskUserQuestion fallback has no preamble or closing. Mid-response
+    rhetorical questions do not qualify. An opening question answered by the
+    response still matches; regex cannot resolve that ambiguity, so credit is 0.9."""
     for line in response.splitlines():
         if not line.strip():
             continue
@@ -385,14 +267,9 @@ SKILL_WEIGHTS = {
     "research_first": 0.05,
 }
 
-# No voice_compliance and no parallel_efficiency here, for the reason KE drops
-# voice_compliance: the prose scored is the eval runner agent's, not the
-# artifact's. The execution branch now emits exactly the dimensions its active
-# profile weights, so neither is computed for commands at all. Previously both
-# were emitted and then silently dropped by _renormalize_weights, which put two
-# numbers in `dimensions` and `aggregate_dimensions` that read as if they moved
-# the composite when they could not -- and that Phase 3's "a drop > 0.1 in any
-# dimension flags a regression" rule would still auto-revert on.
+# Command profiles omit voice_compliance and parallel_efficiency: they measure
+# the eval runner, not the artifact. Emit only weighted dimensions so unweighted
+# numbers cannot trigger Phase 3 regression reverts.
 COMMAND_WEIGHTS = {
     "workflow_sequence": 0.226,
     "gate_compliance": 0.186,
@@ -500,26 +377,14 @@ def map_grade(score: float) -> str:
 
 
 def _test_input_dict(test_result: dict) -> dict:
-    """Return test_input as a dict, whatever shape the runner wrote.
-
-    eval runner v2+ writes test_input as an object, but older runners and
-    hand-merged results files store the bare prompt string. Every consumer below
-    reads it with .get(), so a str here used to raise AttributeError and abort
-    the entire scoring run. Coerce once, in one place.
-    """
+    """Normalize test_input to a dict, including legacy bare-prompt strings."""
     test_input = test_result.get("test_input")
     return test_input if isinstance(test_input, dict) else {}
 
 
 def _runner_context(test_result: dict, *, authored_only: bool = True) -> str:
-    """Lowercased runner_context, by default with injected guard text removed.
-
-    side_effect_guard.py appends a SAFETY SANDBOX block to runner_context, and
-    that block contains ordinary English ("Do NOT invoke these skills for
-    real...") that the profile heuristics were matching on. A header the
-    pipeline injects must never be able to flip a test's profile, so every
-    heuristic except the sandbox detector itself reads the *authored* prefix.
-    """
+    """Return lowercase runner_context, excluding injected sandbox text by default.
+    Profile heuristics use the authored prefix; only sandbox detection reads the guard."""
     raw = typed_get(_test_input_dict(test_result), "runner_context", "", expected=str)
     if authored_only:
         raw = raw.split(SANDBOX_HEADER)[0]
@@ -527,17 +392,9 @@ def _runner_context(test_result: dict, *, authored_only: bool = True) -> str:
 
 
 def _is_knowledge_extraction(test_result: dict) -> bool:
-    """Detect knowledge extraction tests vs execution tests.
-
-    Knowledge extraction tests ask the executor to read a file and answer
-    questions. They never invoke the skill under test. Execution-oriented
-    dimensions (workflow_sequence, state_persistence, output_structure) are
-    inapplicable to these tests.
-
-    Detection uses two signals that must agree:
-    1. authored runner_context contains explicit KE markers
-    2. Tool usage is read-only (no Skill/Write/Edit/Bash)
-    """
+    """Detect read-only knowledge extraction: authored context must contain KE
+    markers and tools must exclude Skill, Write, Edit, and Bash. Execution
+    dimensions do not apply because the skill was never invoked."""
     runner_context = _runner_context(test_result)
     has_ke_marker = any(marker in runner_context for marker in KE_MARKERS)
 
@@ -553,17 +410,9 @@ def _is_knowledge_extraction(test_result: dict) -> bool:
 
 
 def _is_error_handling_test(test_result: dict) -> bool:
-    """Detect error-handling tests that verify graceful early termination.
-
-    Error-handling tests give invalid input (missing args, wrong type,
-    conflicting flags) and expect the skill to STOP without executing
-    the workflow. Execution dimensions are meaningless for these tests.
-
-    Detection uses three signals (any one sufficient):
-    1. test category is "error_handling"
-    2. required_absent contains 2+ workflow progression keywords
-    3. runner_context contains error-handling markers
-    """
+    """Detect invalid-input tests that should stop before workflow execution.
+    Accept an error_handling category, at least two forbidden workflow-progression
+    keywords, or error-handling markers in runner_context."""
     test_input = _test_input_dict(test_result)
 
     # Signal 1: test category (normalize hyphen/underscore; the schema enum's
@@ -602,37 +451,15 @@ def _is_error_handling_test(test_result: dict) -> bool:
 
 
 def _is_failure_mode(test_result: dict) -> bool:
-    """Detect failure-mode tests where a specific failure condition was injected.
-
-    Failure-mode tests inject a failure condition (corrupt state, handoff
-    validation error, compaction, regression) and verify the skill detects
-    and handles it per its documented recovery path.
-
-    Execution dimensions (workflow_sequence, parallel_efficiency,
-    state_persistence, output_structure) are inapplicable — the correct
-    behavior is to detect and halt, not complete the workflow.
-
-    Detection: check the authored runner_context for FAILURE CONDITION markers.
-    The explicit test_profile field is checked first in _resolve_test_profile
-    and takes precedence; this is only the heuristic fallback.
-    """
+    """Detect injected failures from authored FAILURE CONDITION markers.
+    Execution dimensions do not apply to recovery tests. This heuristic runs
+    only after _resolve_test_profile checks the explicit test_profile."""
     return any(marker in _runner_context(test_result) for marker in FM_MARKERS)
 
 
 def _is_side_effect_guarded(test_result: dict) -> bool:
-    """Detect side-effect-guarded tests where the executor was told to simulate.
-
-    The side_effect_guard.py script injects a SAFETY SANDBOX block into
-    runner_context telling the executor to simulate dangerous commands
-    (git push, gh pr create, /forge, /ship, etc.) instead of executing them.
-
-    Execution-oriented dimensions (workflow_sequence, state_persistence)
-    are inapplicable because the executor was explicitly told NOT to
-    execute those commands. Penalizing simulation compliance is inverted.
-
-    Detection: check runner_context for SAFETY SANDBOX markers, or check
-    for a declared test_profile field.
-    """
+    """Detect tests told to simulate side effects via SAFETY SANDBOX markers or
+    a declared profile. Exclude execution dimensions for actions the guard forbids."""
     test_input = _test_input_dict(test_result)
 
     # Signal 1: explicit test_profile field (preferred, typed)
@@ -652,16 +479,9 @@ def compute_composite(
     weights: dict[str, float],
     critical_dim: str,
 ) -> float:
-    """Weighted geometric mean with dimension floor and critical dim cap.
-
-    The floor is DIMENSION_FLOOR rather than EPSILON so a single zeroed
-    dimension caps the composite instead of annihilating it. With EPSILON, one
-    zeroed dimension at weight 0.51 produced 1e-6 ** 0.51 == 8.7e-4, three
-    orders of magnitude below "the executor did nothing", which made failing
-    runs impossible to rank against each other. The critical-dimension cap
-    below is the mechanism that expresses "the critical dimension failed", and
-    it still fires.
-    """
+    """Compute the weighted geometric mean with DIMENSION_FLOOR and a critical cap.
+    The floor keeps zero dimensions from collapsing scores to near zero; the
+    critical-dimension cap still penalizes critical failures."""
     clamped = {dim: max(score, DIMENSION_FLOOR) for dim, score in scores.items()}
     raw = math.prod(clamped[dim] ** weights[dim] for dim in clamped if dim in weights)
     # Both exits round: the capped branch used to return the raw float, so a
@@ -673,13 +493,7 @@ def compute_composite(
 
 
 def _extract_steps_from_artifact(artifact_content: str) -> list[str]:
-    """Find step markers in artifact content, in document order.
-
-    Matches are collected with their offsets across all patterns and sorted
-    by position. Iterating pattern-by-pattern instead would group steps by
-    heading style ("## Step 1", "## 2.", ...), and a mixed-style artifact
-    would hand score_workflow_sequence a mis-ordered expected sequence.
-    """
+    """Find step markers in document order, sorting offsets across heading styles."""
     positioned: list[tuple[int, str]] = []
     for pattern in STEP_PATTERNS:
         for match in pattern.finditer(artifact_content):
@@ -688,31 +502,14 @@ def _extract_steps_from_artifact(artifact_content: str) -> list[str]:
 
 
 def _tool_input(entry: dict) -> dict:
-    """Return a timeline entry's tool_input as a mapping, whatever it holds.
-
-    `entry.get("tool_input") or {}` guards None but not a string: a non-empty
-    string is truthy, so it survives the `or` and raises AttributeError on the
-    next .get. The caller swallows that into composite 0.0, so a summary
-    string in one field read as total artifact failure across every dimension
-    of that test. Hand-recorded and third-party traces carry strings here
-    routinely.
-    """
+    """Return tool_input as a mapping, or {} for malformed trace values."""
     value = entry.get("tool_input")
     return value if isinstance(value, dict) else {}
 
 
 def _timeline_entries(test_result: object) -> list[dict]:
-    """A test record's execution_timeline, reduced to the entries that are objects.
-
-    `execution_timeline` is executor-written JSON and a dozen call sites walk
-    it with a bare `entry.get(...)`. One bare string element -- a narrative
-    line a hand-recorded or third-party trace dropped in among the structured
-    ones -- raised AttributeError from whichever site reached it first, and
-    `score_from_results` swallowed that into `composite: 0.0` for the entire
-    test. Normalizing once here is the same move `_tool_input` made for a
-    single field, applied to the container: every consumer downstream can
-    assume dicts because this is the only door in.
-    """
+    """Return only object entries from the executor-written execution_timeline.
+    Normalize once so malformed entries cannot crash every downstream scorer."""
     if not isinstance(test_result, dict):
         return []
     timeline = test_result.get("execution_timeline")
@@ -722,41 +519,22 @@ def _timeline_entries(test_result: object) -> list[dict]:
 
 
 def _entry_text(entry: object) -> str:
-    """Return a timeline entry's `content` when it is text, else "".
-
-    Same failure this file already hardened `_tool_input` against, one field
-    over: `content` is guarded elsewhere only by `if content:`, which a
-    non-empty dict or list passes, and the string concatenation on the next
-    line then raises TypeError. `score_from_results` swallows that into
-    `composite: 0.0` for the whole test, so one oddly-shaped entry in a
-    hand-recorded or third-party trace reads as total artifact failure.
-    """
+    """Return textual timeline content, or an empty string for other types."""
     if not isinstance(entry, dict):
         return ""
     content = entry.get("content")
     return content if isinstance(content, str) else ""
 
 
-# Step types whose `content` is the executor's own prose. The runner records
-# user-facing text as `text`, and as `fallback_text_output` / `fallback_output`
-# when AskUserQuestion is unavailable and the skill writes the question out
-# instead (references/phase1-evaluation.md:516). Reading only `text` let the
-# same sentence pass on the fallback path and fail on the normal one, which is
-# the path the AskUserQuestion anti-pattern cases exist to police.
+# Executor-authored prose types, including text fallbacks when AskUserQuestion
+# is unavailable. Apply the same checks to normal and fallback output.
 AUTHORED_TEXT_STEP_TYPES: frozenset[str] = frozenset(
     {"text", "fallback_text_output", "fallback_output"}
 )
 
 
 def _tool_name(entry: dict) -> str:
-    """The tool name on a timeline entry, under either key the runners emit.
-
-    Eval runners store it as `tool_name` or as the `tool` alias. Half the
-    scorers honoured both and half read `tool_name` alone, so a runner using
-    `tool` zeroed gate_compliance and state_persistence — the critical
-    dimension for two profiles — on a fully compliant run. Every scorer reads
-    the name through here so the two shapes cannot diverge again.
-    """
+    """Return the tool name from tool_name or the runner's tool alias."""
     return entry.get("tool_name") or entry.get("tool") or ""
 
 
@@ -786,13 +564,9 @@ def _get_text_entries(timeline: list) -> list[dict]:
 def score_workflow_sequence(
     timeline: list[dict], artifact_content: str, agent_response: str = ""
 ) -> dict[str, float | str]:
-    """Score how well the execution follows the artifact's step sequence.
-
-    Known limitation (v1): When the executor reads the artifact being evaluated
-    (eg hone-on-hone), step markers appear in timeline content in document order,
-    inflating the score. This is a known false-positive source for self-referential
-    evaluations. Future fix: filter tool_result content matching the artifact.
-    """
+    """Score the artifact's step sequence. Known limitation: reading the artifact
+    can put its markers into the timeline and inflate self-evaluation scores.
+    Filtering matching tool results remains unimplemented."""
     steps = _extract_steps_from_artifact(artifact_content)
     if not steps:
         return {"score": 1.0, "evidence": "No steps detected in artifact, default 1.0"}
@@ -832,17 +606,9 @@ def score_workflow_sequence(
 def _extract_gate_events(
     timeline: list[dict], agent_response: str = ""
 ) -> tuple[list[dict], str]:
-    """Extract gate events from state file writes or agent response text.
-
-    Primary: Write/Edit tool calls to state files with a 'gates' array in content.
-    Fallback: scan agent_response for inline gate event JSON (captures simulation mode
-    where Write content is not stored in tool_input).
-
-    Returns (gates, source) where source is "state_file", "response_text", or
-    "" when nothing was found. The source matters: a gate blob found in prose
-    is indistinguishable from a state-file template the executor merely quoted,
-    so the caller scores it as weaker evidence than an actual write.
-    """
+    """Extract (gates, source) from state-file writes, then response JSON.
+    source is state_file, response_text, or empty when absent. Prose gates receive
+    less credit because quoted templates are indistinguishable from real events."""
     # Primary: tool_input.content on Write/Edit calls to state files
     tool_uses = _get_tool_uses(timeline)
     for entry in reversed(tool_uses):
@@ -887,15 +653,8 @@ def _extract_gate_events(
 
 
 def _is_well_formed_gate(gate: object) -> bool:
-    """A gate event is well-formed when it has the required keys and a valid result.
-
-    The isinstance guard is load-bearing, not defensive noise: `gates[]` is
-    parsed out of executor-written JSON, so an element can be a bare string.
-    `"step" in gate` is then a substring test a narrative gate line passes,
-    and the `.get` on the next line raises AttributeError -- which the caller
-    swallows into `composite: 0.0` for the whole test. validate_gates.py
-    guards the same iteration the same way.
-    """
+    """Require an object with the gate keys and a valid result. Non-object entries
+    are malformed evidence and must not crash the scorer."""
     if not isinstance(gate, dict):
         return False
     if not all(key in gate for key in ("step", "judge", "result")):
@@ -904,16 +663,9 @@ def _is_well_formed_gate(gate: object) -> bool:
 
 
 def _gate_evidence_ceiling(total: int) -> float:
-    """The most gate_compliance a run that emitted `total` events can score.
-
-    1.0 at or above the floor; below it, unanimous compliance still leaves the
-    padded events at NEUTRAL_GATE_CREDIT. It is what the two evidence-quality
-    rules are composed through: the prose-quoted cap is ECHOED_GATE_CAP *of
-    what this volume of evidence could have proved*, not a flat 0.7. Flat, the
-    two rules stopped composing exactly where both apply hardest -- at one
-    event the padded ceiling (0.625) is already under 0.7, so a gate merely
-    quoted in a response scored identically to one written to a state file.
-    """
+    """Return the maximum gate score for total events, including neutral padding.
+    Apply ECHOED_GATE_CAP to this ceiling so quoted gates receive less credit
+    than written gates even below the evidence floor."""
     if total >= GATE_EVIDENCE_FLOOR:
         return 1.0
     padded = total + NEUTRAL_GATE_CREDIT * (GATE_EVIDENCE_FLOOR - total)
@@ -921,27 +673,11 @@ def _gate_evidence_ceiling(total: int) -> float:
 
 
 def _gate_score_with_evidence_floor(compliant: int, total: int) -> tuple[float, str]:
-    """The compliant fraction, over a denominator of at least GATE_EVIDENCE_FLOOR.
-
-    Below the floor the missing events are counted as NEUTRAL_GATE_CREDIT in
-    both halves of the ratio, so a run that emitted one gate event cannot
-    express a full-range opinion off that one event. Returns (score, note),
-    where note is the padding to append to the evidence string ("" at or above
-    the floor, where this is the plain ratio and nothing changed).
-
-    The invariant this buys: flipping one gate event between compliant and
-    non-compliant moves the score by at most 1 / GATE_EVIDENCE_FLOOR, whatever
-    the run emitted. On the raw ratio that move was 1 / total, which reached
-    the dimension's whole range on the 30.6% of measured tests carrying a
-    single gate. See GATE_EVIDENCE_FLOOR for the distribution the floor is
-    read off, and for what the floor deliberately does not fix.
-
-    This is padding *against* the artifact's interest at the top, which is the
-    opposite of the denominator-dilution class this file has had to close four
-    times: the padding is a fixed neutral prior the executor cannot supply,
-    write, or vary, and it is symmetric, so it can never convert a real
-    non-compliant event into credit.
-    """
+    """Return (compliance ratio, padding note) with a fixed neutral prior below
+    GATE_EVIDENCE_FLOOR. At or above the floor, use the plain ratio and no note.
+    Changing one event can move the score by at most 1 / GATE_EVIDENCE_FLOOR.
+    The fixed padding symmetrically lowers thin passing scores and raises thin
+    failing scores; the executor cannot vary it."""
     if total >= GATE_EVIDENCE_FLOOR:
         return compliant / total, ""
     padding = GATE_EVIDENCE_FLOOR - total
@@ -955,53 +691,16 @@ def _gate_score_with_evidence_floor(compliant: int, total: int) -> tuple[float, 
 def score_gate_compliance(
     timeline: list[dict], agent_response: str, artifact_content: str = ""
 ) -> dict[str, float | str]:
-    """Score gate compliance by checking for structured gate events in state file.
+    """Score gate emission, validity, and failure handling.
 
-    Primary: parse gates[] array from state file writes in the timeline.
-    Each gate event must have step, judge, and result fields.
+    Prefer gates from state-file writes. Each needs step, judge, and result;
+    a reported failure counts when hone_common.fail_is_accounted accepts its
+    halt, restart, or retry. The shared helper also enforces reason restrictions.
+    Executor-written reasons can restrict settlements but cannot authenticate them.
 
-    This dimension scores gate *emission and schema validity*, not gate outcome.
-    A gate that correctly reports failure is compliant: penalizing it would
-    reward executors for hiding failures. What a 'fail' event needs in order
-    to count as compliant depends on what that 'fail' MEANT, and
-    hone_common.fail_is_accounted owns the distinction. A validation verdict
-    (handoff_<name>, which rejects an input and orders nothing) is settled by
-    a later 'pass' for the same step. A halt order (everything else: a
-    'convergence' escalate or capped, a Phase 3 regression auto-revert, an
-    error halt) is settled only by the halt itself, by an in-place retry with
-    no event in between (the exit-2 ledger repair, whose second 'convergence'
-    may itself fail), or by a recorded halt followed by a 'resume'. A 'fail'
-    followed by unrelated forward progress is non-compliant, and so is a later
-    'pass' that was reached by doing that forward progress: running another
-    round is what a halt order forbade.
-
-    Where the failing event declares a 'reason' (hone_common.HALT_REASONS,
-    today a failing 'convergence'), that declaration can only RULE OUT
-    settlements, never open one: 'capped' is the one halt a 'resume' may
-    restart, 'ledger_missing' the one an in-place retry may settle, and
-    'escalate' has neither. The field is written by the executor being scored
-    and nothing here corroborates it -- the timeline this function is handed
-    is executor-written too -- so it is never read as evidence a claim is
-    true. Nothing declared, or something unrecognized, gets the STRICTEST
-    reading rather than a middling one: no restart and no retry, the same
-    answer 'escalate' gets. That is what keeps the truth from costing score.
-    Were a non-declaration to keep a settlement that a truthful 'escalate'
-    forfeits, this dimension would pay an executor to omit the field, which
-    is the opposite of what reading it is for.
-
-    Fallback (legacy): keyword counting when no structured gate events are found.
-    Legacy score is capped at 0.7 to incentivize migration to structured events.
-
-    Minimum evidence: the structured ratio is taken over a denominator of at
-    least GATE_EVIDENCE_FLOOR events (see _gate_score_with_evidence_floor).
-    A perfect 1.0 therefore requires the run to have emitted at least that
-    many compliant events, which is the same rule this dimension already
-    applies to evidence *class* -- prose-quoted gates and keyword matches are
-    capped at ECHOED_GATE_CAP no matter how many there are -- applied to
-    evidence *volume*. The legacy branch is deliberately outside it: its
-    denominator is a keyword count, not gate events, and the 0.7 cap is
-    already its minimum-evidence answer.
-    """
+    Structured evidence uses GATE_EVIDENCE_FLOOR. Prose-quoted gates receive
+    ECHOED_GATE_CAP of their padded ceiling; legacy keyword counting is capped
+    at 0.7 and uses no event padding."""
     # Primary path: structured gate events (timeline writes or inline in agent_response)
     gates, gate_source = _extract_gate_events(timeline, agent_response)
 
@@ -1017,39 +716,9 @@ def score_gate_compliance(
             if gate.get("result") == "pass":
                 compliant += 1
                 continue
-            # result == "fail": compliant only when failure is the documented outcome.
-            # A halt sequence is two events long: the step that detected the
-            # failure, then workflow_exit recording the stop. Only the last of
-            # those is terminal, so requiring terminality marked the detecting event
-            # non-compliant on every correct halt -- and an executor that
-            # emitted one more truthful fail event scored lower than one that
-            # emitted fewer.
-            #
-            # The test is positive evidence of a halt, not the absence of
-            # evidence of progress: the tail has to reach workflow_exit, and
-            # everything in it has to belong to the halt sequence. Defining it
-            # as "no later pass on some step other than the exit" let a run
-            # that failed a gate, carried on through the whole workflow, and
-            # simply stopped emitting passing gates score that fail as a halt,
-            # which rewards emitting fewer events than an honest run emits.
-            # hone_common.fail_is_accounted owns that shape; validate_gates.py
-            # asks it the same question, so the two cannot drift again. It also
-            # covers the fail-is-last-event case, which was a separate
-            # `terminal` test here. The failing step goes with the tail: a fail
-            # on `workflow_exit` itself is the halt with nothing after it,
-            # while a fail on any other step still owes the exit event.
-            #
-            # The case it owns that this scorer punished hardest is the
-            # in-place retry. `convergence` and `handoff_<name>` are emitted
-            # once per ATTEMPT, and the documented exit-2 ledger repair emits
-            # `convergence:fail`, rewrites the ledger, re-runs, and emits a
-            # second `convergence` that fails whenever the re-run returns
-            # escalate or capped -- so a correct repair produced no later
-            # `pass` and was not its own halt tail, and scored exactly as an
-            # ignored halt did. The mirror-image case it now refuses is a
-            # later `pass` for a gate whose `fail` was itself a halt order: a
-            # run that ignored an `escalate` and did another round scored 1.0
-            # on the strength of the next round's passing `convergence`.
+            # A documented failure needs a halt, authorized restart, or valid retry.
+            # Use the same fail_is_accounted predicate as validate_gates; a later pass
+            # cannot excuse progress after a halt order.
             if fail_is_accounted(
                 gates[idx + 1 :], gate.get("step"), gate.get("reason")
             ):
@@ -1300,13 +969,8 @@ REPORTS_ERROR = re.compile(
     re.IGNORECASE,
 )
 
-# Language that says the run stopped. The halt branch below requires this in
-# addition to REPORTS_ERROR. REPORTS_ERROR alone matched any final response
-# carrying "failed"/"missing"/"cannot" anywhere in it, so an executor whose
-# error was its last tool call and who then reported success ("Round complete.
-# No dimensions failed.") was credited with halting -- the "continued as though
-# nothing happened" case this dimension exists to catch. Naming the problem is
-# necessary but not sufficient; the executor also has to say it stopped.
+# Require an explicit stop as well as an error report; error vocabulary alone
+# can appear in a success report such as "No dimensions failed".
 REPORTS_HALT = re.compile(
     r"\b(?:halt(?:ing|ed|s)?|abort(?:ing|ed|s)?|stopping|stopped"
     r"|exiting|exited|bail(?:ing|ed|s)?"
@@ -1319,20 +983,8 @@ REPORTS_HALT = re.compile(
 def score_error_handling(
     timeline: list[dict], agent_response: str = ""
 ) -> dict[str, float | str]:
-    """Score error handling: investigate the recoverable, halt on the fatal.
-
-    Two responses to an error are correct, and both score:
-
-      1. Investigate, the error is followed by diagnostic tool calls.
-      2. Halt and report, the executor stops and says what broke.
-
-    Only the third response, continuing as though nothing happened, fails.
-    Counting solely case 1 inverted the score on every artifact whose
-    documented response to a fatal condition is to stop: hone's own
-    corrupt-state rule is "halt with an error message including the file
-    path. Do not proceed", so an executor that obeyed it scored 0.0 while one
-    that ignored it and kept reading files scored 1.0.
-    """
+    """Score diagnostic tool calls after recoverable errors, or a halt that reports
+    the failure. Continuing without either response receives no credit."""
     error_entries = [i for i, entry in enumerate(timeline) if entry.get("is_error")]
 
     if not error_entries:
@@ -1382,15 +1034,10 @@ def score_error_handling(
 def score_trigger_accuracy(
     timeline: list[dict], test_input: dict | None = None
 ) -> dict[str, float | str]:
-    """Score hook execution as the non-crashing fraction of Bash calls.
-
-    This is a crash-rate proxy, not true trigger/false-positive measurement:
-    the timeline carries no stdout and the criteria carry no per-test trigger
-    expectations, so "should trigger" and "should not trigger" cases cannot be
-    distinguished. Only crashes (is_error=True) are penalized. A previous
-    false_positive_rate dimension computed this same quantity and was
-    collapsed into this one at their combined weight (see HOOK_WEIGHTS).
-    """
+    """Score the non-crashing fraction of Bash calls (is_error=True marks crashes).
+    This measures crash rate only: traces lack stdout and criteria lack trigger
+    expectations. The former false_positive_rate used the same measure; its
+    weight is combined here in HOOK_WEIGHTS."""
     tool_uses = _get_tool_uses(timeline)
     bash_calls = [t for t in tool_uses if _tool_name(t) == "Bash"]
 
@@ -1529,21 +1176,9 @@ def score_early_termination(timeline: list[dict]) -> dict[str, float | str]:
 def score_user_communication(
     timeline: list[dict], agent_response: str = ""
 ) -> dict[str, float | str]:
-    """Score whether executor communicated the error to the user.
-
-    Error-handling tests expect the skill to either use AskUserQuestion
-    (preferred for arg validation) or output explanatory text.
-
-    Three tiers:
-    - AskUserQuestion called as tool (tool_use): 1.0
-    - AskUserQuestion attempted but unavailable (condition_fired / fallback): 0.9
-    - Text output only: 0.7
-    - No communication: 0.0
-
-    Simulation mode fallback: when execution_timeline is empty (eval runner in
-    SIMULATION MODE), check agent_response for error communication patterns.
-    Mirrors the same fallback used in score_gate_compliance for simulation mode.
-    """
+    """Score error communication: AskUserQuestion tool use earns 1.0, an unavailable
+    tool attempt or clarification fallback 0.9, explanatory text 0.7, and silence 0.0.
+    With no simulation timeline, inspect agent_response for the same evidence."""
     tool_uses = _get_tool_uses(timeline)
 
     # Best: AskUserQuestion called successfully as a tool.
@@ -1592,21 +1227,9 @@ def score_user_communication(
     if agent_response and agent_response.strip():
         response_lower = agent_response.lower()
 
-        # Best available in sim mode: the skill (correctly) chose to ask the user
-        # for missing input. It cannot issue a real AskUserQuestion tool call, so
-        # it surfaces the question as text. Treat this as the "attempted" tier:
-        # the action is right, only the harness cannot record a tool_use. Without
-        # this branch, a correct empty-state clarification scores 0.0 purely
-        # because its message ("No uncommitted changes found. Which files should
-        # I scan?") contains none of the error keywords below.
-        # `"ask" in response_lower` matched inside "task"/"tasks"/"asked"/
-        # "flask", and "user" appears in almost any completion prose, so
-        # "Task completed. I ran the full workflow ... the user requested"
-        # scored 0.9 with evidence claiming the executor surfaced a
-        # clarification -- on an error-handling test that exists to catch
-        # exactly that run. Word-boundary the verb, and require it to
-        # co-occur with the question mark, so an assertion about the past
-        # cannot pose as a question about the present.
+        # Simulation cannot record real AskUserQuestion calls, so a clarification
+        # gets attempted-tool credit. Require a question and word-bounded ask/user
+        # evidence to exclude completion prose containing task or flask.
         clarification_phrase = any(
             kw in response_lower
             for kw in (
@@ -1656,15 +1279,8 @@ PROFILE_WEIGHT_MAP = {
 
 
 def _load_criteria_index(criteria_path: str | None) -> dict[str, dict]:
-    """Load eval_criteria.json and return dict keyed by test_id.
-
-    Type-tolerant on every hop, matching hone_common's loaders: main() calls
-    this *outside* the try/except that wraps score_from_results, so a
-    schema-shaped surprise here killed the whole scoring step with a
-    traceback instead of degrading. A top-level list made `data.get` raise
-    AttributeError; a string test case passed the `"id" in tc` substring test
-    and then raised TypeError on `tc["id"]`.
-    """
+    """Load eval criteria keyed by string test_id, tolerating malformed values.
+    This runs outside the scoring exception handler, so invalid shapes must degrade."""
     if not criteria_path:
         return {}
     try:
@@ -1690,20 +1306,9 @@ def score_quality_checks(
     if not required_present and not required_absent:
         return {"score": 1.0, "evidence": "No quality assertions defined"}
 
-    # Both assertions read the SAME corpus: what the executor authored, which
-    # is its response plus its own narration. Scanning tool_result content
-    # penalizes an executor for reading a file containing a forbidden phrase,
-    # and the file it is told to read is the very artifact the forbidden
-    # vocabulary comes from, so a correct halt failed the moment its timeline
-    # was recorded.
-    #
-    # The same argument runs in the positive direction, and required_present
-    # used to be exempt from it: if reading a file is not saying a forbidden
-    # phrase, reading a file is not demonstrating a required one either. On
-    # the shipped suite `validate_handoff` was satisfied by an executor that
-    # only ever grepped validate_handoff.py. Measured across the 13-case
-    # suite before the change, 0 of 5 required_present checks flip, so the
-    # symmetry costs no currently-passing check.
+    # Both phrase assertions inspect the response and executor narration only.
+    # Reading a tool result neither states a forbidden phrase nor demonstrates
+    # a required one.
     authored = agent_response
     for entry in timeline:
         if (
@@ -1754,12 +1359,8 @@ _VERIFY_CONTENT_RE = re.compile(
 _STATE_FILE_RE = re.compile(
     r"workflow[-_]state|state\.json|eval[-_]criteria\.json", re.IGNORECASE
 )
-# Scratch directories. Unlike the file names above this is a location, not an
-# identity, so it is *conditional*: a case that declares a `fixture_setup`
-# sandbox is naming the files it really operates on, and its artifact lives
-# there. Matching `/tmp/` unconditionally is what made TC-013's artifact at
-# /tmp/hone-seg-sandbox/SKILL.md invisible, handing both verify_actions and
-# research_first a free 1.0 in the one case built to measure them.
+# Exclude scratch locations unless fixture_setup declares the artifact there;
+# a declared /tmp sandbox must still receive write and research checks.
 _SCRATCH_DIR_RE = re.compile(r"/tmp/", re.IGNORECASE)
 
 
@@ -1847,23 +1448,10 @@ def _is_verify_entry(entry: dict) -> bool:
 def score_verify_actions(
     timeline: list[dict], sandbox_paths: tuple[str, ...] = ()
 ) -> dict[str, float | str]:
-    """Score: were consequential writes followed by verification?
-
-    Each artifact Edit/Write should be followed by a read-back or verification
-    within the next 3 tool calls. Unchecked writes are the primary source
-    of false completion claims (claiming 'done' without closing the loop).
-
-    Scoped to artifact writes, not every write. The read-back instructions for
-    the state file, the criteria file, and the gate-event append were ablated
-    out of SKILL.md and the phase references, so counting those writes here
-    would score an executor down for following the current text -- the one
-    shape a scoring dimension must never have. What the docs still require
-    verifying is the artifact edit itself, and that is what this measures.
-    Temp and state-file writes are excluded by `_is_artifact_write_entry`,
-    the same classifier `score_research_first` already uses. `sandbox_paths`
-    carries the case's declared `fixture_setup` paths so a sandboxed artifact
-    under /tmp is still measured rather than silently dropped.
-    """
+    """Score artifact writes verified within the next three tool calls.
+    Exclude temp, state, criteria, and gate-event writes: current docs require
+    read-back only for artifact edits. Declared fixture sandboxes still count
+    as artifacts, including paths under /tmp."""
     tool_uses = _get_tool_uses(timeline)
     write_indices = [
         i
@@ -2032,16 +1620,9 @@ def _score_single_test(
         dimensions: dict[str, dict] = {}
 
         if is_ke:
-            # Knowledge extraction asks "is this answer right?", which no
-            # deterministic dimension here measures. The profile's only
-            # dimension is error_handling, which is 1.0 whenever nothing
-            # errored — that reports "did not crash" as "answered well", and a
-            # one-Read run replying "asdf" scored a composite 1.0 that
-            # resolve_score(prefer_deterministic=True) then preferred over the
-            # judge's 0.15. KE composites are therefore always inconclusive:
-            # the dimension stays visible as evidence, and semantic judgment
-            # belongs to the LLM judge until a KE-specific deterministic
-            # dimension exists to score.
+            # KE error_handling measures crashes, not answer quality. Keep the dimension
+            # as evidence but mark the composite inconclusive so it cannot override
+            # the LLM judge until a KE-specific deterministic measure exists.
             dimensions["error_handling"] = score_error_handling(timeline, agent_response)
             partial_scoring = True
             inconclusive = True
@@ -2089,12 +1670,8 @@ def _score_single_test(
                 inconclusive = True
                 active_weights = {}
         elif is_fm:
-            # Failure-mode: a specific failure condition was injected (corrupt
-            # state, handoff validation error, compaction, regression). Score
-            # whether the failure gate fired (gate_compliance) and whether the
-            # skill communicated the failure gracefully (error_handling).
-            # Execution dimensions are inapplicable — correct behavior is to
-            # detect and halt, not to complete the workflow.
+            # Failure-mode tests score failure gates and error communication;
+            # workflow completion dimensions do not apply.
             dimensions["gate_compliance"] = score_gate_compliance(
                 timeline, agent_response, artifact_content
             )
@@ -2109,13 +1686,8 @@ def _score_single_test(
                 inconclusive = True
                 active_weights = {}
         elif _get_tool_uses(timeline):
-            # Gated on tool calls, not on a non-empty timeline. Every dimension
-            # below except voice_compliance is derived from _get_tool_uses, so a
-            # run with one narrating `text` entry and zero tool calls satisfied
-            # `elif timeline:` and scored 0.7569 with workflow_sequence 1.0 read
-            # straight out of "I would run Step 1, then Step 2" -- conditional
-            # narration of a workflow that never ran. Same guard the EH, SEG and
-            # FM profiles above already apply.
+            # Require recorded tool calls, not just narration. Otherwise hypothetical
+            # step descriptions score as an executed workflow.
             weights = SKILL_WEIGHTS if artifact_type == "skill" else COMMAND_WEIGHTS
 
             dimensions["workflow_sequence"] = score_workflow_sequence(
@@ -2259,12 +1831,8 @@ def _score_single_test(
     return scored
 
 
-# Source files whose executable content decides a score. `score_execution.py`
-# is the scorer; `hone_common.py` supplies DIMENSION_FLOOR (the composite's
-# per-dimension floor), `extract_results`, the typed criteria reader and
-# `is_halt_tail`, each of which moves dimension numbers without appearing in
-# this file. A fingerprint over only this file would have called a
-# hone_common change "same scorer".
+# Scorer fingerprint inputs include shared helpers because either module can
+# change scores. Hash executable content only.
 SCORER_SOURCE_MODULES = ("score_execution.py", "hone_common.py")
 
 # Prefix on every fingerprint, naming how it was derived. Bumping it
@@ -2278,19 +1846,9 @@ _SCORER_FINGERPRINT_COMPUTED = False
 
 
 def _normalized_source(path: Path) -> str:
-    """A source file reduced to what can change a score.
-
-    Parses to an AST and drops docstrings, so the digest below moves on
-    executable content only. Comments never reach the AST; docstrings do, and
-    nothing in either module reads `__doc__`, so a reworded docstring cannot
-    move a number either.
-
-    Positions are excluded (`include_attributes=False`) so inserting a comment
-    block above a function -- which shifts every line number after it -- is
-    not a scorer change. Identifier names are kept: a rename cannot change a
-    score, so keeping them costs an occasional re-score and buys never having
-    to reason about which renames are safe.
-    """
+    """Return the AST without docstrings or positions for executable-content hashing.
+    Comments and unused docstrings cannot change scores. Keep identifiers: a
+    harmless rename may trigger a re-score, but no rename analysis is needed."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if not isinstance(
@@ -2310,33 +1868,13 @@ def _normalized_source(path: Path) -> str:
 
 
 def scorer_fingerprint(source_dir: Path | None = None) -> str | None:
-    """Identity of the scoring code that produced a set of numbers.
+    """Fingerprint scoring logic for metadata.scorer_fingerprint. Matching digests
+    allow baseline comparisons; differing digests require re-scoring because
+    a score delta may include measurement changes. Formula/schema literals
+    and per-run metadata cannot identify every scorer change.
 
-    Recorded in `metadata.scorer_fingerprint` so a later round can tell,
-    from the stored scores alone, whether its baseline was produced by the
-    scorer it is about to compare against. Two rounds carrying the same
-    fingerprint were scored by identical scoring logic; two carrying
-    different ones were not, and their delta mixes an artifact change with a
-    measurement change (references/phase3-reevaluation.md step 5).
-
-    Why a content fingerprint and not the fields already in `metadata`:
-    `scoring_formula` and `schema_version` are literals in this file
-    ("weighted_geometric_mean", 2), and `epsilon`, `critical_dim`,
-    `partial_scoring` and `critical_floor_applied` are a constant and three
-    per-run observations. None of them moved when GATE_EVIDENCE_FLOOR was
-    introduced, which shifted the gate_compliance mean by 0.146 -- larger
-    than the 0.1 that auto-reverts a round. A fingerprint nobody has to
-    remember to bump is the only kind that survives a scorer change landing
-    through a merged PR rather than through a hone run.
-
-    Returns None when the source cannot be read or parsed. Absent is the
-    safe value: consumers treat a missing fingerprint as an unknown scorer
-    and re-score rather than assuming the scorer is unchanged.
-
-    `source_dir` names the directory the modules are read from, defaulting to
-    this file's own; only the default is cached, and only tests pass anything
-    else.
-    """
+    Return None when sources cannot be read or parsed; consumers then re-score.
+    source_dir defaults to this module's directory, and only that default is cached."""
     global _SCORER_FINGERPRINT, _SCORER_FINGERPRINT_COMPUTED
     cached = source_dir is None
     if cached and _SCORER_FINGERPRINT_COMPUTED:
@@ -2382,14 +1920,8 @@ def score_from_results(
             "metadata": {"error": str(exc)},
         }
 
-    # Accept `results` (canonical hone format) or `test_results` (skill-creator
-    # alias) — shared with analyze_results via hone_common so the two scripts
-    # cannot disagree about which files contain tests. Fail loud on schema
-    # mismatch instead of silently returning 0.0/F: a perfect artifact with the
-    # wrong top-level key should not look like a catastrophic failure. All
-    # three unscorable shapes (empty_results, schema_mismatch, empty_file)
-    # return composite_score null / INCONCLUSIVE, matching
-    # references/phase1-evaluation.md and the all-inconclusive path below.
+    # Accept shared results/test_results aliases. Unrecognized, empty, or missing
+    # results produce null/INCONCLUSIVE rather than a fabricated failing score.
     results, results_key_used = extract_results(data)
 
     if not results:
@@ -2514,13 +2046,8 @@ def score_from_results(
 
 
 def find_timeline_gaps(results: list) -> list[str]:
-    """Test ids whose record carries no recorded tool call.
-
-    Every timeline-derived dimension defaults high on an empty list, so a
-    record with no `execution_timeline` -- or one made up entirely of `text`
-    entries -- scores vacuous passes rather than failing loudly. The bar is
-    recorded tool calls, matching the inconclusive guard in _score_single_test.
-    """
+    """Return test IDs with no recorded tool calls, including narration-only traces.
+    These lack evidence for timeline dimensions and must remain inconclusive."""
     gaps = []
     for entry in results:
         if not isinstance(entry, dict):
@@ -2574,15 +2101,9 @@ def main() -> None:
             except OSError as exc:
                 print(f"WARNING: Could not read artifact: {exc}", file=sys.stderr)
 
-    # --require-timeline reports records with no recorded tool call. An empty
-    # results file is a usage error and stops here; a per-record gap is not.
-    # Aborting on a gap suppressed `deterministic_scores.json` for every other
-    # test in the file, and Phase 3's before/after comparison then has no
-    # current-round scores to read at all. One executor that produced no tool
-    # calls is a plausible outcome, not only a harness defect, so the gap is
-    # reported after the scores are written -- the exit status still fails, the
-    # other tests still get scored, and `_score_single_test` has already marked
-    # the offending record inconclusive.
+    # Report missing tool calls after writing scores so other tests remain usable.
+    # Empty files are usage errors; per-test gaps are inconclusive and still produce
+    # a failing exit status for --require-timeline.
     timeline_gaps: list[str] = []
     if args.require_timeline:
         try:

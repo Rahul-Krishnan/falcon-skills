@@ -1,90 +1,34 @@
 #!/usr/bin/env python3
-"""Power check for hone eval criteria and before/after comparisons.
+"""Check eval sizing and compare before/after deterministic scores.
 
-score_execution.py answers "what did this round score". It does not answer
-"is that score strong enough to act on". Those are different questions, and
-conflating them lets a three-case criteria set promote or revert an artifact on
-noise. Phase 3 already controls variance (median-of-three resampling); this
-script controls power, which resampling cannot buy.
+Sizing (default) reports whether enough scorable cases and profiles exist.
+The minimum is advisory: lightweight and standard suites may continue as
+underpowered. Duplicate ids block because comparisons need unique identities.
+Only statically scorable profiles count toward the floor; hook and script
+scoring can produce composites for every profile.
 
-Two modes:
+Compare (--before/--after) applies exact one-sided sign tests to non-tied
+paired cases. Ties reduce the available discordant votes. Read scores from
+deterministic_scores.json, directly or beside the supplied results.json.
+Missing deterministic files, changed or unknown scorers, and cases that
+become inconclusive make the comparison not_measurable.
 
-  sizing   (default) -- Is the criteria set large and varied enough to return a
-           verdict at all? Below the floor the correct answer is "underpowered",
-           which is neither a pass nor a regression.
+For n discordant votes and w wins, p = sum(C(n,k) * 0.5**n for k in w..n).
+At alpha 0.05, 5-7 votes need a clean sweep; 8 tolerate one loss. Five cases
+is an eligibility floor. Detecting a true 70% win rate with 80% power needs
+roughly 37 discordant votes; resampling does not increase this power.
 
-           Below the floor the verdict is ADVISORY, because hone's own
-           generation minimums (2 cases on the lightweight tier, 3 at the
-           Step 3/5 gates, 4 standard) all certify suites under any floor
-           this script can enforce: a blocking floor made those tiers
-           unrunnable and left padding with near-duplicates as the only
-           escape, which is the remedy Step 6b warns against. So the gate
-           yields, not the generator. Sizing still reports `underpowered`
-           with the floor it enforced and the reason, and exits 0 with
-           `blocking` false so the run carries the warning forward. A
-           duplicate test case id still exits 1: it breaks the identity the
-           next round pairs on. Usage and input errors keep exiting 2.
+Alpha applies separately to improvement and regression. The chance of either
+firing under the null is up to twice alpha (0.0625 for a five-vote sweep).
+The report includes two_sided_alpha.
 
-           The floor counts only the cases compare mode could actually pair.
-           A case whose test_profile can never produce a deterministic
-           composite never reaches the sign test, so counting it certified
-           suites the comparison could never rule on: a six-case set with
-           three knowledge_extraction cases sized `powered` and then compared
-           three cases and returned `underpowered` on a clean sweep, forever,
-           while Step 6b told the agent to add cases it could keep adding from
-           the same unscorable profile. See NON_SCORABLE_PROFILES.
+Exit codes:
+  0: nonblocking sizing verdict or compare improved.
+  1: sizing defect (eg duplicate ids) or any other compare verdict.
+  2: usage/input error, including only one of --before/--after.
+The blocking field records the same decision.
 
-  compare  (--before/--after) -- Given two rounds of scores, run an exact
-           one-sided sign test over the discordant (non-tied) test cases. Ties
-           are not discarded: they hold the discordant count down, which is the
-           point. A round that moves two cases and ties six has not shown
-           anything, and reporting it as an improvement is the failure mode.
-
-           The scores compared are the deterministic composites from
-           `deterministic_scores.json`, because those are the numbers Phase 2
-           acts on (phase1-evaluation.md Step 9: "Phase 2 decisions use the
-           deterministic score. The LLM judge score is a reference signal
-           only."). Pointing this at results.json instead qualified a number
-           nobody decides on, and on a deterministic-only run results.json
-           carries no per-test `score` at all, so every comparison paired zero
-           cases and reported `underpowered` forever. Pass either the
-           deterministic_scores.json or the results.json beside it; the
-           deterministic sibling is what gets read. A round with no
-           deterministic file at all is `not_measurable`, whichever side it
-           is on: the judge scores in results.json are not the measurement
-           Phase 2 acts on, so two judge files are not compared either.
-
-           A case that scored in the before round and came back inconclusive
-           (composite null) in the after round is also `not_measurable`. Its
-           evidence collapsed rather than its score moving, and a sign test
-           over the cases that still scored reads that collapse as a clean
-           sweep. `inconclusive_after` names the cases.
-
-Thresholds come from the binomial, not from taste. With n discordant votes and
-w wins, p = sum(C(n,k) * 0.5**n for k in w..n). At alpha 0.05 that means 5-7
-discordant votes need a clean sweep, 8 tolerate a single loss. Five distinct
-cases is an eligibility floor, not adequate power: detecting a true 70% win
-rate at 80% power needs roughly 37 discordant votes.
-
-`--alpha` is a **per-direction** level, not the rate at which this script
-reports something. `improved` and `regressed` are two separate one-sided
-tests read against the same alpha, so the chance that either fires on noise
-is up to twice it -- 0.0625, not 0.05, for a five-vote clean sweep. Each
-individual decision still carries its own one-sided rate, which is why the
-borrowed 5-7-8 table is kept as it stands rather than halved; the combined
-figure is reported as `two_sided_alpha` so a consumer reading the emitted
-JSON is not left to infer it from `alpha`.
-
-Exit codes: 0 when nothing blocks the caller (sizing `powered`, sizing
-`underpowered` on the floor alone, and compare `improved`); 1 when a finding
-must stop the caller (a sizing criteria defect such as duplicate ids, and any
-compare verdict outside `improved`); 2 usage or input error (a missing or
-unreadable path, a non-object criteria root, a directory where a round file
-was expected, only one of --before/--after). The `blocking` field in the
-report carries the same decision, so a consumer reading `--json` never has to
-re-derive it from the verdict.
-
-Stdlib only. Read-only: it never writes to the criteria or results files.
+Stdlib only; reads criteria and scores without changing them.
 """
 
 from __future__ import annotations
@@ -95,13 +39,8 @@ import math
 import sys
 from pathlib import Path
 
-# load_deterministic_scores owns the sibling-file rule: given a round's
-# results.json it reads deterministic_scores.json beside it, dropping tests
-# whose composite is null. load_inconclusive_ids is the other half of that
-# file: the ids it dropped. A second copy here is a second copy to drift.
-# extract_results and _raw_llm_score own the results.json shape (which key
-# carries the entries, which field carries the judge score); the fallback
-# below reads through them for the same reason.
+# Share sibling-file resolution, inconclusive ids, and raw-result aliases
+# with hone_common so sizing and scoring read the same evidence.
 from hone_common import (
     _raw_llm_score,
     extract_results,
@@ -113,38 +52,17 @@ from hone_common import (
 # no arrangement of wins can reach p <= 0.05 on a one-sided sign test.
 DEFAULT_MIN_STIMULI = 5
 
-# Minimum distinct test_profile values. Five cases that all exercise the same
-# profile give arithmetic, not evidence.
+# Minimum profile diversity for scorable skill/command cases.
 DEFAULT_MIN_PROFILES = 2
 
-# Test profiles that can never produce a deterministic composite, so a case
-# carrying one can never enter compare mode's sign test.
-# phase1-evaluation.md: `test_profile: "knowledge_extraction"` is **always**
-# inconclusive deterministically, and `load_deterministic_scores` drops null
-# composites. The other inconclusive classes named there (`error_handling`,
-# `side_effect_guarded`, `failure_mode` with zero tool calls) depend on what a
-# round actually executed and cannot be read off the criteria file, so they are
-# deliberately absent: this is the statically knowable subset, not the whole
-# truth. A case with no test_profile at all is counted as scorable here, which
-# is the optimistic reading -- the scorer can still resolve it to
-# knowledge_extraction from the round's own evidence.
+# Profiles statically known to produce no deterministic composite. Other
+# inconclusive cases depend on execution evidence and cannot be excluded here.
+# An absent profile counts optimistically as scorable.
 NON_SCORABLE_PROFILES = frozenset({"knowledge_extraction"})
 
-# Artifact types for which NON_SCORABLE_PROFILES does not apply.
-# `knowledge_extraction` is always inconclusive only on the skill and command
-# scoring paths. score_execution.py's `hook` and `script` branches score the
-# same dimensions (trigger_accuracy / output_structure / correctness, off the
-# run's own evidence) for every profile, so a hook or script case carrying
-# that profile does produce a composite and does pair in compare mode.
-# Excluding it there reported a fully pairable suite `underpowered` and
-# attached a warning ("they never pair in compare mode") that was false for
-# that artifact type. The profile does move the critical-dimension cap on
-# those paths (`_score_single_test` swaps `critical_dim` to `error_handling`
-# for knowledge_extraction on every type), so the case is capped under a
-# different rule than its neighbours; it still scores, which is what the
-# floor counts. The criteria file carries no artifact type of its own, so the
-# caller supplies it with `--artifact-type`; unset keeps the conservative
-# skill/command reading.
+# Hooks and scripts score every profile, so NON_SCORABLE_PROFILES does not
+# apply. Profiles may change their critical-dimension cap but remain pairable.
+# The caller supplies artifact type; unset assumes skill/command scoring.
 ALWAYS_SCORABLE_ARTIFACT_TYPES = frozenset({"hook", "script"})
 
 # Every type score_execution.py scores, i.e. the values `--artifact-type`
@@ -153,25 +71,15 @@ ARTIFACT_TYPES = ("skill", "command", "hook", "script")
 
 ALPHA = 0.05
 
-# Score movement below this is treated as a tie rather than a win or a loss.
-# Matches the 0.1 regression threshold hone already uses in Phase 3, halved so
-# that a movement large enough to count here is comfortably inside the noise
-# band that triggers resampling there.
+# Treat movements within half the Phase 3 regression threshold (0.1) as ties.
 TIE_EPSILON = 0.05
 
-# Decimal places a score movement is rounded to before it is classified. The
-# composites are written with a handful of decimals, and `0.85 - 0.80` is
-# 0.04999999999999993 while `0.55 - 0.50` is 0.050000000000000044, so an
-# unrounded `abs(delta) <= TIE_EPSILON` called the same nominal 0.05 movement
-# a tie in one suite and a win in another, and the round's verdict flipped
-# with it. The rounded delta is also the one written to `movements`, so the
-# number a reader sees is the number the decision was taken on.
+# Round deltas before classification so floating-point representations of
+# the same nominal change receive the same verdict. Report that rounded value.
 DELTA_DECIMALS = 4
 
-# Profiles score_execution.py's `_resolve_test_profile` can return, i.e. the
-# keys of its PROFILE_WEIGHT_MAP. Anything else in `test_profile` is not
-# honoured by the scorer, which falls through to its heuristics and, absent
-# execution evidence, to the artifact-type default -- named `execution` here.
+# Known scorer profiles. Unknown values fall through to scorer heuristics
+# and, without execution evidence, the execution default.
 KNOWN_PROFILES = frozenset({
     "execution",
     "knowledge_extraction",
@@ -201,15 +109,7 @@ def min_discordant_for_alpha(alpha: float = ALPHA) -> int:
 
 
 def _id_of(entry: dict, keys: tuple[str, ...]) -> str | None:
-    """The first of `keys` carrying a non-null value, as the string ids pair on.
-
-    "Non-null", not "truthy": an integer id `0` is an id, and an `or` chain
-    over the key names drops it. `_case_id` had that fixed and `_scores_by_id`
-    reintroduced it on the results.json fallback path, so `"test_id": 0` was
-    counted by sizing and silently unpaired by the comparison, missing from
-    `paired_cases` and from both unpaired lists. One resolver, so the two
-    cannot disagree about what an id is again.
-    """
+    """Return the first non-null key value as a string id, preserving numeric 0."""
     for key in keys:
         raw = entry.get(key)
         if raw is not None:
@@ -223,19 +123,10 @@ def _case_id(case: dict) -> str | None:
 
 
 def _profile_of(case: dict) -> str:
-    """The case's profile, under the name the scorer resolves it by.
+    """Resolve the profile using the scorer's criteria-only rules.
 
-    Mirrors the part of score_execution.py's `_resolve_test_profile` that can
-    be read off the criteria file: an explicit `test_profile` the scorer
-    knows, else `category: error_handling` (the one category its heuristics
-    map to a profile), else the artifact-type default. Falling back to
-    `category` wholesale, as this did, counted a required enum with a
-    different value set as profile diversity: five cases across five
-    categories and no `test_profile` reported five profiles and silenced the
-    min-profiles warning, while the scorer weighted four of them identically.
-    The same five with `test_profile: execution` filled in fired it. The
-    warning flipped on whether an optional field was filled in, not on what
-    the scorer would resolve.
+    Use a known test_profile, else the error_handling category, else the artifact
+    default. Other categories do not imply distinct scoring profiles.
     """
     profile = case.get("test_profile")
     if isinstance(profile, str) and profile in KNOWN_PROFILES:
@@ -253,16 +144,12 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
     `artifact_type` decides whether NON_SCORABLE_PROFILES applies at all; see
     ALWAYS_SCORABLE_ARTIFACT_TYPES.
     """
-    # The floor honours alpha, not --min-stimuli alone: 5 cases at alpha 0.01
-    # need 7 discordant votes, so no arrangement of wins can ever clear it.
-    # min_discordant_for_significance reported that; the verdict ignored it.
+    # Apply both the alpha-derived floor and --min-stimuli.
     alpha_floor = min_discordant_for_alpha(alpha)
     floor = max(min_stimuli, alpha_floor)
 
     cases = [c for c in (criteria.get("test_cases") or []) if isinstance(c, dict)]
-    # Ids are compared as strings, the way `_scores_by_id` keys them, so an
-    # integer id is a case rather than a falsy value to drop (0 vanished) or a
-    # sort-time TypeError against a string neighbour.
+    # Stringify ids for consistent pairing and sorting, including numeric 0.
     ids = [_case_id(c) for c in cases if _case_id(c) is not None]
     distinct_ids = sorted(set(ids))
 
@@ -305,11 +192,8 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
             f"{sorted(unscorable)}; they never pair in compare "
             "mode, so adding more of them cannot clear the floor"
         )
-    # The hook and script scoring paths score the same dimensions for every
-    # profile (the profile only moves the critical-dimension cap there), so
-    # profile diversity says nothing about what they measure; the warning
-    # pointed at a remedy (vary test_profile) that changes no measured
-    # property for those types.
+    # Hooks and scripts measure the same dimensions across profiles; profile
+    # diversity would suggest a remedy that changes no measured property.
     if profile_scoped and len(profiles) < min_profiles:
         warnings.append(
             f"{len(profiles)} distinct scorable test profile(s) {profiles}, "
@@ -321,10 +205,7 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
     return {
         "mode": "sizing",
         "verdict": "powered" if powered else "underpowered",
-        # Whether the caller must stop. An under-floor suite is `underpowered`
-        # and NOT blocking: Step 6b reports it and Phase 1 carries on. A
-        # duplicate-id suite is `underpowered` and blocking, because the
-        # comparison identity the next round pairs on is broken.
+        # Low case counts are advisory; duplicate ids block comparison.
         "blocking": bool(errors),
         "artifact_type": artifact_type,
         "distinct_cases": len(distinct_ids),
@@ -341,29 +222,11 @@ def check_sizing(criteria: dict, min_stimuli: int, min_profiles: int,
 
 
 def _scores_by_id(results: dict) -> dict[str, float]:
-    """Extract per-test composite scores from a results or scoring payload.
+    """Extract per-test scores from scoring or raw-result payloads.
 
-    Accepts the shapes hone actually produces. `score_from_results` emits
-    `per_test` as a **list** of records carrying `test_id` and `composite`,
-    and that scoring payload is exactly what `--before`/`--after` are pointed
-    at, so the list has to reach the entry loop below. Treating `per_test` as
-    a mapping only, as this did, sent every hone scoring payload down the
-    raw-results branch, which found no matching key and returned `{}`: zero
-    paired cases and an `underpowered` verdict on every comparison.
-
-    A `per_test` mapping is still accepted (id -> score, or id -> record) but
-    is normalised into entries so it shares the loop's type guards. The old
-    mapping branch called `float()` on the record itself whenever the record
-    carried no `"score"` key -- which is every hone record, since hone names
-    that field `"composite"` -- and raised an uncaught TypeError.
-
-    A raw results.json is read through `hone_common.extract_results`, which
-    owns the key precedence (`results` before `test_results`), and its judge
-    score through `_raw_llm_score`, which owns the `final_score` alias. A
-    private key list here had the precedence reversed, carried a `tests`
-    alias no producer emits, and missed the alias, so a skill-creator-shaped
-    file (`test_results` + `final_score`) yielded `{}` and the report said
-    "0 scored" about a round it had in hand.
+    Accept per_test as a list, an id-to-score map, or an id-to-record map.
+    Normalize mappings to entries for shared type checks. Raw results use
+    hone_common's extract_results and _raw_llm_score for key precedence and aliases.
     """
     if isinstance(results, list):
         entries = results
@@ -388,9 +251,7 @@ def _scores_by_id(results: dict) -> dict[str, float]:
         if not isinstance(entry, dict):
             continue
         test_id = _id_of(entry, ("test_id", "id", "name"))
-        # Composite first (Phase 2 decides on it), and two separate lookups:
-        # a `get` default misses `"score": null`, which hone_common emits when
-        # the judge errored, silently dropping the pair.
+        # Prefer the composite; separate lookups preserve fallback for explicit nulls.
         raw = entry.get("composite")
         if raw is None:
             raw = _raw_llm_score(entry)
@@ -404,11 +265,7 @@ def _scores_by_id(results: dict) -> dict[str, float]:
 
 
 def _inconclusive_ids(payload: dict) -> set[str]:
-    """Ids `_load_round` recorded as inconclusive for this side, if any.
-
-    A caller that built the payload by hand (a results.json shape, or a bare
-    per_test mapping) carries none, and the compare then behaves as before.
-    """
+    """Return ids _load_round marked inconclusive; hand-built payloads may omit them."""
     ids = payload.get("inconclusive") if isinstance(payload, dict) else None
     if not isinstance(ids, (list, set, tuple)):
         return set()
@@ -416,14 +273,10 @@ def _inconclusive_ids(payload: dict) -> set[str]:
 
 
 def _scorer_fingerprint(payload: object) -> tuple[bool, str | None]:
-    """`(known, fingerprint)` for one side of the comparison.
+    """Return (known, fingerprint).
 
-    `known` is False when the payload carries no `scorer_fingerprint` key at
-    all, which is a caller that built the round by hand rather than through
-    `_load_round`; those keep the pre-fingerprint behaviour, the same way an
-    unset `before_source` does. A payload that came off disk always has the
-    key, and a `None` value there means the file was written by a scorer old
-    enough not to record one.
+    An absent key preserves compatibility with hand-built payloads. Disk-loaded
+    rounds always carry the key; None means their scorer did not record a fingerprint.
     """
     if not isinstance(payload, dict) or "scorer_fingerprint" not in payload:
         return False, None
@@ -433,33 +286,17 @@ def _scorer_fingerprint(payload: object) -> tuple[bool, str | None]:
 
 def check_compare(before: dict, after: dict, alpha: float,
                   before_source: str = "", after_source: str = "") -> dict:
-    """Sign-test the after-round against the before-round, per test case.
+    """Sign-test paired cases scored by the same deterministic logic.
 
-    `before_source` and `after_source` name the scorer each side's numbers
-    came from (see `_score_source`). They are compared, not just recorded: the
-    deterministic composite and the LLM judge score are both 0-1 and neither
-    is a rescaling of the other, so a round whose deterministic file was
-    pruned falls back to the judge and the sign test manufactures wins out of
-    the scorer swap alone. That is a `not_measurable` comparison, not a
-    verdict.
-
-    The same reasoning one level down: two rounds can both be deterministic
-    and still not be the same measurement, because the deterministic scorer
-    is code that changes. `metadata.scorer_fingerprint` (score_execution.py)
-    identifies the scoring logic that produced each side, and a mismatch --
-    or an absence, which means an unidentified scorer rather than an
-    unchanged one -- is `not_measurable` for the same reason a judge/
-    deterministic swap is. The remedy is to re-score the older round, not to
-    add test cases.
+    Reject judge scores, source mismatches, and changed or unknown fingerprints
+    as not_measurable. Re-score an older round before comparing across a scorer
+    change; adding cases cannot make different measurements comparable.
     """
     before_scores = _scores_by_id(before)
     after_scores = _scores_by_id(after)
     shared = sorted(set(before_scores) & set(after_scores))
 
-    # A case that scored in one round and came back inconclusive in the other
-    # is not an unpaired id: the criteria set did not change, the evidence
-    # collapsed. `load_deterministic_scores` drops it, so it used to vanish
-    # from the pairing and the sign test ruled on the survivors.
+    # A newly inconclusive case lost evidence; do not drop it and rule on survivors.
     before_inconclusive = _inconclusive_ids(before)
     after_inconclusive = _inconclusive_ids(after)
     collapsed = sorted(set(before_scores) & after_inconclusive)
@@ -498,27 +335,16 @@ def check_compare(before: dict, after: dict, alpha: float,
     scorers_disagree = (
         before_source and after_source and before_source != after_source
     )
-    # `unpaired_after` deliberately does NOT gate this. It used to, and one
-    # genuinely new case in the after round was then enough to hand a
-    # collapsed baseline back to the generic mismatch message below ("check
-    # that both paths name rounds of the same criteria set"), the precise
-    # misdirection this branch exists to prevent, since the ids in `recovered`
-    # do match. New after-only ids are named in the message instead.
+    # New after-only cases must not hide recovery of matching inconclusive ids.
+    # Name the extra ids in the diagnostic instead.
     no_baseline = not shared and bool(recovered)
-    # Two judge files agree on a scorer, not on the measurement Phase 2 acts
-    # on; this used to reach `improved` exit 0 without naming the scorer.
+    # Judge scores cannot establish change in the deterministic measurement.
     judge_only = before_source == after_source == "results"
-    # Which scoring code produced each side. A round is comparable to another
-    # only if the same scoring logic produced both; otherwise every movement
-    # here is a mix of the artifact and the measurement, and Phase 3 reads it
-    # as the artifact alone. See score_execution.py's `scorer_fingerprint`.
+    # Both rounds must use the same scoring logic; see scorer_fingerprint.
     before_known, before_fingerprint = _scorer_fingerprint(before)
     after_known, after_fingerprint = _scorer_fingerprint(after)
     fingerprints_checked = before_known or after_known
-    # Absence is not agreement. 144 stored baselines predate the field, and
-    # reading "no fingerprint on either side" as "same scorer" is exactly the
-    # assumption that let a merged scorer change auto-revert working edits.
-    # An unknown scorer is re-scored, not assumed.
+    # Missing fingerprints mean unknown scorers; re-score before comparing.
     scorer_unknown = fingerprints_checked and not (
         before_fingerprint and after_fingerprint
     )
@@ -592,8 +418,7 @@ def check_compare(before: dict, after: dict, alpha: float,
             "those cases produced no scorable evidence, before comparing"
         )
     elif no_baseline:
-        # Mirror image of `collapsed`: the ids match, the baseline produced no
-        # evidence. The mismatch message below sent the agent to check paths.
+        # Recovered cases have matching ids but no measured baseline.
         verdict = "not_measurable"
         also_new = (
             f" A further {len(unpaired_after)} case(s) {unpaired_after} are "
@@ -608,10 +433,7 @@ def check_compare(before: dict, after: dict, alpha: float,
             "new baseline"
         )
     elif not shared:
-        # Zero pairs is a pairing failure, and reporting it as `underpowered`
-        # sent the agent to Step 6b's remedy ("add cases that discriminate a
-        # different property"), which cannot fix a test-id mismatch or an
-        # absent deterministic_scores.json.
+        # Zero pairs indicate mismatched inputs, which adding cases cannot repair.
         verdict = "not_measurable"
         errors.append(
             f"0 paired test case(s): no test id is present in both rounds "
@@ -636,9 +458,7 @@ def check_compare(before: dict, after: dict, alpha: float,
         verdict = "inconclusive"
 
     if recovered and not no_baseline:
-        # No before-score means no verdict can be manufactured; named so an
-        # unstable suite is visible. When nothing paired at all the error
-        # above already names them.
+        # Name recovered cases as a warning when other cases can still be paired.
         warnings.append(
             f"{len(recovered)} case(s) {recovered} were inconclusive in "
             "--before and scored in --after; they have no baseline and were "
@@ -675,14 +495,7 @@ def check_compare(before: dict, after: dict, alpha: float,
 
 
 def _load(path: str) -> dict:
-    """Load a JSON object, rejecting any other root shape as a usage error.
-
-    Every caller immediately does `.get()` on the result, so a list- or
-    scalar-rooted file (a criteria file holding a bare array of test cases, a
-    truncated write) raised an uncaught AttributeError traceback instead of
-    the documented exit 2. Same tolerance `_load_criteria_index` in
-    score_execution.py was hardened for.
-    """
+    """Load a JSON object; reject other root types as usage errors."""
     try:
         with open(path) as handle:
             loaded = json.load(handle)
@@ -706,21 +519,9 @@ def _load(path: str) -> dict:
 
 
 def _require_path(path: str) -> None:
-    """Exit 2 on a path that is not a readable file.
+    """Require a readable file before resolving its deterministic sibling.
 
-    `load_deterministic_scores` only ever looks at `<parent>/
-    deterministic_scores.json`, so it does not care whether the path it was
-    handed exists: `--before r1/reslts.json` read `r1/deterministic_scores.json`
-    and produced a confident verdict off a typo. The documented contract for a
-    path that is not there is exit 2, and nothing downstream can restore it
-    once the fallback has succeeded.
-
-    A directory is the same failure wearing a plausible shape, and the docs
-    used to invite it by calling `--before` "the previous round's output
-    directory". `--before r1` resolves to `<parent-of-r1>/
-    deterministic_scores.json`: either it does not exist and the run dies on an
-    unhelpful "Is a directory", or it does and both flags silently read the
-    same file, tying every case and reporting `underpowered` forever.
+    Reject typos and directories even if their parent contains a score file.
     """
     target = Path(path)
     if not target.exists():
@@ -737,60 +538,30 @@ def _require_path(path: str) -> None:
 
 
 def _deterministic_file(path: str) -> Path:
-    """The `deterministic_scores.json` that `load_deterministic_scores` resolves.
+    """Resolve the deterministic sibling using hone_common's path rule.
 
-    Mirrors hone_common's sibling-file rule rather than importing it, because
-    hone_common exposes the loaded scores and this needs the file's
-    *presence*: a deterministic file that exists and scored nothing is a
-    deterministically scored round, not an unscored one.
+    Check presence separately from loaded scores: an existing file with no
+    conclusive cases is still a deterministically scored round.
     """
     return Path(path).parent / "deterministic_scores.json"
 
 
 def _load_round(path: str) -> tuple[dict, str]:
-    """Load one round's scores and name the scorer they came from.
+    """Load round scores with their source, inconclusive ids, and scorer metadata.
 
-    `path` may be either a round's `deterministic_scores.json` or the
-    `results.json` beside it; `load_deterministic_scores` resolves both to the
-    deterministic file, which is what Phase 2 decides on. The payload also
-    carries the ids that file marked inconclusive, because a case that scored
-    last round and produced no evidence this round is a finding, not an
-    absent id, and `check_compare` refuses to rule over the survivors.
+    Accept deterministic_scores.json or its results.json sibling. Validate the
+    deterministic JSON before using tolerant loaders, so corrupt files produce
+    exit 2 rather than an empty score set.
 
-    Falling back to `_load(path)` when there is no deterministic file keeps
-    the exit-2 contract for a missing or non-object file and lets the report
-    say what it did find (how many judge scores, under which ids). It does
-    not make the judge comparable: `check_compare` returns `not_measurable`
-    whenever either side, or both, came from `results`. Two judge files with
-    matching sources used to sail through the scorer-swap guard and reach
-    `improved` exit 0, with a text report that never said which scorer it
-    had read.
+    An existing deterministic file remains authoritative even if every composite
+    is null. Preserve those inconclusive ids so check_compare can report lost
+    evidence. Never substitute judge scores within such a round.
 
-    The source is returned from here rather than inferred separately, because
-    inferring it from `load_deterministic_scores(path)` being truthy conflated
-    two different rounds. A round whose every composite came back null -- the
-    signature of a catastrophic regression, per score_execution.py's
-    inconclusive paths -- has a deterministic file that scored nothing, and the
-    truthiness test called that "results". Paired against a normal round it
-    reported a scorer swap that never happened, burying the real finding under
-    "re-run deterministic scoring on the round that is missing it".
+    Without a deterministic file, load the supplied result file for diagnostics
+    and input validation. check_compare marks judge-only rounds not_measurable,
+    including when both sides use judge scores.
 
-    Such a round also does not fall back to the judge. The deterministic file
-    is present and is the scorer of record; falling through to results.json
-    would swap scorers *within* one side, which is the exact substitution
-    `check_compare` refuses to rule on. It returns no scores and every id as
-    inconclusive instead, so the comparison names the collapse.
-
-    The deterministic file is parsed with `_load` first, because hone_common's
-    loaders swallow a JSONDecodeError or a non-object root to `{}`, and `{}`
-    is indistinguishable from a round that scored nothing: a truncated
-    deterministic file came back as a zero-pair criteria mismatch that never
-    named the file, sending the agent to re-check test ids. Invalid JSON is
-    the documented exit 2 everywhere else and is here too.
-
-    The payload also carries `metadata.artifact_type` when the scorer wrote
-    one, so compare mode can size the criteria under the type that actually
-    scored the rounds rather than a flag the caller may have left off.
+    Carry metadata.artifact_type so sizing uses the type that produced the scores.
     """
     _require_path(path)
     deterministic_path = _deterministic_file(path)
@@ -808,23 +579,17 @@ def _load_round(path: str) -> tuple[dict, str]:
             ],
             "inconclusive": sorted(load_inconclusive_ids(path)),
             "artifact_type": metadata.get("artifact_type"),
-            # Always set, None included: `check_compare` reads the key's
-            # *presence* as "this side came off disk", so a round scored
-            # before score_execution.py recorded a fingerprint is an
-            # unknown scorer rather than an opted-out caller.
+            # Always include the key: None identifies an old disk-loaded score file
+            # whose scorer is unknown.
             "scorer_fingerprint": metadata.get("scorer_fingerprint"),
         }, "deterministic"
     return _load(path), "results"
 
 
 def _recorded_artifact_type(*rounds: dict) -> tuple[str, str]:
-    """The artifact type the rounds were scored under, and a caveat if unclear.
+    """Return the rounds' recorded artifact type and any disagreement warning.
 
-    score_execution.py writes `metadata.artifact_type` into every
-    deterministic_scores.json (`--type`), and that is the type whose scoring
-    path produced the composites being compared. Returns ("", "") when neither
-    round recorded one, and ("", reason) when the two rounds disagree, which
-    is a pair no single sizing reading fits.
+    Return ("", "") if neither records a type, or ("", reason) if they disagree.
     """
     recorded = sorted({
         r.get("artifact_type") for r in rounds
@@ -842,35 +607,12 @@ def _recorded_artifact_type(*rounds: dict) -> tuple[str, str]:
 
 
 def _combined_verdict(sizing: dict, comparison: dict) -> str:
-    """The verdict a caller acts on, given both halves of the report.
+    """Combine sizing and comparison verdicts, with sizing failures first.
 
-    A sizing failure outranks whatever the comparison computed, in both
-    directions. phase1-evaluation.md Step 9a: an `underpowered` run is
-    "neither a pass nor a regression ... never let it justify a promotion or a
-    revert", and the sign test is direction-blind under the null, so a suite
-    too small to promote on is equally too small to revert on.
-
-    This is what keeps "advisory" from meaning "ignored". Sizing no longer
-    halts Phase 1 below the floor, so under-floor suites now reach Phase 3 as
-    the common path rather than the exception; the override is what stops the
-    extra traffic from landing on Phase 3's auto-revert. An `underpowered`
-    sizing therefore still suppresses the comparison in BOTH directions: the
-    combined verdict never reads `improved` (no promotion) and never reads
-    `regressed` (no auto-revert), and phase3-reevaluation.md step 5 keys its
-    auto-revert precondition off exactly that.
-
-    What the override must not do is happen quietly. The nested
-    `comparison.verdict` is left intact for a human reading the JSON, and
-    anything the override hides is stated as a warning rather than being
-    absorbed into a bare "underpowered".
-
-    `not_measurable` gets its own warning because it is the one hidden verdict
-    whose remedy differs. Step 9a records the surface verdict, and the
-    `underpowered` remedy is "add test cases that discriminate a different
-    property" -- which cannot fix a test-id mismatch or an absent
-    deterministic file, the input problems phase1-evaluation.md Step 9a says to
-    fix instead. Without the warning that distinction survived only in the
-    nested JSON nobody reads.
+    Underpowered sizing permits neither promotion nor auto-revert, even though
+    it is advisory in Phase 1. Preserve comparison.verdict in the nested report
+    and warn when sizing hides it. A hidden not_measurable verdict needs input
+    repair rather than more cases.
     """
     if sizing["verdict"] == "powered":
         return comparison["verdict"]
@@ -954,8 +696,7 @@ def main() -> None:
     else:
         before_round, before_source = _load_round(args.before)
         after_round, after_source = _load_round(args.after)
-        # Size under the type that scored the rounds: trusting the flag alone
-        # buried a hook suite's genuine `improved` under `underpowered`.
+        # Size using the artifact type recorded by the scorer.
         recorded_type, type_caveat = _recorded_artifact_type(before_round, after_round)
         artifact_type = recorded_type or args.artifact_type
         sizing = check_sizing(criteria, args.min_stimuli, args.min_profiles,
@@ -975,10 +716,8 @@ def main() -> None:
         # A top-level `mode`, like the sizing report's, so a consumer can tell
         # the two shapes apart without probing for a `comparison` key.
         verdict = _combined_verdict(sizing, comparison)
-        # Compare mode keeps its original exit semantics: only `improved` is a
-        # result a caller may act on. `underpowered` here is non-zero on
-        # purpose -- Phase 3 must neither promote nor revert on it, and a zero
-        # exit would read as the clean pass the sizing half just denied.
+        # Compare mode allows action only on improved. Underpowered permits
+        # neither promotion nor auto-revert.
         report = {"mode": "compare", "sizing": sizing, "comparison": comparison,
                   "verdict": verdict, "blocking": verdict != "improved"}
 
@@ -987,15 +726,8 @@ def main() -> None:
         print()
     else:
         print(f"VERDICT: {report['verdict']}")
-        # Sizing mode only. The advisory describes a verdict the run carries
-        # forward without acting on it, which is what a non-blocking sizing
-        # verdict (`underpowered`, no errors) is. In compare mode `blocking`
-        # means something else entirely -- it is `verdict != "improved"` --
-        # so the one compare verdict reaching this branch was `improved`, and
-        # a 6W/0L/0T comparison at p=0.0156 printed "it justifies neither a
-        # promotion nor a revert", the exact opposite of Step 9a's rule for
-        # `improved` ("Act on it"). The JSON was always right; only this line
-        # was wrong.
+        # This advisory applies only to nonblocking, underpowered sizing.
+        # Compare improved permits action and must not receive it.
         if (report["mode"] == "sizing" and not report["blocking"]
                 and report["verdict"] != "powered"):
             print("  advisory: not blocking, the run continues carrying this "

@@ -31,13 +31,8 @@ SCRIPT = str(Path(check_scope.__file__))
 
 def walk_state(root: Path, exclude=None,
                max_files: int = check_scope.DEFAULT_MAX_FILES) -> dict:
-    """A walk-mode manifest payload, as `--snapshot` writes outside a repo.
-
-    Built the way `snapshot_state` builds it, budget and unreadable-path list
-    included. Hand-assembling the dict here let the helper drift from the real
-    thing: it omitted `max_files`, and the test that needed the budget spliced
-    the field in itself, which hid the fact that `snapshot_state` was not
-    writing one.
+    """Build walk-mode state through snapshot_state, including its budget and
+    unreadable-path records, so fixtures cannot hide omissions in real snapshots.
     """
     files, unmeasurable = check_scope.walk_manifest(root, exclude, max_files)
     return {"mode": "walk", "files": files, "unmeasurable": unmeasurable,
@@ -64,16 +59,11 @@ def run_cli(*args: str) -> subprocess.CompletedProcess:
 
 
 def declaring(root: Path, *paths: str) -> check_scope.Declaration:
-    """The declaration a run makes when it wrote exactly `paths`.
-
-    Root-relative spellings in, resolved paths out, so a test states what its
-    simulated run wrote in the same terms the report uses.
-    """
+    """Declare exactly paths, converting root-relative inputs to resolved paths."""
     return check_scope.normalize_declared([str(root / p) for p in paths], root)
 
 
-# A run that wrote nothing at all: present, and empty. Not the same value as
-# the absence of a declaration, which is what `verify(...)` defaults to.
+# Explicit no-writes is present and empty; an absent declaration is different.
 NOTHING = check_scope.Declaration(set())
 
 
@@ -109,14 +99,8 @@ class TestIgnored(unittest.TestCase):
 
 
 class TestDerivation(unittest.TestCase):
-    """`--root` and `--scope` are independent knobs and derive differently.
-
-    The docs used to derive both from one dirname chain
-    (`SCOPE_ROOT=$(dirname $ARTIFACT_DIR)`, `SCOPE_NAME=$(basename ...)`),
-    which is wrong in opposite directions for the two artifact shapes: it made
-    a hook's watch too wide (`~/.claude` instead of `~/.claude/hooks`) and its
-    scope too permissive (every hook in the directory), while making a skill's
-    watch too narrow to see a sibling command directory or a repo-root script.
+    """Root and scope derive independently: hooks need a narrow watch and one
+    permitted file; repository skills need a wide watch and one permitted directory.
     """
 
     def setUp(self):
@@ -144,12 +128,8 @@ class TestDerivation(unittest.TestCase):
                          self.tmp / ".claude" / "skills")
 
     def test_the_install_dir_survives_a_symlinked_artifact_directory(self):
-        """r4-B1, at the unit: the root comes from where it is installed.
-
-        `access_path` resolves the install directory and stops there. A full
-        `realpath` of the artifact moves it into the checkout the symlink
-        points at, and `derive_root` then widens to that checkout -- a tree
-        that does not contain the install directory at all.
+        """access_path must resolve only the install directory; following the
+        artifact symlink would derive a watch from the wrong checkout.
         """
         checkout = self.tmp / "checkout"
         (checkout / "skills" / "hone").mkdir(parents=True)
@@ -178,13 +158,7 @@ class TestDerivation(unittest.TestCase):
 
 
 class TestPreexistingDirtyTree(unittest.TestCase):
-    """A file dirty in git but unchanged since the snapshot is not our doing.
-
-    Regression: verify() used to union the git-status signal with the hash
-    manifest, so any pre-existing uncommitted work outside scope produced a
-    scope_violation. The documented response to a violation is to revert the
-    offending paths — which would have destroyed that unrelated work.
-    """
+    """Pre-existing dirty files unchanged since snapshot must never be reverted."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -309,9 +283,7 @@ class TestGitPathNamespace(unittest.TestCase):
 
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp())
-        # Guarded tree sits one level below the repo root, which is the shape
-        # --max-files produces when it narrows a repo watch back down to the
-        # install directory.
+        # Use a watch below the repository root, as after budget-driven narrowing.
         self.root = self.repo / "skills"
         (self.root / "hone").mkdir(parents=True)
         (self.root / "hone" / "SKILL.md").write_text("in scope\n")
@@ -352,13 +324,8 @@ class TestGitPathNamespace(unittest.TestCase):
 
 
 class TestUntrackedDirectories(unittest.TestCase):
-    """A directory this run created must not be reported as pre-existing dirt.
-
-    `git status --porcelain` defaults to `-unormal`, which collapses a wholly
-    untracked directory to `newdir/`. That entry never matched the file-level
-    paths in the hash manifest, so it survived the "not in changed" filter and
-    the report told the caller to revert `newdir/x.txt` and, two fields later,
-    that `newdir` predated the run and must not be reverted.
+    """Expand untracked directories to file paths so new files cannot also be
+    reported as pre-existing directory dirt.
     """
 
     def setUp(self):
@@ -384,12 +351,8 @@ class TestUntrackedDirectories(unittest.TestCase):
 
 
 class TestPorcelainPathParsing(unittest.TestCase):
-    """Renames and C-quoted paths must survive into the dirty-file report.
-
-    `line[3:].strip().strip('"')` turned `R old -> new` into one nonexistent
-    path and left git's octal escapes literal. Both fell out of
-    `preexisting_dirty_out_of_scope`, the list that tells the caller what not
-    to revert, so the caller reverted someone else's uncommitted work.
+    """Preserve rename destinations and C-quoted names in dirty-file reports;
+    otherwise the list of pre-existing work to protect loses entries.
     """
 
     def test_a_plain_path_is_unchanged(self):
@@ -436,14 +399,9 @@ class TestPorcelainPathParsing(unittest.TestCase):
 
 
 class TestManifestRootMismatch(unittest.TestCase):
-    """An explicit --verify --root that disagrees with the manifest exits 2.
+    """Reject a verify root that differs from the manifest with exit 2.
 
-    `--verify` normally reads the root back out of the manifest, precisely so
-    the executor never has to reproduce it across two tool calls. When a caller
-    overrides it anyway, a mismatch must not be treated as data: under a
-    different root every recorded file is "removed" and every present file is
-    "added", and the documented response to a violation is to revert the listed
-    paths.
+    Comparing different roots would fabricate removed and added paths.
     """
 
     def setUp(self):
@@ -488,12 +446,8 @@ class TestManifestRootMismatch(unittest.TestCase):
 
 
 class TestSkillInsideARepository(unittest.TestCase):
-    """r2-S8: a skill's watch must reach the whole repository.
-
-    `SCOPE_ROOT=$(dirname $ARTIFACT_DIR)` gave `plugins/p/skills` for a skill
-    at `plugins/p/skills/s/`, a tree that cannot see `plugins/p/commands/`, a
-    sibling plugin, or a repo-root `scripts/` -- the three collateral-damage
-    cases the script exists to catch. Every one of them verified `clean`.
+    """Watch repository-wide collateral edits: sibling commands, plugins, and
+    repo-root scripts must remain visible for nested skills.
     """
 
     def setUp(self):
@@ -551,13 +505,7 @@ class TestSkillInsideARepository(unittest.TestCase):
         self.assertEqual(report["modified_in_scope"], ["plugins/p/skills/s/SKILL.md"])
 
     def test_a_clean_tracked_file_change_is_seen_but_not_attributed(self):
-        """Acceptance 5: no pre-image stored, so the change is seen, not blamed.
-
-        Git calling a file clean at snapshot and dirty at verify proves it
-        changed during the round. It does not prove this run changed it -- the
-        user's editor and a second session in the same checkout look identical
-        -- so the change reaches the report without reaching the revert list.
-        """
+        """Git detects clean-to-dirty changes but cannot identify their writer."""
         self.assertEqual(self._snapshot().returncode, 0)
         payload = json.loads(self.manifest.read_text())
         self.assertEqual(payload["mode"], "git")
@@ -611,12 +559,8 @@ class TestSkillInsideARepository(unittest.TestCase):
         self.assertEqual(report["counts"]["removed"], 1)
 
     def test_a_dirty_file_deleted_out_of_scope_is_a_violation_when_declared(self):
-        """Declared, so attributable, and flagged as needing a manual undo.
-
-        The file was already dirty when the run began, so restoring it with
-        `git checkout` would take the earlier uncommitted work with it. The
-        attribution is sound; only the remedy differs, which is what
-        `violations_manual_revert` carries.
+        """Declared deletion is attributable, but restore from the snapshot to
+        preserve earlier uncommitted work; mark violations_manual_revert.
         """
         (self.repo / "lib" / "shared.md").write_text("dirty before the run\n")
         self.assertEqual(self._snapshot().returncode, 0)
@@ -668,13 +612,8 @@ class TestSkillInsideARepository(unittest.TestCase):
                          os.path.realpath(self.repo))
 
     def test_a_large_but_clean_repository_keeps_the_wide_watch(self):
-        """r2-S3: the budget bounds the hashing, and a clean repo hashes nothing.
-
-        `--max-files` used to be compared against the repository's tracked
-        count, so any monorepo over the limit had its watch narrowed to the
-        install directory. In git mode the snapshot hashes only dirty and
-        untracked files, so narrowing saved no work at all and dropped exactly
-        the coverage the wide root exists for.
+        """Budget hashing workload, not tracked count; clean repositories need no
+        hashes and should retain repository-wide coverage.
         """
         snap = self._snapshot("--max-files", "1")
         self.assertEqual(snap.returncode, 0, snap.stderr)
@@ -683,7 +622,7 @@ class TestSkillInsideARepository(unittest.TestCase):
         self.assertEqual(os.path.realpath(report["root"]),
                          os.path.realpath(self.repo))
 
-        # And the wide watch still does its job.
+        # Confirm the wide watch still detects collateral changes.
         (self.repo / "plugins" / "p" / "commands" / "c.md").write_text("cmd v2\n")
         run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
                       "--declared",
@@ -693,11 +632,7 @@ class TestSkillInsideARepository(unittest.TestCase):
                          ["plugins/p/commands/c.md"])
 
     def test_max_files_narrows_the_root_and_says_so(self):
-        """Acceptance 7: a silent narrowing is the failure this PR is about.
-
-        The budget is spent on files that must actually be hashed, so it takes
-        real uncommitted work to exceed it.
-        """
+        """Report narrowed coverage when actual hashing workload exceeds budget."""
         for name in ("a", "b", "c", "d"):
             (self.repo / f"untracked-{name}.md").write_text("uncommitted\n")
         snap = self._snapshot("--max-files", "2")
@@ -721,13 +656,7 @@ class TestSkillInsideARepository(unittest.TestCase):
 
 
 class TestHookOutsideARepository(unittest.TestCase):
-    """r6-S1: a hook's watch is its install dir and its scope is one file.
-
-    `SCOPE_ROOT=$(dirname $ARTIFACT_DIR)` widened the watch to the whole
-    `~/.claude` config tree while `SCOPE_NAME=$(basename $ARTIFACT_DIR)`
-    granted permission to edit *every* hook in `hooks/` -- too broad and too
-    permissive at once.
-    """
+    """Watch the hook's install directory and permit only its file."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -753,7 +682,7 @@ class TestHookOutsideARepository(unittest.TestCase):
         self.assertEqual(os.path.realpath(payload["root"]),
                          os.path.realpath(self.hooks))
         self.assertEqual(payload["scope"], ["foo.sh"])
-        # settings.json lives above the watch and is nobody's business here.
+        # settings.json is outside this watch.
         self.assertNotIn("settings.json", json.dumps(payload["files"]))
 
     def test_editing_the_artifact_itself_is_clean(self):
@@ -822,13 +751,7 @@ class TestCliUsageErrors(unittest.TestCase):
 
 
 class TestGitGoesQuietAtVerify(unittest.TestCase):
-    """r1-B1: a guard that cannot see must never report `clean`.
-
-    Snapshot a repo, change two files out of scope, then make git unanswerable
-    before verifying. The old code turned that into zero observed changes, a
-    `clean` verdict and exit 0, which the caller records as a passing
-    `scope_verify` gate on a tree nothing looked at.
-    """
+    """Unavailable git after snapshot must return not_measurable, never clean."""
 
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp())
@@ -861,11 +784,7 @@ class TestGitGoesQuietAtVerify(unittest.TestCase):
         self.assertTrue(report["not_measurable_reasons"])
 
     def test_the_hash_manifest_note_is_not_printed_for_a_git_manifest(self):
-        """r1-B1: a git-mode manifest stores no whole-tree hashes.
-
-        The old text claimed the hash manifest had been the only check, on a
-        manifest that holds no such hashes: nothing at all had been checked.
-        """
+        """A git-mode manifest has no whole-tree hashes to substitute for git."""
         shutil.rmtree(self.repo / ".git")
         run = run_cli("--manifest", str(self.manifest), "--verify")
         self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
@@ -874,11 +793,9 @@ class TestGitGoesQuietAtVerify(unittest.TestCase):
 
 
 class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
-    """r1-B4: `git status` collapses a nested repo, and a gitlink is not a file.
+    """Inspect collapsed nested repositories and gitlinks as subtrees.
 
-    `~/.claude/skills` and `~/.claude/scripts` are separate repositories inside
-    the `~/.claude` repo, which is exactly the tree a run on a hook or a script
-    watches, so this is the ordinary shape here rather than an exotic one.
+    Nested skill/script repositories are common in the watched configuration tree.
     """
 
     def setUp(self):
@@ -958,13 +875,8 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
         self.assertNotIn("sub", report["violations"])
 
     def test_a_submodule_is_seen_when_the_root_sits_below_the_toplevel(self):
-        """The two path namespaces again: `ls-files` is root-relative already.
-
-        `git status` prints repository-toplevel-relative paths and has to be
-        rebased onto the watch root; `git ls-files` prints root-relative ones
-        and must not be. Rebasing both doubles the prefix whenever the watch
-        root sits below the repository root, which is the documented hook and
-        script invocation, and the submodule falls back out of the report.
+        """Rebase porcelain paths, but not ls-files paths, which are already
+        root-relative; rebasing both would hide nested-root submodules.
         """
         add = subprocess.run(
             ["git", "-C", str(self.repo), "-c", "protocol.file.allow=always",
@@ -985,10 +897,8 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
         self.assertIn("sub/other.md", json.loads(run.stdout)["violations"])
 
     def test_an_unhashable_subtree_reports_not_measurable(self):
-        # The budget has to sit above the outer tree's own hashing workload
-        # (one opaque subtree, counted once) and below the subtree's contents,
-        # or the snapshot bails before it gets as far as the subtree. Two
-        # files in `nested` against a budget of one does that.
+        # Count the opaque subtree once in the outer budget, then exceed that
+        # budget inside it: one subtree containing two files, budget one.
         (self.nested / "second.md").write_text("nested v1 too\n")
         snap = run_cli("--root", str(self.repo), "--scope", "skills/s",
                        "--manifest", str(self.manifest), "--snapshot", "--json",
@@ -1002,11 +912,7 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
         self.assertTrue(report["not_measurable_reasons"])
 
     def test_an_unhashable_subtree_does_not_swallow_a_real_violation(self):
-        """A partly-readable tree still reports what it did read.
-
-        The subtree nobody could hash must not take the actionable revert list
-        down with it: the caller needs both the halt and the paths.
-        """
+        """Partial coverage must retain observed violations alongside the halt."""
         (self.nested / "second.md").write_text("nested v1 too\n")
         snap = run_cli("--root", str(self.repo), "--scope", "skills/s",
                        "--manifest", str(self.manifest), "--snapshot", "--json",
@@ -1023,13 +929,8 @@ class TestNestedRepositoriesAndSubmodules(unittest.TestCase):
 
 
 class TestPreImagesSurviveASubtreeChangingShape(unittest.TestCase):
-    """The pre-image stores are partitioned by how git saw a file, not by content.
-
-    A `git init` in a subdirectory mid-round moves ordinary untracked paths
-    into an opaque nested subtree, and removing a submodule moves them back.
-    A classifier reading only its own store finds no pre-image for a
-    byte-identical file, calls it `added`, and the caller is told to revert a
-    file nobody touched.
+    """Preserve pre-images when git init or submodule removal changes a file's
+    storage classification; unchanged files must not become added findings.
     """
 
     def setUp(self):
@@ -1096,11 +997,8 @@ class TestPreImagesSurviveASubtreeChangingShape(unittest.TestCase):
 
 
 class TestUnreadableFiles(unittest.TestCase):
-    """An unreadable file is the plainest "could not see", and used to be neither.
-
-    Hashing it to the same `None` that means "absent" classified it as `added`
-    and put it in the revert list, and an unreadable file at both ends compared
-    equal to itself and vanished from the report entirely.
+    """Unreadable files differ from absent files and remain unmeasurable even
+    when unreadable at both snapshot and verify.
     """
 
     def setUp(self):
@@ -1142,7 +1040,7 @@ class TestUnreadableFiles(unittest.TestCase):
 
 
 class TestToolCacheDirectoriesAreIgnored(unittest.TestCase):
-    """r1-S4: a lint run during a round must not halt it."""
+    """Routine lint caches must not halt an edit round."""
 
     def test_common_caches_are_ignored(self):
         for rel in (".ruff_cache/x/0.json", ".mypy_cache/3.12/m.data.json",
@@ -1157,18 +1055,10 @@ class TestToolCacheDirectoriesAreIgnored(unittest.TestCase):
 
 
 class TestAttributionComesFromTheDeclaration(unittest.TestCase):
-    """r2-B2/r2-B3: the revert path used to fire in exactly the wrong case.
+    """Attribute edits from declarations, never from pre-image availability.
 
-    Attribution was inferred from whether the snapshot held a pre-image, and a
-    pre-image only proves a file changed DURING the round. Measured on the tree
-    this replaces:
-
-      hone edits a clean tracked sibling   -> not_measurable, violations []
-      the user's own WIP, edited by them   -> scope_violation, violations [it]
-
-    So the `git checkout` the caller is told to run never fired for the case
-    the guard exists for, and fired only where attribution was unsound. Both
-    directions are pinned here.
+    Declared edits to clean siblings are violations; another writer's edits to
+    pre-existing work must never enter the restore list.
     """
 
     def setUp(self):
@@ -1193,7 +1083,7 @@ class TestAttributionComesFromTheDeclaration(unittest.TestCase):
                        "skill", "--manifest", str(self.manifest), "--snapshot")
 
     def test_the_runs_own_out_of_scope_edit_is_a_real_violation(self):
-        """Direction A: the case the guard exists for, on a CLEAN tracked file."""
+        """Declared edits to clean tracked siblings are violations."""
         self.assertEqual(self._snapshot().returncode, 0)
         (self.skill / "SKILL.md").write_text("skill v2\n")
         self.sibling.write_text("edited by the run, out of scope\n")
@@ -1211,7 +1101,7 @@ class TestAttributionComesFromTheDeclaration(unittest.TestCase):
         self.assertEqual(report["unattributed_out_of_scope"], [])
 
     def test_the_users_own_wip_edited_by_the_user_is_never_reverted(self):
-        """Direction B: dirty at snapshot, changed again by the USER."""
+        """Another writer's changes to pre-existing work are not attributable."""
         self.sibling.write_text("the user's uncommitted work\n")
         self.assertEqual(self._snapshot().returncode, 0)
         self.assertIn("plugins/p/commands/other.md",
@@ -1230,7 +1120,7 @@ class TestAttributionComesFromTheDeclaration(unittest.TestCase):
                          ["plugins/p/commands/other.md"])
 
     def test_an_untracked_file_someone_else_created_is_never_deleted(self):
-        """r2-B3: the same hole for untracked files, where a revert means delete."""
+        """Another writer's new untracked file must never enter the delete list."""
         self.assertEqual(self._snapshot().returncode, 0)
         (self.skill / "SKILL.md").write_text("skill v2\n")
         (self.repo / "build-output.txt").write_text("a build step wrote this\n")
@@ -1258,7 +1148,7 @@ class TestAttributionComesFromTheDeclaration(unittest.TestCase):
         self.assertEqual(report["violations_manual_revert"], ["stray.txt"])
 
     def test_an_edit_the_run_did_not_declare_in_scope_is_not_measurable(self):
-        """An incomplete declaration is the one lie this check can catch."""
+        """Undeclared in-scope edits show the declaration is incomplete."""
         self.assertEqual(self._snapshot().returncode, 0)
         (self.skill / "SKILL.md").write_text("skill v2\n")
         run = run_cli("--manifest", str(self.manifest), "--verify", "--json",
@@ -1271,12 +1161,8 @@ class TestAttributionComesFromTheDeclaration(unittest.TestCase):
 
 
 class TestTheDeclarationIsMandatory(unittest.TestCase):
-    """r1's subject again: "cannot see" must never render as `clean`.
-
-    A run that will not say what it wrote cannot be told it stayed in scope,
-    so an absent declaration is `not_measurable` on its own -- including on a
-    tree where nothing changed at all, since the guard has no way to know the
-    run did not write somewhere it cannot observe.
+    """Missing declarations are not_measurable even when the tree is unchanged;
+    the guard cannot rule out writes beyond its watch.
     """
 
     def setUp(self):
@@ -1324,7 +1210,7 @@ class TestTheDeclarationIsMandatory(unittest.TestCase):
 
 
 class TestDeclarationShape(unittest.TestCase):
-    """How a declaration is spelled, and what happens when it is spelled badly."""
+    """Accept supported declarations and reject malformed ones."""
 
     def setUp(self):
         self.repo = Path(tempfile.mkdtemp())
@@ -1406,7 +1292,7 @@ class TestDeclarationShape(unittest.TestCase):
         self.assertIn("holds no declaration", run.stderr)
 
     def test_an_empty_declared_file_is_a_usage_error_not_an_empty_declaration(self):
-        """`--declared-none` reached by accident is the one inference to refuse."""
+        """Empty files cannot implicitly claim --declared-none."""
         run = run_cli("--manifest", str(self.manifest), "--verify",
                       "--declared-file", self._declared_file([]))
         self.assertEqual(run.returncode, 2, run.stdout)
@@ -1457,12 +1343,7 @@ class TestDeclarationShape(unittest.TestCase):
 
 
 class TestUnrecognizedManifestMode(unittest.TestCase):
-    """r2-S1: an unreadable manifest mode reported the whole tree as violations.
-
-    `mode` missing or unrecognized fell through to the walk branch, where an
-    absent `files` map made every file under the root `added`. The caller is
-    told to revert what `violations` lists.
-    """
+    """Unknown manifest modes must not fabricate added files across the tree."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -1506,11 +1387,7 @@ class TestUnrecognizedManifestMode(unittest.TestCase):
 
 
 class TestInternalErrorsNeverExitOne(unittest.TestCase):
-    """r2-S4: exit 1 means `scope_violation`, and a traceback used to exit 1 too.
-
-    The caller's branch table answers exit 1 by reverting the paths under
-    `violations`, and a crash prints no report to read them from.
-    """
+    """Crashes must not use exit 1, which requires a scope-violation report."""
 
     def test_an_unexpected_exception_exits_2(self):
         real_main = check_scope.main
@@ -1568,7 +1445,7 @@ class TestInternalErrorsNeverExitOne(unittest.TestCase):
 
 
 class TestWalkVerifyRespectsTheSnapshotBudget(unittest.TestCase):
-    """r2-N1: walk-mode verify hashed without a limit while every other walk had one."""
+    """Walk-mode verify must retain the snapshot's file budget."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -1593,12 +1470,8 @@ class TestWalkVerifyRespectsTheSnapshotBudget(unittest.TestCase):
         self.assertEqual(report["verdict"], "clean")
 
     def test_the_snapshot_carries_its_own_budget(self):
-        """r3-N1: the budget has to survive in the state, not just the CLI.
-
-        `verify` reads `state["max_files"]`, so a walk-mode snapshot that did
-        not store one had every in-process verify silently fall back to the
-        20000 default -- a tree snapshotted under a tight budget and grown
-        past it was re-hashed without bound instead of reported.
+        """Store max_files in state so in-process verify cannot silently fall back
+        to the 20000-file default after a tightly budgeted snapshot.
         """
         state = check_scope.snapshot_state(self.root, max_files=7)
         self.assertEqual(state["mode"], "walk")
@@ -1606,23 +1479,11 @@ class TestWalkVerifyRespectsTheSnapshotBudget(unittest.TestCase):
 
 
 class TestASubtreeBecomingOpaqueInventsNothing(unittest.TestCase):
-    """r2-N2: a file swept into an opaque subtree must not be invented as `added`.
+    """Newly opaque clean tracked files lack pre-images but are not added.
 
-    `_classify_nested` builds its pre-image view from the flat map, which holds
-    nothing for a file that was clean and tracked at snapshot -- by design,
-    since git was attributing those on its own. Reading "absent from the
-    pre-images" as `added` manufactures a change for a file nobody touched.
-
-    Two things answer it. The declaration is the load-bearing one: an `added`
-    path the run never declared cannot reach `violations` at all, so no revert
-    instruction rides on the mistake any more. The guard below is the narrower
-    one, and it stops the bogus `added` being reported in the first place.
-
-    Reaching it through real git is hard on purpose: git declines to collapse a
-    directory whose files the outer index still tracks, so the two conditions
-    (tracked at snapshot, opaque at verify) do not co-occur in today's git. The
-    classifier is therefore exercised directly rather than through a scenario
-    that quietly stops reproducing.
+    Declarations prevent false restores; the classifier must also avoid false
+    added findings. Exercise it directly: git normally refuses to collapse a
+    subtree whose files remain in the outer index.
     """
 
     def setUp(self):
@@ -1678,21 +1539,11 @@ class TestASubtreeBecomingOpaqueInventsNothing(unittest.TestCase):
 
 
 class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
-    """r3-B1: the fail-open invariant, asserted over the enumerated set.
+    """Unreadable out-of-scope entries must never produce clean reports.
 
-    Four doors on this class were closed one at a time (git unanswerable,
-    nested repositories, registered submodules, unreadable files) and a fifth
-    was still open: `_walk` dropped anything that was neither
-    `is_dir(follow_symlinks=False)` nor `is_file()`, which is every symlinked
-    directory, every dangling symlink, and every socket and fifo, with no
-    record anywhere. So this does not test the symlink example. It enumerates
-    every way an entry under the watch root can fail to be read or classified
-    -- cases 4 to 8 of the module docstring -- and asserts the invariant the
-    docstring states over the whole set: an out-of-scope path the guard could
-    not read never comes back `clean`.
-
-    Each case builds the same tree shape: an in-scope `hone/` the run is
-    allowed to touch, and one awkward entry beside it, out of scope.
+    Cover listing failures, unknown entry types, dangling symlinks, special
+    files, and loops (module cases 4-8). Each fixture has an in-scope hone/
+    directory and one problematic out-of-scope entry.
     """
 
     def setUp(self):
@@ -1710,7 +1561,7 @@ class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
         state = check_scope.snapshot_state(self.root)
         return verify(self.root, state, ["hone"], declared=NOTHING)
 
-    # -- case 4: a directory that cannot be listed ------------------------
+    # Case 4: directory listing failure.
     def test_an_unlistable_directory_is_recorded(self):
         if os.geteuid() == 0:  # pragma: no cover - root reads anything
             self.skipTest("running as root; chmod 000 does not deny reads")
@@ -1723,7 +1574,7 @@ class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
         self.assertTrue(any("shut" in reason
                             for reason in report["not_measurable_reasons"]))
 
-    # -- case 5: an entry whose type cannot be determined -----------------
+    # Case 5: unknown entry type.
     def test_an_unclassifiable_entry_is_recorded(self):
         real_scandir = os.scandir
 
@@ -1752,7 +1603,7 @@ class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
         self.assertTrue(any("flaky.md" in reason
                             for reason in report["not_measurable_reasons"]))
 
-    # -- case 6: a dangling symlink --------------------------------------
+    # Case 6: dangling symlink.
     def test_a_dangling_symlink_is_recorded(self):
         (self.root / "gone.md").symlink_to(self.root / "never-existed.md")
         report = self._verdict()
@@ -1760,7 +1611,7 @@ class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
         self.assertTrue(any("gone.md" in reason
                             for reason in report["not_measurable_reasons"]))
 
-    # -- case 7: an entry that is not a regular file ----------------------
+    # Case 7: non-regular file.
     def test_a_fifo_is_recorded(self):
         if not hasattr(os, "mkfifo"):  # pragma: no cover - POSIX only
             self.skipTest("os.mkfifo unavailable")
@@ -1770,7 +1621,7 @@ class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
         self.assertTrue(any("pipe" in reason
                             for reason in report["not_measurable_reasons"]))
 
-    # -- case 8: a symlinked directory looping onto its own descent -------
+    # Case 8: directory symlink loop.
     def test_a_symlink_loop_is_recorded_not_followed(self):
         (self.root / "loop").symlink_to(self.root)
         report = self._verdict()
@@ -1778,15 +1629,9 @@ class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
         self.assertTrue(any("loop" in reason
                             for reason in report["not_measurable_reasons"]))
 
-    # -- the case that is deliberately NOT unmeasurable -------------------
+    # Control: readable directory symlinks are measurable.
     def test_a_symlinked_directory_is_walked_rather_than_recorded(self):
-        """The reported case, and the reason the fix is not "record it too".
-
-        `~/.claude/skills/{name}` is routinely a symlink into a repository
-        checkout, so declining to read symlinked directories would report
-        `not_measurable` on every ordinary walk-mode run. They are followed
-        instead, which is what makes the change inside one visible at all.
-        """
+        """Follow installed-directory symlinks so their contents remain measurable."""
         target = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, target, True)
         (target / "f.txt").write_text("v1\n")
@@ -1821,14 +1666,14 @@ class TestNoPathLeavesTheWalkUnrecorded(unittest.TestCase):
         self.assertIn("two/f.txt", state["files"])
 
     def test_a_readable_tree_still_verifies_clean(self):
-        """The control. The invariant must not be satisfied by never saying clean."""
+        """Control: complete measurable coverage can still pass."""
         report = self._verdict()
         self.assertEqual(report["verdict"], "clean")
         self.assertEqual(report["not_measurable_reasons"], [])
 
 
 class TestUnmeasurableRecordsSurviveTheManifest(unittest.TestCase):
-    """The record has to reach --verify, which reads it back out of JSON."""
+    """Preserve unreadable-path records through snapshot JSON and verify."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
@@ -1868,13 +1713,8 @@ class TestUnmeasurableRecordsSurviveTheManifest(unittest.TestCase):
 
 
 class TestCommandScopeAdmitsItsValidator(unittest.TestCase):
-    """r3-B2: Phase 2 Step 6 must not write a file Step 6a orders deleted.
-
-    Step 6 mandates a companion `validate_handoffs.py` and mandates declaring
-    every file written, including that one. For a command the only in-scope
-    path was the command file itself, so the validator was declared and out of
-    scope, which is the definition of a real violation: Step 6a ordered the
-    run to delete the validator it had just been required to create, and halt.
+    """Permit a command's generated validate_handoffs.py companion so declaring
+    that required file does not trigger a scope violation.
     """
 
     def test_the_validator_sibling_is_in_scope_for_a_command(self):
@@ -1946,22 +1786,11 @@ class TestCommandScopeAdmitsItsValidator(unittest.TestCase):
 
 
 class TestASymlinkedArtifactDirectoryIsUsable(unittest.TestCase):
-    """The ordinary `~/.claude/skills` layout, root and scope passed in.
+    """Test the walk and _under_root with an explicitly supplied watch root.
 
-    These pin `_under_root` and the walk against a symlinked artifact
-    directory. They are NOT end to end: the root arrives by hand, so they say
-    nothing about where the root comes from, which is what
-    `TestTheSymlinkedInstallLayoutEndToEnd` below is for.
-
-    `~/.claude/skills/{name}` is normally a symlink into a repository
-    checkout. Walking follows it, so the detected paths are spelled through
-    the symlink (`hone/SKILL.md`). A declaration is spelled the same way,
-    because that is the path the executor edited -- but `realpath` on it lands
-    inside the checkout, outside the watch root entirely. Resolving both ends
-    with `realpath` therefore reports every declared path as outside the root
-    and every run as `not_measurable`; resolving neither reintroduces the
-    `/tmp` against `/private/tmp` mismatch. `_under_root` resolves as far as
-    the root and no further.
+    Preserve the installed symlink's path while resolving root aliases such as
+    /tmp and /private/tmp. Root derivation is covered separately by
+    TestTheSymlinkedInstallLayoutEndToEnd.
     """
 
     def setUp(self):
@@ -1995,22 +1824,10 @@ class TestASymlinkedArtifactDirectoryIsUsable(unittest.TestCase):
 
 
 class TestTheSymlinkedInstallLayoutEndToEnd(unittest.TestCase):
-    """r4-B1: the CLI derives the watch root from the install directory.
+    """Derive the watch from the install directory, not a symlink's checkout.
 
-    `~/.claude/skills/{name}` symlinked into a checkout is the layout this
-    module is written around, and `main()` resolved the artifact with
-    `realpath` before deriving anything from it. The root then came from the
-    symlink *target*: `install_root` answered `<checkout>/skills`, `derive_root`
-    widened to the checkout, and the watched tree was the repository the skill
-    came from rather than the directory the skill is installed in. An edit to
-    the sibling `~/.claude/skills/other/SKILL.md` -- the collateral damage the
-    module docstring names as this guard's purpose -- verified `clean`,
-    exit 0.
-
-    The class this replaces passed the root in by hand while calling itself
-    end to end, which is how the bug survived three review rounds. Everything
-    here goes through the CLI with `--artifact`/`--type` and asserts on what
-    the CLI wrote.
+    Use the CLI with --artifact/--type and inspect its output; supplying a root
+    manually cannot catch derivation that hides sibling installations.
     """
 
     def setUp(self):
@@ -2083,11 +1900,7 @@ class TestTheSymlinkedInstallLayoutEndToEnd(unittest.TestCase):
         self.assertEqual(report["declared_outside_root"], [])
 
     def test_the_checkout_the_symlink_points_into_is_not_watched(self):
-        """The far side of the symlink is another tree, not this run's watch.
-
-        Widening to it was the bug. The artifact's own directory is still
-        watched -- through the symlink, where the run reaches it.
-        """
+        """Watch the artifact through its install symlink, not unrelated checkout files."""
         self.assertEqual(self._snapshot().returncode, 0)
         (self.checkout / "unrelated.md").write_text("checkout file v2\n")
         run = self._verify()
@@ -2096,14 +1909,8 @@ class TestTheSymlinkedInstallLayoutEndToEnd(unittest.TestCase):
 
 
 class TestTheBudgetIsSpentInGitModeToo(unittest.TestCase):
-    """r4-N1: `--max-files` used to be inert on any root git could answer for.
-
-    Only the walk branch checked it, so a repository root was hashed without
-    limit however small the budget was, while the same budget still went to
-    `_hash_opaque` and to verify. `--max-files 0` therefore produced a
-    snapshot of the whole outer tree and a `not_measurable` verdict for any
-    nested subtree in it, and the `except TooManyFiles` handler behind the
-    help text's promised bail could never fire.
+    """Enforce --max-files on git-mode hashing as well as walks and opaque
+    subtrees; an oversized outer snapshot must fail before writing its manifest.
     """
 
     def setUp(self):

@@ -14,10 +14,8 @@ from pathlib import Path
 PYTHON = sys.executable
 SCRIPT = str(Path(__file__).parent / "validate_eval_criteria.py")
 
-# Exit codes. Warnings do not flip the exit code: the Step 5 -> Step 6 gate
-# accepts warnings, and the handoff field validation_passed is defined as
-# exit 0 — a warnings-only run must satisfy both. Tests that expect a
-# warning therefore also assert on the WARNINGS block in stdout.
+# Warnings preserve exit 0 and validation_passed. Assert the WARNINGS block
+# separately so passing validation does not hide missing diagnostics.
 EXIT_CLEAN = 0
 EXIT_WARNINGS = 0
 EXIT_ERRORS = 2
@@ -227,9 +225,7 @@ class TestAuditMode(unittest.TestCase):
         self.assertIsInstance(payload["findings"], list)
 
     def test_audit_missing_runner_context_still_runs_repair_checks(self):
-        """A schema failure must not short-circuit the audit: missing
-        runner_context is exactly what check_runner_context_present exists to
-        catch, so the audit reports it instead of returning an empty error."""
+        """Schema failures must still reach per-test audit checks and repair suggestions."""
         tc = _make_tc()
         del tc["runner_context"]
         _, payload = self._audit({"test_cases": [tc]})
@@ -249,9 +245,7 @@ class TestAuditMode(unittest.TestCase):
         self.assertGreaterEqual(payload["fixable_count"], 1)
 
     def test_audit_wrong_typed_fields_do_not_crash(self):
-        """Audit runs on schema-invalid files by design; wrong-typed (not
-        just null) fields must degrade to findings, never a traceback that
-        leaves the hone executor zero bytes of JSON on stdout."""
+        """Wrongly typed audit inputs must produce findings rather than a traceback."""
         tc = _make_tc()
         tc["runner_context"] = ["not", "a", "string"]
         tc["prompt"] = 42
@@ -265,9 +259,7 @@ class TestAuditMode(unittest.TestCase):
         self.assertIn("missing_allowed_tools", issues)
 
     def test_audit_mixed_type_ids_do_not_crash(self):
-        """Two warning-drawing test cases whose ids are an int and a str
-        crashed sorted(unfixable_test_ids) with TypeError (int < str),
-        exit 1 and no JSON on stdout for the criteria-audit consumer."""
+        """Mixed ID types must not crash sorting of unfixable test IDs."""
         tc_int = _make_tc(tc_id=2)
         del tc_int["runner_context"]
         tc_str = _make_tc(tc_id="b")
@@ -288,9 +280,7 @@ class TestAuditMode(unittest.TestCase):
         self.assertIn("missing_runner_context", issues)
 
     def test_audit_mixed_allowed_tools_suggests_strings_only(self):
-        """A mixed-type allowed_tools list propagated non-string junk into
-        suggested_fix; the auto-repair then wrote a file that still failed
-        the pre-launch schema gate (allowed_tools[0]: expected string)."""
+        """Suggested allowed_tools repairs must discard non-string entries."""
         tc = _make_tc(
             prompt="Run /my-skill now.", allowed_tools=[123, "Read"]
         )

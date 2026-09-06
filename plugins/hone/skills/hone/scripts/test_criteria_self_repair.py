@@ -125,12 +125,7 @@ class TestRecursiveTimeoutPattern(unittest.TestCase):
         self.assertEqual(len(out["matched"]), 0)
 
     def test_matches_floored_deterministic_score(self):
-        """A dimension-floored composite (~0.05) is a total failure and must match.
-
-        score_execution clamps every dimension to a small floor before the
-        weighted sum, so deterministic-only rounds never produce exactly 0.0;
-        an exact-zero gate made this pattern unreachable on those rounds.
-        """
+        """A floored deterministic failure (~0.05) must match without an exact-zero gate."""
         data = self._make_result(
             "TC-013b",
             score=0.05,
@@ -556,7 +551,7 @@ class TestSummaryAndMultipleResults(unittest.TestCase):
                     "agent_response": "partial response",
                     "details": {"timeout_analysis": "Duration: 5s Tool calls: 1"},
                 },
-                # passing — should be ignored
+                # Passing; ignore.
                 {
                     "test_id": "TC-063",
                     "score": 0.9,
@@ -633,12 +628,7 @@ class TestSummaryAndMultipleResults(unittest.TestCase):
         self.assertEqual(out["matched"][0]["test_id"], "MY-CUSTOM-ID")
 
     def test_final_score_fallback_reaches_conditions(self):
-        """final_score-only results must match patterns like score-keyed ones.
-
-        match_patterns normalizes the score key once, so condition functions
-        (which read result['score']) see the final_score fallback instead of
-        defaulting to 1.0 and bailing.
-        """
+        """Normalize final_score into the score field read by pattern conditions."""
         data = {
             "results": [
                 {
@@ -751,9 +741,7 @@ class TestScriptErrorHandling(unittest.TestCase):
 
 
 class TestDeterministicScoresFallback(unittest.TestCase):
-    """Deterministic-only rounds carry no per-test score in results.json;
-    the repair must read deterministic_scores.json instead of defaulting
-    scoreless tests to a passing 1.0."""
+    """Read sibling composites when raw results have no judge score."""
 
     def _scoreless_results(self):
         return {
@@ -815,9 +803,7 @@ class TestDeterministicScoresFallback(unittest.TestCase):
 
 
 class TestInconclusiveTestsAreNotFailures(unittest.TestCase):
-    """score_execution marks every knowledge-extraction test inconclusive
-    unconditionally, so a test that was never measured used to arrive here
-    scoring 0.0 and get reported as a failure needing human review."""
+    """Unmeasured tests must not become zero-score failures requiring review."""
 
     def _run(self, results, per_test):
         with tempfile.TemporaryDirectory() as tmp:
@@ -873,9 +859,7 @@ class TestInconclusiveTestsAreNotFailures(unittest.TestCase):
 
 
 class TestNonNumericScoreNormalization(unittest.TestCase):
-    """results.json is assembled by an LLM subagent, so a stringified score is
-    a real shape. resolve_score already treats it as absent; leaving the raw
-    value on the result let it reach the pattern conditions and TypeError."""
+    """Normalize invalid score values before pattern conditions compare them."""
 
     def test_stringified_score_does_not_crash(self):
         output = run_script(
@@ -942,9 +926,7 @@ class TestNonNumericScoreNormalization(unittest.TestCase):
 
 
 class TestDurationTypeSlop(unittest.TestCase):
-    """results.json is assembled by an LLM subagent, so duration_seconds
-    arrives stringified. It used to raise TypeError out of match_patterns
-    before it returned, taking every other test's repair down with it."""
+    """Malformed durations must not abort repair for the other tests."""
 
     def _data(self, duration, timeout_analysis):
         return {
