@@ -26,7 +26,7 @@
     {
       "name": "hone",
       "source": "./plugins/hone",
-      "description": "Grade your own skills, commands, hooks, and scripts against an eval suite, fix what the evidence says is broken, then re-score to prove it held. Auto-reverts a round that makes things worse."
+      "description": "Improve your own skills, commands, hooks, and scripts using actual task outcomes. Compare candidates and model migrations, preserve user requirements, and simplify instructions with evidence."
     }
   ]
 }

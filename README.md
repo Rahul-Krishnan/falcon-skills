@@ -149,45 +149,57 @@ It reads instruction files, not code. It's not a linter or a code reviewer.
 
 ## hone
 
-You write a skill, it works, and then it quietly rots: a script it calls gets renamed, a rule it depends on changes, a phase stops firing. You find out when it misbehaves. hone grades one of your own artifacts against an eval suite, fixes what the evidence says is broken, and re-scores to prove the fix held.
-
-Works on skills, commands, hooks, and scripts. Skills and commands are judged by an executor-plus-judge eval; hooks and scripts are tested by direct invocation with input/output pairs, because a hook either fires on the right input or it doesn't.
+Hone improves an existing skill, command, hook, or script by checking what it
+produces on representative tasks. It preserves the user's requirements, compares a
+candidate with the current version, and removes instructions that no longer help.
+Model migrations can also compare each target with no skill loaded.
 
 ### What it does
 
-- Runs a deterministic structural audit over 14 pillars (typed handoffs, gate events, state persistence, security, spec compliance), scoped by artifact complexity so a 40-line hook isn't graded like a 3-phase pipeline.
-- Validates every path, script, and skill the artifact references actually exists. Text quality can grade A while the skill calls a script you deleted.
-- Runs the eval suite, scores it deterministically, and triages each failure as a real issue, a criteria bug, or run-to-run variance.
-- Gets a second opinion from a clean-context subagent that never sees the main thread's analysis, then reconciles the two before editing anything.
-- Applies the fixes, re-runs the same suite blind, and compares per dimension. If a dimension drops more than 0.1, it resamples before believing it, and auto-reverts if the drop is real.
+- Defines outcome checks before editing, using actual output assertions and
+  independent judgment where the task needs it.
+- Separates capability advice, user preferences, and operational knowledge so a
+  simpler skill still does the job the user asked for.
+- Inspects artifacts and native execution logs. Executor-written summaries do not
+  stand in for observed tool calls, and simulations stay distinct from real runs.
+- Protects source edits and concurrent work with snapshots and a scope guard.
+- Reports improvements, regressions, unchanged results, uncertainty, and blockers
+  with evidence. It does not assign a composite grade.
 
 ### Usage
 
+```text
+/hone my-skill --auto
+/hone hook my-hook --auto
+/hone my-skill --confirm
+/hone my-skill --rounds 2
+/hone my-skill --with-baseline
+/hone my-skill --run-id migration-check
+/hone my-skill --resume /path/to/v3/state.json
 ```
-/hone my-skill --auto          # infers the type from the name
-/hone hook my-hook --auto      # explicit type when the name is ambiguous
-/hone my-skill --confirm       # approve each step instead of running unattended
-/hone my-skill --rounds 3      # up to 3 improve-then-verify cycles
-/hone my-skill --target 0.9    # stop early once the composite hits 0.9
-/hone my-skill --fix-only      # reuse the last evaluation, skip straight to fixing
-```
 
-`--auto` is fully non-interactive, so it's the mode to use when you walk away. Every run writes state to `/tmp/workflow-hone-<name>-<timestamp>.json`, keyed per run, so honing several artifacts back to back won't clobber scores.
+`--rounds` is a maximum, not a requirement to keep editing. `--rounds 0` evaluates
+without edits. `--auto` proceeds within existing authorization; it does not permit
+publication or live external side effects. `--target` was retired because legacy
+composite thresholds do not define outcome success.
 
-### When to use it
+### Evidence and compatibility
 
-- A skill has started behaving worse than it used to and you want evidence, not a guess.
-- You changed a skill and want to know whether you actually improved it.
-- You want a quality grade on an artifact before publishing it.
+Each run writes a versioned `outcome-report.json` under
+`~/skill-eval/<artifact>/<run-id>/`. Callers must read the exact run and verify its
+identity. V2 reports, caches, and interrupted states remain historical records;
+they cannot be compared with v3 outcomes or resumed into the new workflow.
 
-It only makes sense on artifacts you own and can edit. It is not a code reviewer: it grades the instruction file and its bundled scripts, not your application code.
+Hone currently orchestrates through Claude Code. Evaluating another model requires
+an available harness and permissions for that target. The report identifies actual
+models and configurations tested, missing evidence, and whether results came from
+simulation or execution. A small suite can verify a specific repair without proving
+that a skill is universally better or unnecessary.
 
-### Limitations
+Existing Python scorers are retained for historical consumers, and their interfaces
+are unchanged. The live workflow uses the phase references and outcome checks,
+not the legacy enrichment, process-compliance composite, or grade-driven loop.
 
-- One eval round spawns a subagent per test case, so a 12-case suite is not cheap and not fast. `--rounds 3` triples that.
-- Scores move between runs on anything that depends on tool availability. That's why the regression check resamples instead of reverting on a single sample, but it also means small deltas are noise.
-- The improvement preferences encode opinions (parallelism over token thrift, latency over cost, gates only where a workflow runs unattended). If you disagree with those, edit the preferences list in `SKILL.md`, since it is what drives every fix.
-- The bundled scripts are stdlib-only Python 3 with no install step, but Python 3 has to be on PATH.
 
 ## Plugin layout
 
@@ -225,12 +237,16 @@ which is more than any of these need.
 
 **`eval_criteria.json`** needs `project`, a `skill_name` matching the plugin, and a
 non-empty `test_cases` list where each case has `id`, `name`, `prompt`, and `checks`.
-`required_present` and `required_absent` are per-case assertions, so add them where a case
-has something to assert and leave them off where it does not.
+Hone uses `schema_version: 3` and `measurement: "outcomes"`. Each case declares
+`mode` as `simulation` or `execution`; each check has an `id`, `description`,
+`method` (`artifact`, `judgment`, or `trace`), and boolean `required`. Case IDs are
+unique, as are check IDs within a case. Simulation context starts with
+`SIMULATION MODE: do not issue real tool calls.` V3 has no weighted `dimensions`.
 
-It also needs a `dimensions` block with exactly these five keys, weighted to sum to 1.0:
-`task_completion`, `invocation`, `efficiency`, `best_practices`, `business_impact`. The
-key set is fixed, so a block that sums to 1.0 under different names is still rejected.
+Unversioned suites retain their legacy contract: a `dimensions` block with exactly
+`task_completion`, `invocation`, `efficiency`, `best_practices`, and `business_impact`,
+weighted to sum to 1.0. Their optional `required_present` and `required_absent` lists
+remain per-case assertions. These legacy measurements are not v3 outcomes.
 
 **`marketplace.json`** at the repo root must list every plugin, and every plugin it lists
 must exist. Each entry needs a `name`, a `description`, and a `source` path that resolves
