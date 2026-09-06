@@ -19,3 +19,5 @@ jobs:
       # so they run through unittest discover rather than a second runner.
       - name: Run hone script tests
         run: python3 -m unittest discover -s plugins/hone/skills/hone/scripts -p 'test_*.py'
+      - name: Test hone outcome verifier controls
+        run: python3 -m unittest discover -s plugins/hone/skills/hone/evals/evaluator -p 'test_*.py'

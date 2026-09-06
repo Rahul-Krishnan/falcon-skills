@@ -258,8 +258,74 @@ def check_evals(skill_dir, name, v):
     if data.get("skill_name") != name:
         v.add(evals, f"skill_name '{data.get('skill_name')}' does not match plugin '{name}'")
 
+    if "schema_version" in data:
+        if type(data["schema_version"]) is not int or data["schema_version"] != 3:
+            v.add(evals, "unsupported 'schema_version'; expected integer 3 or an unversioned legacy suite")
+            return
+        check_outcome_suite(evals, data, v)
+        return
+
     check_test_cases(evals, data.get("test_cases"), v)
     check_dimensions(evals, data.get("dimensions"), v)
+
+
+def check_outcome_suite(evals, data, v):
+    """Validate outcome assertions without inventing weights or a quality score."""
+    if data.get("measurement") != "outcomes":
+        v.add(evals, "'measurement' must be 'outcomes'")
+    if "dimensions" in data:
+        v.add(evals, "'dimensions' is not allowed in an outcome suite")
+
+    cases = data.get("test_cases")
+    if not isinstance(cases, list) or not cases:
+        v.add(evals, "'test_cases' must be a nonempty list")
+        return
+
+    case_ids = set()
+    for index, case in enumerate(cases):
+        context = f"test case at index {index}"
+        if not isinstance(case, dict):
+            v.add(evals, f"{context} must be an object")
+            continue
+        for field in ("id", "name", "prompt"):
+            value = case.get(field)
+            if not isinstance(value, str) or not value.strip():
+                v.add(evals, f"{context}: '{field}' must be a nonempty string")
+            elif field == "id":
+                if value in case_ids:
+                    v.add(evals, f"duplicate test case id '{value}'")
+                case_ids.add(value)
+
+        if case.get("mode") not in ("simulation", "execution"):
+            v.add(evals, f"{context}: 'mode' must be 'simulation' or 'execution'")
+        elif case["mode"] == "simulation":
+            prefix = "SIMULATION MODE: do not issue real tool calls."
+            runner_context = case.get("runner_context")
+            if not isinstance(runner_context, str) or not runner_context.startswith(prefix):
+                v.add(evals, f"{context}: 'runner_context' must start with '{prefix}'")
+
+        checks = case.get("checks")
+        if not isinstance(checks, list) or not checks:
+            v.add(evals, f"{context}: 'checks' must be a nonempty list")
+            continue
+        check_ids = set()
+        for check_index, check in enumerate(checks):
+            check_context = f"{context}, check at index {check_index}"
+            if not isinstance(check, dict):
+                v.add(evals, f"{check_context} must be an object")
+                continue
+            for field in ("id", "description"):
+                value = check.get(field)
+                if not isinstance(value, str) or not value.strip():
+                    v.add(evals, f"{check_context}: '{field}' must be a nonempty string")
+                elif field == "id":
+                    if value in check_ids:
+                        v.add(evals, f"{context}: duplicate check id '{value}'")
+                    check_ids.add(value)
+            if check.get("method") not in ("artifact", "judgment", "trace"):
+                v.add(evals, f"{check_context}: 'method' must be 'artifact', 'judgment', or 'trace'")
+            if not isinstance(check.get("required"), bool):
+                v.add(evals, f"{check_context}: 'required' must be a boolean")
 
 
 def check_test_cases(evals, test_cases, v):
