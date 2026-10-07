@@ -7,7 +7,8 @@ The canonical layout:
       .claude-plugin/plugin.json         required
       skills/<name>/                     required, dir name == plugin name
         SKILL.md                         required
-        evals/eval_criteria.json         required
+        <name>-evals/eval_criteria.json  required eval source (legacy: evals/eval_criteria.json)
+        evals/                           generated native cases (claude plugin eval)
         references/                      optional
 
 `references/` is deliberately unchecked. Only hindsight has content worth splitting
@@ -230,22 +231,30 @@ def check_skill_md(skill_dir, name, v):
             "decide whether to invoke this skill.",
         )
 
-    if "metadata.user-invocable" not in fields:
-        v.add(skill_md, "frontmatter missing 'metadata.user-invocable'")
-    if not fields.get("metadata.allowed-tools"):
+    # Claude Code reads user-invocable, allowed-tools and argument-hint only at the top
+    # level; nested under metadata they are inert. The metadata form is still accepted
+    # so plugins written to the generic Agent Skills spec keep validating.
+    if "user-invocable" not in fields and "metadata.user-invocable" not in fields:
+        v.add(skill_md, "frontmatter missing 'user-invocable'")
+    if not fields.get("allowed-tools") and not fields.get("metadata.allowed-tools"):
         v.add(
             skill_md,
-            "frontmatter missing or empty 'metadata.allowed-tools'; without it the "
+            "frontmatter missing or empty 'allowed-tools'; without it the "
             "skill inherits the full default toolset",
         )
-    # metadata.argument-hint is optional: only skills that take arguments need one.
+    # argument-hint is optional: only skills that take arguments need one.
 
 
 def check_evals(skill_dir, name, v):
-    evals = skill_dir / "evals" / "eval_criteria.json"
+    # The source lives in <name>-evals/; evals/ holds the native cases generated from it.
+    # Older skills keep the source directly in evals/, which is still accepted.
+    evals = skill_dir / f"{name}-evals" / "eval_criteria.json"
     if not evals.is_file():
-        v.add(evals, "missing (every skill needs an eval suite)")
-        return
+        legacy = skill_dir / "evals" / "eval_criteria.json"
+        if not legacy.is_file():
+            v.add(evals, "missing (every skill needs an eval suite)")
+            return
+        evals = legacy
     data = load_json(evals, v)
     if data is None:
         return

@@ -3,8 +3,8 @@ name: hindsight
 description: "Find recurring friction, mistakes, and workflow improvements across Claude Code sessions. Use for cross-session pattern reviews or /hindsight. For single-session questions, read that transcript directly or use session-history if installed."
 metadata:
   user-invocable: true
-  argument-hint: "[window=7d] [--hype|--roast] [--human|--ai] [--viz] [--auto]"
-  allowed-tools: "Task, Read, Glob, Grep, Bash(mkdir:*, cat:*, ls:*, touch:*, echo:*, python3:*, wait:*, which:*, cp:*, rm:*, tail:*, wc:*), Write, TodoWrite, AskUserQuestion"
+  argument-hint: "[window=7d] [--hype|--roast] [--human|--ai] [--viz] [--auto] [--rules-only]"
+  allowed-tools: "Task, Read, Glob, Grep, Bash(mkdir:*, cat:*, ls:*, touch:*, echo:*, python3:*, wait:*, which:*, cp:*, trash:*, tail:*, wc:*), Write, TodoWrite, AskUserQuestion"
 ---
 
 # /hindsight
@@ -19,6 +19,7 @@ Invoked via `/hindsight`. Optional arguments:
 - `window=<duration>`: eg `window=7d`, `window=3sessions` (default: max(since last hindsight, last 14 days), or last 14 days if no prior hindsight)
 - `--viz`: after wrap-up, generate a visual HTML report (Organic Earth style) saved to your local reports directory. Off by default. When active, print at Phase 0: "Visual report will be saved locally at the end." The `--viz` flag does NOT affect Phases 0-3e; it only triggers Phase 3f after everything else is done.
 - `--auto`: non-interactive automation mode. Skips Phase 3c (AskUserQuestion) and Phase 3d (user-driven finding review). Instead: auto-applies all LOW/MED NEEDS_APPROVAL findings without prompting; logs HIGH/CRITICAL NEEDS_APPROVAL findings to `~/.claude/state/overnight-flags.md` for human review; writes the full report automatically; exits. Use when invoked from rem-sleep or other automated pipelines where no user is present.
+- `--rules-only`: with `--auto`, narrows what gets auto-applied to rule additions and updates in the Falcon personality files (`~/Projects/falcon/personality/` MEMORY.md, ROUTING.md, SOUL.md). Every other LOW/MED NEEDS_APPROVAL finding (skill or code edits, settings, other files) is logged to overnight-flags instead of applied. rem-sleep passes this. Ignored without `--auto`.
 
 ### Tone Modes
 
@@ -54,6 +55,7 @@ Parse into:
   focus       = "--human" | "--ai" | null (default: both)
   viz         = true if "--viz" present, else false
   auto        = true if "--auto" present, else false
+  rules_only  = true if "--rules-only" present AND auto, else false
 
 Examples:
   "/hindsight"                       → window=null, tone=null, focus=null, viz=false, auto=false
@@ -186,6 +188,7 @@ setup_context: {
   fingerprint_count: number,
   session_count: number,
   auto_mode: boolean,
+  rules_only: boolean,
   viz_mode: boolean,
   tone: "neutral" | "roast" | "hype",
   focus: "both" | "human" | "ai"
@@ -194,7 +197,7 @@ setup_context: {
 
 Launch 3 subagents in parallel using the Task tool. Each outputs structured JSON findings.
 
-Use `subagent_type: "general-purpose"`, `model: "sonnet"`, and `max_turns: 20` for all three agents. Substitute the Phase 0 window, parser mode, and taxonomy into each prompt. Launch all three in one message with `run_in_background: true`.
+Use `subagent_type: "general-purpose"` and the inherited session model for all three agents. Their classification and severity work requires judgment; reduce reasoning effort rather than model tier to lower cost. Substitute the Phase 0 window, parser mode, and taxonomy into each prompt. Launch all three in one message so they run concurrently.
 
 Pass `setup_context.unresolved_findings` to the Transcript Scanner. It must check for recurrence and return matching patterns under the same `category` key with current-window evidence for Phase 2 carry-forward matching.
 
@@ -241,11 +244,11 @@ After all subagents return and pass validation, synthesize their outputs:
    - Auto-apply tier: AUTO_APPLY (internal skill state only), NEEDS_APPROVAL (any user file/memory), DISCUSS (ambiguous)
    - Alternatives with pros/cons
 10. **Promote recurring corrections (3+ threshold):** For any Memory Auditor finding tagged as a promotion candidate (3+ occurrences of the same correction topic), generate a concrete promotion action:
-   - Draft the rule text for the target file (your CLAUDE.md at user or project scope, or a specific skill/command)
+   - Draft the rule text for the target file the Memory Auditor named (a Falcon personality file in `~/Projects/falcon/personality/`: MEMORY.md for behavioral rules and universal overrides, ROUTING.md for workflow/formatting corrections, SOUL.md for self-awareness; or a specific skill/command)
    - Set auto-apply tier to NEEDS_APPROVAL (writes to user files)
    - Include the memory IDs to deduplicate/delete after promotion (the individual corrections become redundant once the pattern is codified)
    - Present in Phase 3 with a distinct `[PROMOTE]` tag so promotions are visually distinct from regular findings
-11. **Execute AUTO_APPLY** actions (internal state only: rotate old log files, clean temp data from `/tmp/hindsight_*` if present from fallback mode, delete fingerprint files older than 90 days from `~/.claude/hindsight/fingerprints/`).
+11. **Execute AUTO_APPLY** actions (internal state only: rotate old log files, clean temp data from `/tmp/hindsight_*` if present from fallback mode, remove fingerprint files older than 90 days from `~/.claude/hindsight/fingerprints/`). Remove files with `trash <path>`, never `rm`, and list the trashed paths in the changelog.
 
 **Handoff interface (Phase 2 → Phase 3):**
 ```
@@ -330,7 +333,7 @@ Format rules:
 
 **If `auto=true` (--auto flag set):** Skip AskUserQuestion and the finding detail flow entirely. Execute the following instead:
 
-1. Auto-apply all LOW and MEDIUM severity NEEDS_APPROVAL findings without prompting. For each applied finding, log: `[AUTO-APPLIED] #N [SEV] <category>: <action taken>`.
+1. Auto-apply all LOW and MEDIUM severity NEEDS_APPROVAL findings without prompting. If `rules_only` is true (read it from state), apply only those whose action adds or updates a rule in Falcon MEMORY.md, ROUTING.md or SOUL.md, and append the rest to the `## Hindsight` section as `- [ ] [SEV] <category>: <pattern> — <proposed_action>` (step 2's format). Before the first auto-edit to any file, copy it to `~/.claude/hindsight/backups/YYYY-MM-DD/`. For each applied finding, log: `[AUTO-APPLIED] #N [SEV] <category>: <action taken>`.
 2. Collect all HIGH and CRITICAL severity NEEDS_APPROVAL findings. Append them to `~/.claude/state/overnight-flags.md` under a `## Hindsight` section (create the section if not present; do not overwrite existing content in the file: append only):
    ```markdown
    ## Hindsight
@@ -339,7 +342,7 @@ Format rules:
    ```
 3. Append all DISCUSS-tier findings, regardless of severity, to the same section as `- [ ] [DISCUSS] <category>: <pattern> — <proposed_action>`. Set their `disposition` to `"discussed"` so they remain queued for human review.
 4. Write the full report to `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.md` (same as the Level 3 "Full report" path in 3e). Do not wait for user input.
-5. Proceed directly to 3e wrap-up with `applied = <count of auto-applied>`, `skipped = 0`, `discussed = <count of DISCUSS-tier plus HIGH/CRIT findings flagged to overnight-flags.md>`.
+5. Proceed directly to 3e wrap-up with `applied = <count of auto-applied>`, `skipped = 0`, `discussed = <count of every finding flagged to overnight-flags.md>`.
 
 **If `auto=false` (interactive mode, default):** Follow the full interactive flow below.
 
@@ -481,6 +484,10 @@ After context compaction:
 3. Re-read persisted intermediate results from `/tmp/hindsight_*.json` (fingerprints, sessions, memory, workspace manifest)
 4. Re-read `~/.claude/hindsight/last-retro.json` from disk, even if it was loaded before compaction.
 5. Skip completed phases and resume the first pending or in-progress step.
+
+Before context fills, persist the phase handoff and reset at a phase boundary.
+
+Persist findings, decisions, and rejected options as you reach them. After resuming, read those files; summaries retain state and paths but may omit or distort conclusions.
 
 ## Privacy Rules
 

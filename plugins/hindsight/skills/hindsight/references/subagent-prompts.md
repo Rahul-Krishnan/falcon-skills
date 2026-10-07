@@ -35,15 +35,11 @@ json.dump(fps, sys.stdout)
 import os, json
 ws = {}
 # Falcon personality workspace
-for n in ['MEMORY.md','ROUTING.md','PROJECTS.md','SOUL.md','IDENTITY.md','PEOPLE.md']:
+for n in ['MEMORY.md','ROUTING.md','USER.md','TASTE.md','SOUL.md','IDENTITY.md']:
     p = os.path.expanduser(f'~/Projects/falcon/personality/{n}')
     if os.path.isfile(p): ws[n] = p
-    # Fall back to the smithing directory for PROJECTS.md.
-    if n == 'PROJECTS.md':
-        p2 = os.path.expanduser('~/Projects/falcon/.smithing/PROJECTS.md')
-        if os.path.isfile(p2) and n not in ws: ws[n] = p2
 # Generic CC config
-for p in [os.path.expanduser('~/.claude/CLAUDE.md'), os.path.expanduser('~/.llms/rules/personal.md')]:
+for p in [os.path.expanduser('~/.claude/CLAUDE.md'), os.path.expanduser('~/AGENTS.md')]:
     if os.path.isfile(p): ws[os.path.basename(p)] = p
 # Project-level
 for p in ['CLAUDE.md', '.claude/CLAUDE.md']:
@@ -181,7 +177,7 @@ Check each prior pattern for recurrence. Report matches under the same taxonomy 
        ]
      }
 
-  PRIVACY: See the Privacy Rules section at the end of this skill file. Apply those rules to all findings output.
+  PRIVACY RULES: [paste the Privacy Rules section from SKILL.md]. Apply them to all findings output.
 ```
 
 ## Subagent 2: Memory Auditor
@@ -242,10 +238,9 @@ prompt: |
      First, try reading /tmp/hindsight_ws_manifest.json (created during parallel collection).
      If it exists, it maps filename → path for all discovered config files.
      If it doesn't exist, scan these locations manually (read in parallel, skip missing):
-     - ~/Projects/falcon/personality/ (MEMORY.md, ROUTING.md, SOUL.md, IDENTITY.md)
-     - ~/Projects/falcon/.smithing/PROJECTS.md
+     - ~/Projects/falcon/personality/ (MEMORY.md, ROUTING.md, USER.md, TASTE.md, SOUL.md, IDENTITY.md)
+     - ~/AGENTS.md
      - ~/.claude/CLAUDE.md
-     - ~/.llms/rules/personal.md
      - CLAUDE.md or .claude/CLAUDE.md in current directory
      If no files exist, note it and continue.
 

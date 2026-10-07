@@ -24,7 +24,7 @@ skill-name/
 | `metadata` | No | Arbitrary key-value map (string→string). For custom fields. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools. Experimental. |
 
-Move non-spec frontmatter fields to `metadata`; root-level custom fields violate the spec.
+Move non-spec frontmatter fields to `metadata`; root-level custom fields violate the spec. Exception: Claude Code reads `user-invocable`, `argument-hint`, `allowed-tools`, `model` and `effort` only at the root, so keep those at the root for Claude Code skills. Nested under `metadata` they do nothing.
 
 ## Description Best Practices
 

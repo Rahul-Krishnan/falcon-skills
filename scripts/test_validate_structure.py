@@ -109,11 +109,26 @@ metadata:
 ---
 """
 
+# Claude Code reads these fields only at the top level, so that form must validate.
+SKILL_TOP_LEVEL_FIELDS = """---
+name: demo
+description: "A demo skill."
+user-invocable: true
+allowed-tools: "Read, Write"
+---
+"""
+SKILL_TOP_LEVEL_NO_TOOLS = """---
+name: demo
+description: "A demo skill."
+user-invocable: true
+---
+"""
+
 
 def build_tree(root, skill=GOOD_SKILL, plugin=GOOD_PLUGIN, evals=GOOD_EVAL,
-               marketplace=GOOD_MARKETPLACE, skill_bytes=None):
+               marketplace=GOOD_MARKETPLACE, skill_bytes=None, evals_dir="evals"):
     skill_dir = root / "plugins" / "demo" / "skills" / "demo"
-    (skill_dir / "evals").mkdir(parents=True)
+    (skill_dir / evals_dir).mkdir(parents=True)
     (root / "plugins" / "demo" / ".claude-plugin").mkdir(parents=True)
     (root / ".claude-plugin").mkdir(parents=True)
 
@@ -122,7 +137,7 @@ def build_tree(root, skill=GOOD_SKILL, plugin=GOOD_PLUGIN, evals=GOOD_EVAL,
     else:
         (skill_dir / "SKILL.md").write_text(skill)
     (root / "plugins" / "demo" / ".claude-plugin" / "plugin.json").write_text(json.dumps(plugin))
-    (skill_dir / "evals" / "eval_criteria.json").write_text(json.dumps(evals))
+    (skill_dir / evals_dir / "eval_criteria.json").write_text(json.dumps(evals))
     (root / ".claude-plugin" / "marketplace.json").write_text(json.dumps(marketplace))
     return root
 
@@ -159,6 +174,14 @@ CASES = [
     ("allowed-tools written as a YAML list", {"skill": SKILL_TOOLS_AS_LIST}, "pass"),
     ("allowed-tools as a same-indent list, followed by a sibling key",
      {"skill": SKILL_TOOLS_AS_FLAT_LIST}, "pass"),
+
+    ("Claude Code fields at the top level", {"skill": SKILL_TOP_LEVEL_FIELDS}, "pass"),
+    ("top-level frontmatter still requires allowed-tools",
+     {"skill": SKILL_TOP_LEVEL_NO_TOOLS}, "fail", "missing or empty 'allowed-tools'"),
+    ("eval source in <name>-evals/", {"evals_dir": "demo-evals"}, "pass"),
+    ("eval source in <name>-evals/ is still validated",
+     {"evals_dir": "demo-evals", "evals": {**GOOD_EVAL, "project": ""}},
+     "fail", "missing or empty 'project'"),
 
     ("outcome execution suite needs no weighted dimensions or fixtures",
      outcome_suite(), "pass"),

@@ -210,7 +210,8 @@ plugins/<name>/
   .claude-plugin/plugin.json         required
   skills/<name>/                     required, dir name matches the plugin name
     SKILL.md                         required
-    evals/eval_criteria.json         required
+    <name>-evals/eval_criteria.json  required, the eval source you edit
+    evals/                           generated native cases for `claude plugin eval`
     references/                      optional
     scripts/                         optional
 ```
@@ -225,8 +226,10 @@ Validation section for the pattern).
 Its `name` must match the plugin directory.
 
 **`SKILL.md` frontmatter** needs `name` (matching the plugin), a `description`, and
-`metadata.user-invocable` plus `metadata.allowed-tools`. `metadata.argument-hint` is
-optional and only belongs on skills that take arguments.
+`user-invocable` plus `allowed-tools`. `argument-hint` is optional and only belongs on
+skills that take arguments. Put these three at the top level: Claude Code ignores them
+under `metadata:`. The validator still accepts the `metadata.` form from the generic
+Agent Skills spec.
 
 Write the `description` as a quoted string, never a folded block (`>`). It is the string
 the model matches on to decide whether to invoke the skill, and a block scalar quietly
@@ -235,7 +238,9 @@ inserts newlines into it.
 Declare `allowed-tools` explicitly. A skill without it inherits the full default toolset,
 which is more than any of these need.
 
-**`eval_criteria.json`** needs `project`, a `skill_name` matching the plugin, and a
+**`eval_criteria.json`** lives in `<name>-evals/` (older skills keep it directly in
+`evals/`, which still validates). `evals/` is regenerated from it, so edit the source,
+not the generated cases. The source needs `project`, a `skill_name` matching the plugin, and a
 non-empty `test_cases` list where each case has `id`, `name`, `prompt`, and `checks`.
 Hone uses `schema_version: 3` and `measurement: "outcomes"`. Each case declares
 `mode` as `simulation` or `execution`; each check has an `id`, `description`,

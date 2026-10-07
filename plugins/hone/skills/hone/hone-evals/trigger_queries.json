@@ -1,0 +1,24 @@
+{
+  "should_trigger": [
+    "evaluate my recap skill and improve it",
+    "hone the smelt skill",
+    "run a full eval cycle on my inbox-gchat hook",
+    "improve the checkpoint command",
+    "benchmark the forge command",
+    "run eval on my script and see if it can be improved",
+    "measure the quality of my multi-research skill",
+    "my hone skill needs improvement, run a full eval cycle"
+  ],
+  "should_not_trigger": [
+    "create a new skill called hone",
+    "review this diff for my PR",
+    "run tests on my code",
+    "check my context for contradictions",
+    "create a skill for managing GitHub issues",
+    "what skills do I have?",
+    "what should I build next?",
+    "run a maintenance cycle overnight"
+  ],
+  "last_accuracy": 1.0,
+  "last_tested": "2026-04-07"
+}
