@@ -1,10 +1,10 @@
 ---
 name: hone
 description: "Evaluate and improve an existing skill, command, hook, or script against real task outcomes and a fixed baseline. Preserve user preferences; simplify instructions that no longer help. Use for artifact failures, drift, or model migrations, not application code review or new artifacts."
+user-invocable: true
+argument-hint: "[<type>] <name> [--auto|--confirm] [--rounds N] [--with-baseline] [--run-id ID]"
+allowed-tools: "Task, Read, Write, Edit, Glob, Grep, Bash(python3:*, ls:*, cat:*, cp:*, mkdir:*, test:*, wc:*, date:*, grep:*, find:*, diff:*), TodoWrite, AskUserQuestion"
 metadata:
-  user-invocable: true
-  argument-hint: "[<type>] <name> [--auto|--confirm] [--rounds N] [--with-baseline] [--run-id ID]"
-  allowed-tools: "Task, Read, Write, Edit, Glob, Grep, Bash(python3:*, ls:*, cat:*, cp:*, mkdir:*, test:*, wc:*, date:*, grep:*, find:*, diff:*), TodoWrite, AskUserQuestion"
   version: "3.0"
   compatibility: "Claude Code orchestration; Python 3 for bundled checks. Other target models require an available execution harness."
 ---

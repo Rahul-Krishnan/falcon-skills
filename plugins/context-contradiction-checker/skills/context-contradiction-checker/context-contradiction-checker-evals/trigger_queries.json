@@ -1,0 +1,25 @@
+{
+  "should_trigger": [
+    "Check my CLAUDE.md files for contradictory instructions",
+    "Are there any conflicts between my hooks and CLAUDE.md rules?",
+    "Audit my Claude Code context sources for inconsistencies",
+    "Find duplicate rules across my skills and settings",
+    "Do any of my context files conflict with each other?",
+    "Check if my llms rules contradict my CLAUDE.md",
+    "Are my skills giving Claude contradictory guidance?",
+    "Review my context setup for conflicting directives"
+  ],
+  "should_not_trigger": [
+    "Lint my Python files for style issues",
+    "Check my README for consistency",
+    "Find conflicting logic in my codebase",
+    "Improve my context-contradiction-checker skill",
+    "Run tests on my hooks",
+    "What skills do I have installed?",
+    "Review my pull request for issues",
+    "Check my CLAUDE.md for typos"
+  ],
+  "last_accuracy": 1.0,
+  "last_tested": "2026-04-10",
+  "notes": "Self-assessed after description change (added anti-pattern exclusion clauses). Core trigger language unchanged. Exclusion clauses ('Do not use to analyze code files or non-instruction documentation. Not a linter or code reviewer.') improve NOT-trigger accuracy for near-miss code review and documentation queries."
+}

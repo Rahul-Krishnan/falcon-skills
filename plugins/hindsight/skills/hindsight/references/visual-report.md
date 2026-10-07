@@ -68,11 +68,11 @@ After Phase 3e writes `last-retro.json`, generate the HTML report. `--viz` autho
 
 4. **Write** to `/tmp/hindsight-report-YYYYMMDD-HHMMSS.html` (use current timestamp, distinct from `hindsight_*` cleanup glob pattern).
 
-5. **Post-write validation:** Run `tail -c 20 /tmp/hindsight-report-*.html` and verify the output contains `</html>`. If truncated, print a warning and copy the file to `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.html` instead (skip upload).
+5. **Post-write validation:** Run `tail -c 20 /tmp/hindsight-report-*.html` and verify the output contains `</html>`. If truncated, print a warning; step 6 still saves the file.
 
 6. **Save locally:**
    - Copy the report to `~/.claude/hindsight/reports/YYYY-MM-DD-hindsight.html` (use the exact filename, not a glob).
-   - Delete the `/tmp` working file once the copy is confirmed.
+   - Once the copy is confirmed, `trash` the `/tmp` working file (never `rm`).
 
 7. **Print result:** Show the local path to the user:
    ```

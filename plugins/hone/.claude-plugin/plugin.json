@@ -1,7 +1,7 @@
 {
   "name": "hone",
   "description": "Improve an existing skill, command, hook, or script using task outcomes, fixed baselines, independent artifact checks, and protected edits. Supports model migrations and instruction simplification, with explicit uncertainty instead of composite grades.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "Rahul Krishnan"
   },

@@ -1,6 +1,6 @@
 ---
 name: context-contradiction-checker
-description: "Detect contradictory, inconsistent, or duplicated instructions across all active Claude Code context sources (CLAUDE.md files, .llms/rules, skills, hooks). Use when asked to check for contradictions in context, find inconsistencies across rules, or audit Claude setup for contradictory instructions. Do not use to analyze code files or non-instruction documentation. Not a linter or code reviewer."
+description: "Detect contradictory, inconsistent, or duplicated instructions across all active Claude Code context sources (CLAUDE.md and AGENTS.md files, .claude/rules, skills, hooks). Use when asked to check for contradictions in context, find inconsistencies across rules, or audit Claude setup for contradictory instructions. Do not use to analyze code files or non-instruction documentation. Not a linter or code reviewer."
 metadata:
   user-invocable: true
   allowed-tools: "Read, Glob, Grep, Bash(echo:*, cat:*, ls:*, python3:*), Edit, Write"
@@ -98,21 +98,21 @@ The state file is the sole source of truth for `mode`, `auto`, `files_found`, `d
 
 **Produces:** `files` (list of found paths) and `directives` (list of {text, source_file, topic}).
 
-**Output constraint:** Steps 1 and 2 emit no narration. Do not narrate file reads, directive extraction, state file writes, or gate evaluations to the user. The Step 1 discovery summary below is the one exception — it is a deliverable, not narration, and you always present it. Otherwise begin output only when presenting the Step 3 findings report, a stop/error message, or the Step 4 fix menu. **Exception — compaction resume:** If context was compacted and you are resuming mid-run, first announce: `Resuming from Step [N]: [step-name] — [what was already completed per state file].` Then continue.
+**Output:** Always present the Step 1 discovery summary below; it is a deliverable. During Steps 1-2, post a one-line progress note at the start of each step and after each gate so a long scan doesn't look stalled. **Compaction resume:** If context was compacted and you are resuming mid-run, first announce: `Resuming from Step [N]: [step-name] — [what was already completed per state file].` Then continue.
 
 Scan these locations (read in parallel, skip missing):
 
 | Source Type | Paths to Check |
 |-------------|---------------|
-| Project CLAUDE.md | `./CLAUDE.md`, `./.claude/CLAUDE.md` |
+| Project CLAUDE.md | `./CLAUDE.md`, `./.claude/CLAUDE.md`, `./AGENTS.md` |
 | User CLAUDE.md | `~/.claude/CLAUDE.md` |
-| LLM Rules | `~/.llms/rules/*.md`, `./.llms/rules/*.md` |
+| Rule files | `~/.claude/rules/*.md`, `./.claude/rules/*.md` |
 | Workspace files | `~/.claude/*.md` (any other instruction files you keep there, eg `rules.md`, `memory.md`) |
 | Skills | `~/.claude/skills/*/SKILL.md`, `./.claude/skills/*/SKILL.md` |
 | Hooks | `~/.claude/hooks/*`, `./.claude/hooks/*` (hooks are often `.py` or `.js`, not just `.sh`), plus any script invoked by path from a settings file |
 | Settings | `~/.claude/settings.json`, `~/.claude/settings.local.json`, `./.claude/settings.json`, `./.claude/settings.local.json` — extract: hook definitions (what triggers each hook), allowed/denied tool patterns, and any behavioral flags |
 
-Each row maps to exactly one layer in the discovery summary below: Project + User CLAUDE.md → **CLAUDE.md hierarchy**; LLM Rules → **Rules**; Workspace files → **Workspace**; Skills → **Skills**; Hooks → **Hooks**; Settings → **Settings**. Six layers, not seven — do not invent a row.
+Each row maps to exactly one layer in the discovery summary below: Project + User CLAUDE.md → **CLAUDE.md hierarchy**; Rule files → **Rules**; Workspace files → **Workspace**; Skills → **Skills**; Hooks → **Hooks**; Settings → **Settings**. Six layers, not seven — do not invent a row.
 
 Project-level sources matter most: a project rule that overrides a user rule is where the interesting collisions live.
 

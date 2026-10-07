@@ -4,7 +4,7 @@ description: "Detect and roast AI code slop - redundant, unreadable, or unnecess
 metadata:
   user-invocable: true
   argument-hint: "[files-or-dirs] [--auto|--auto-fix] [--review]"
-  allowed-tools: "Read, Glob, Grep, Bash(git:*, npm:*, pnpm:*, yarn:*, pytest:*, go:*, cargo:*, tsc:*, npx tsc:*, ruff:*, mypy:*, rm -f /tmp/unslop-:*, cat:*, ls:*, echo:*), Edit, Write, AskUserQuestion"
+  allowed-tools: "Read, Glob, Grep, Bash(git:*, npm:*, pnpm:*, yarn:*, pytest:*, go:*, cargo:*, tsc:*, npx tsc:*, ruff:*, mypy:*, trash /tmp/unslop-:*, cat:*, ls:*, echo:*), Edit, Write, AskUserQuestion"
 ---
 
 # Unslop Code
@@ -93,7 +93,7 @@ Three content maps are recorded, and they are not interchangeable:
 - `pre_fix_content`: map of {path → content after wave 1, before wave 2}. The revert target for a failed gate.
 - `post_fix_content`: map of {path → content written at the end of wave 2}. What Step 5 compares against to detect a file that changed underneath it. It does not exist until wave 2 finishes, which is why the `fixing` rule above reverts rather than compares.
 
-Delete the state file once the run completes (final report delivered, or report-only exit) — it holds three copies of the scanned source and should not linger in a shared temp dir.
+Trash the state file once the run completes (final report delivered, or report-only exit) — it holds three copies of the scanned source and should not linger in a shared temp dir.
 
 ## Step Interfaces
 
@@ -214,9 +214,7 @@ Gate-exemption is independent of severity: an exempt CRITICAL chatbot-bleed comm
 
 ## Slop Patterns
 
-### 1. COMMENT SLOP (MAXIMUM PRIORITY)
-
-99% of AI-generated comments are garbage. Delete them all.
+### 1. COMMENT SLOP
 
 **The Rule:** If the comment just restates what the code does, DELETE IT.
 

@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .smithing/
+plugins/*/skills/*/grades/
+plugins/*/skills/*/output/
